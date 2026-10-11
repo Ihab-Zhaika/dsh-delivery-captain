@@ -1,5 +1,4 @@
 import type { Phase, Run, Task } from '../captain/types.ts';
-export declare const CAPTAIN_OPEN_EVENT = "darkingdoom:open";
 export interface CaptainOpenDetail {
     sessionId: string;
     workspace?: string;
@@ -25,9 +24,6 @@ export declare function phaseDurations(task: Pick<Task, 'phases' | 'finishedAt'>
     milliseconds: number;
 }[];
 export declare function webUrl(value: string | undefined): string | undefined;
-export declare function CaptainSurface({ openSession }: {
-    openSession: (parentId: string, childId: string) => Promise<unknown>;
-}): import("react").JSX.Element | null;
 export declare function CaptainPanel({ sessionId, workspace, onClose, openSession }: CaptainOpenDetail & {
     onClose: () => void;
     openSession: (parentId: string, childId: string) => Promise<unknown>;

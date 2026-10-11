@@ -36,7 +36,9 @@ Configure GitHub CLI authentication, or Azure CLI plus its `azure-devops` extens
 
 ## Start once
 
-Open an ordinary DSH session in your repository and click **DarKingDoom Plugin** in its header. The panel reads the session's repository on the host and automatically fills its matching remote, provider identity, remote default branch, delivery milestones and verification commands. Repository identity fields are read-only; a submitted configuration cannot redirect this session to another repository. GitHub/Azure switching discovers the matching remote and exact provider milestone names or iteration paths.
+Open an ordinary DSH session in your repository and choose **DarKingDoom Plugin** from the right sidebar's **Start** menu or the chat header. It opens as a native sidebar tab beside the chat, with **Configuration** and **Monitor** views. You can type in chat while the tab stays visible. Draft settings survive switching tabs, collapsing the sidebar and visiting another session; closing the tab discards unsaved settings but does not stop a running controller.
+
+The panel reads the session's repository on the host and automatically fills its matching remote, provider identity, remote default branch, delivery milestones and verification commands. Repository identity fields are read-only; a submitted configuration cannot redirect this session to another repository. GitHub/Azure switching discovers the matching remote and exact provider milestone names or iteration paths.
 
 Milestone order comes from `.darkingdoom.json` or `docs/delivery/{github,azure-devops}/plan.json` when available. Otherwise the provider catalog supplies numeric name order, shown in the panel for adjustment. Azure iteration names must resolve uniquely to full paths. Verification uses `.darkingdoom.json` settings first, then the complete `scripts/ci-local.ps1` gate, then solution/package scripts. Discovery only reads metadata; it never executes repository scripts. Missing defaults and authentication failures are visible and require valid configuration before Start.
 

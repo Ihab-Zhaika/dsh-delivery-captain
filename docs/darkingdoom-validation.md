@@ -12,6 +12,7 @@
 - Controller: explicit activation, milestone/dependency gates, failed claims, duplicate ticks, concurrent starts, stop-during-launch, capacity reservation, review repair, CI review caching, lost merge acknowledgement, closure failure, durable questions and cold recovery.
 - Runtime: genuine root-session APIs, inherited next model selection, original-team scope evidence, advance approval guards, descendants/command cancellation, BrowserSkill lazy discovery and complete OCR coverage validation.
 - UI: initial activation semantics, stopped-run resume, phase accounting, report rendering/download and production CSS compilation.
+- Native sidebar: a distinct registered tab and Start-menu card, no overlay or modal/focus trap, session-scoped body, retention through hiding, Configuration/Monitor views, and ordinary worker navigation. The live TrucX chat remained visible and focusable with the plugin open. Local screenshots: `artifacts/darkingdoom-sidebar-configuration.png` and `artifacts/darkingdoom-sidebar-monitor.png`.
 - Authenticated TrucX discovery: GitHub default `Ihab-Zhaika/TrucX`, `github/main`, all ten M0–M9 milestones and complete local CI; Azure `origin/main`, organization/project/repository and all ten native iteration paths. No project scripts were executed during discovery.
 - Independent review of repository discovery caught the pnpm subdirectory flag, provider-specific plan precedence and unchecked milestone overrides. These were fixed with regression coverage; submitted milestones must exist in the selected provider catalog.
 

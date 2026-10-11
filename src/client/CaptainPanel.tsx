@@ -1,9 +1,8 @@
-/** Browser-only DarKingDoom Plugin surface. Mounting never enables automation. */
+/** Native sidebar content. Mounting never enables automation or captures chat focus. */
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import type { Phase, Run, RunConfig, Task, RepositoryContext } from '../captain/types.ts'
 import css from './CaptainPanel.module.css'
 
-export const CAPTAIN_OPEN_EVENT = 'darkingdoom:open'
 export interface CaptainOpenDetail { sessionId: string; workspace?: string }
 interface Eligibility { ticketId: string; eligible: boolean; reason: string }
 interface Snapshot { run: Run | null; eligibility?: Eligibility[] }
@@ -92,19 +91,6 @@ async function request<T>(url: string, signal: AbortSignal, body?: unknown): Pro
   return value as T
 }
 
-export function CaptainSurface({ openSession }: { openSession: (parentId: string, childId: string) => Promise<unknown> }) {
-  const [owner, setOwner] = useState<CaptainOpenDetail | null>(null)
-  useEffect(() => {
-    const open = (event: Event) => {
-      const detail = (event as CustomEvent<CaptainOpenDetail>).detail
-      if (detail?.sessionId) setOwner(detail)
-    }
-    window.addEventListener(CAPTAIN_OPEN_EVENT, open)
-    return () => window.removeEventListener(CAPTAIN_OPEN_EVENT, open)
-  }, [])
-  return owner ? <CaptainPanel key={owner.sessionId} {...owner} onClose={() => setOwner(null)} openSession={openSession} /> : null
-}
-
 export function CaptainPanel({ sessionId, workspace, onClose, openSession }: CaptainOpenDetail & { onClose: () => void; openSession: (parentId: string, childId: string) => Promise<unknown> }) {
   const [snapshot, setSnapshot] = useState<Snapshot>({ run: null })
   const [config, setConfig] = useState<RunConfig>(() => defaults(workspace))
@@ -115,11 +101,11 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
   const [repository, setRepository] = useState<RepositoryContext | null>(null)
   const [contextLoading, setContextLoading] = useState(true)
   const [source, setSource] = useState<RunConfig['provider']>()
+  const [view, setView] = useState<'configuration' | 'monitor'>('configuration')
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(Date.now())
   const [selected, setSelected] = useState<string | null>(null)
   const [parallelism, setParallelism] = useState(2)
-  const panel = useRef<HTMLDivElement>(null)
   const controller = useRef<AbortController | null>(null)
   const generation = useRef(0)
   const mutation = useRef(false)
@@ -158,6 +144,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
       setMilestones(value.run.config.milestones.join('\n'))
       setCommands(value.run.config.verifyCommands.join('\n'))
       setParallelism(value.run.config.parallelism)
+      setView('monitor')
     }
   }, [sessionId])
 
@@ -176,21 +163,6 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
     return () => { abort.abort(); clearTimeout(timer); clearInterval(clock); generation.current++ }
   }, [refresh])
 
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null
-    panel.current?.focus()
-    const keys = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); onClose() }
-      if (event.key !== 'Tab') return
-      const nodes = Array.from(panel.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], summary, [tabindex="0"]') ?? []).filter(node => node.getClientRects().length)
-      const first = nodes[0], last = nodes.at(-1)
-      if (event.shiftKey && (document.activeElement === first || document.activeElement === panel.current)) { event.preventDefault(); last?.focus() }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
-    }
-    document.addEventListener('keydown', keys)
-    return () => { document.removeEventListener('keydown', keys); previous?.focus() }
-  }, [onClose])
-
   async function mutate(action?: Action) {
     const signal = controller.current?.signal
     if (!signal || mutation.current) return
@@ -205,7 +177,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
   }
   function start(event: FormEvent) { event.preventDefault(); void mutate() }
   async function navigate(childId: string) {
-    try { await openSession(sessionId, childId); onClose() } catch (cause) { setError(`Could not open worker session: ${String(cause)}`) }
+    try { await openSession(sessionId, childId) } catch (cause) { setError(`Could not open worker session: ${String(cause)}`) }
   }
   const merged = run?.tasks.filter(item => item.status === 'merged').length ?? 0
   const working = run?.tasks.filter(item => !terminal(item)).length ?? 0
@@ -216,14 +188,14 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
     return { ticketId: ticket.id, eligible: false, reason: existing ? `Task ${existing.status}` : ticket.exclusion ?? (ticket.merged ? 'Already merged' : ticket.state === 'closed' ? 'Closed' : 'Awaiting captain eligibility evaluation') }
   }) ?? []
 
-  return <div className={css.backdrop}>
-    <div className={css.panel} ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="darkingdoom-title" data-darkingdoom>
+  return <section className={css.panel} role="region" aria-labelledby="darkingdoom-title" data-darkingdoom>
       <header className={css.header}><div className={css.heading}><span className={css.mark} aria-hidden>⌁</span><div><span className={css.eyebrow}>AUTONOMOUS DELIVERY</span><h1 id="darkingdoom-title">DarKingDoom Plugin</h1></div><span className={css.status} data-status={run?.status ?? 'idle'}>{run?.status ?? 'Not started'}</span></div><button type="button" onClick={onClose} aria-label="Close DarKingDoom Plugin">✕</button></header>
       <div className={css.owner}>Session <code>{sessionId}</code><span>Opening this panel never starts a run.</span></div>
       {error && <div className={css.error} role="alert"><span>{error}</span><button type="button" onClick={() => setError(null)}>Dismiss</button></div>}
       {run?.error && <div className={css.error} role="alert">Captain: {run.error}</div>}
+      <nav className={css.views} aria-label="Plugin view"><button type="button" aria-pressed={view==='configuration'} onClick={()=>setView('configuration')}>Configuration</button><button type="button" aria-pressed={view==='monitor'} onClick={()=>setView('monitor')}>Monitor</button></nav>
       <div className={css.body}>
-        <aside className={css.configuration}><div className={css.sectionTitle}><h2>Run configuration</h2><span>{run ? 'Saved run configuration' : contextLoading ? 'Loading repository configuration…' : 'From the current session repository'}</span></div>
+        <aside hidden={view!=='configuration'} className={css.configuration}><div className={css.sectionTitle}><h2>Run configuration</h2><span>{run ? 'Saved run configuration' : contextLoading ? 'Loading repository configuration…' : 'From the current session repository'}</span></div>
           {!run && repository?.warnings.map((warning,index) => <p className={css.muted} key={index}>{warning}</p>)}
           <form onSubmit={start}>
             <fieldset disabled={!!run || busy || !loaded} className={css.fields}>
@@ -250,7 +222,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
             {!loaded && <p className={css.muted}>Loading saved run before enabling Start…</p>}
           </form>
         </aside>
-        <main className={css.monitor}>
+        <main hidden={view!=='monitor'} className={css.monitor}>
           <div className={css.metrics}>
             <div><span>Wall time</span><strong>{run ? duration(elapsedMs(run.createdAt, run.status === 'stopped' ? run.updatedAt : undefined, now)) : '—'}</strong><small>Includes waiting & pauses</small></div>
             <div><span>Working / parallel limit</span><strong>{working}<em> / {run?.config.parallelism ?? config.parallelism}</em></strong><small>{merged} merged · {run?.tickets.length ?? 0} discovered</small></div>
@@ -285,6 +257,5 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
           <footer className={css.footer}><span className={css.liveDot} />Refreshes every 3 seconds while open<span>{run ? `Run ${run.id}` : 'Automation is disabled'}</span></footer>
         </main>
       </div>
-    </div>
-  </div>
+  </section>
 }

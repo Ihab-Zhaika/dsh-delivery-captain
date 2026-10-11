@@ -42,11 +42,20 @@ test('repository identity fields belong to the session and stay read-only', () =
 
 test('worker session links use ordinary root session navigation on current and legacy hosts', async () => {
   for (const modern of [true, false]) {
-    const slots = new Map(), opened = [], panels = []
+    const slots = new Map(), opened = [], panels = [], definitions = [], sidebarOpens = []
     const workspace = modern ? { openSession: target => opened.push(target) } : undefined
     const sessions = { list: { getSnapshot: () => ({ byId: {} }) }, ...(modern ? {} : { open: target => opened.push(target) }), refreshSubagents() { assert.fail('Root workers must not use the subagent catalog') }, openSubagent() { assert.fail('Root workers must not use addressed subagent navigation') } }
-    entry.apply({ sessions, layout: { selectPanel: panel => panels.push(panel) }, get: name => name === 'uiWorkspace' ? workspace : undefined, slots: { inject(_name, callback) { callback() }, register(options, component) { slots.set(options.name, component); return () => {} } } })
-    const surface = slots.get('shell.overlay')()
+    entry.apply({ sessions, layout: { selectPanel: panel => panels.push(panel) }, sidebarRight: { openTab: kind => sidebarOpens.push(kind) }, sidebarRightTabs: {register(definition){definitions.push(definition);return()=>{}}}, effect:create=>create(), get: name => name === 'uiWorkspace' ? workspace : undefined, slots: { inject(_name, callback) { callback() }, register(options, component) { slots.set(options.name, component); return () => {} } } })
+    assert.equal(slots.has('shell.overlay'),false)
+    assert.equal(definitions.length,1)
+    assert.equal(definitions[0].kind,'darkingdoom')
+    assert.equal(definitions[0].keepMounted,true)
+    assert.equal(definitions[0].guide[0].title(),'DarKingDoom Plugin')
+    const button = slots.get('conversation.session.header.actions')({sessionId:'captain-parent'})
+    button.props.onClick()
+    assert.deepEqual(sidebarOpens,['darkingdoom'])
+    const surface = slots.get('sidebar.right.pane.tab')({sessionId:'captain-parent',useTabInfo:()=>({tab:{actions:{close(){}}}})})
+    assert.equal(surface.props.sessionId,'captain-parent')
     await surface.props.openSession('captain-parent', 'ordinary-worker')
     assert.deepEqual(opened, ['ordinary-worker'])
     assert.deepEqual(panels, [null])
@@ -79,7 +88,11 @@ test('external links accept only web URLs', () => {
 
 test('initial dashboard makes authorization explicit and prevents starting before state loads', () => {
   const html = renderToStaticMarkup(createElement(ui.CaptainPanel, { sessionId: 'captain-one', workspace: 'C:/repo', onClose() {}, openSession: async () => {} }))
-  assert.match(html, /role="dialog" aria-modal="true"/)
+  assert.match(html, /role="region" aria-labelledby="darkingdoom-title"/)
+  assert.doesNotMatch(html, /role="dialog"|aria-modal/)
+  assert.match(html,/aria-label="Plugin view"/)
+  assert.match(html,/>Configuration<\/button>/)
+  assert.match(html,/>Monitor<\/button>/)
   assert.match(html, /value="C:\/repo"/)
   assert.match(html, /disabled="">Start DarKingDoom Plugin/)
   assert.match(html, /Start authorizes full access execution, autonomous repair, review, merge and ticket closure/)
