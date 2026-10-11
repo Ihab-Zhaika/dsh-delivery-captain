@@ -58,7 +58,7 @@ const PLUGIN_ID: string = JSON.parse(
 
 const config: UserConfig = {
   name: `${PLUGIN_ID}/client`,
-  entry: { client: 'lib/client/index.js' },
+  entry: { client: 'lib/client/captain-index.js' },
   outDir: 'lib',
   format: 'cjs',
   platform: 'browser',

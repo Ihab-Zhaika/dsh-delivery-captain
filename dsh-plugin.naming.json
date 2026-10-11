@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "policy": "dsh-plugin-naming/v1",
+  "plugin": { "namespace": "ihab-zhaika", "name": "delivery-captain", "coordinate": "ihab-zhaika/delivery-captain", "packageName": "@ihab-zhaika/dsh-delivery-captain" },
+  "names": {
+    "pluginNames": ["delivery-captain"], "loaderIds": ["delivery-captain"], "services": [],
+    "tools": ["delivery_captain_status", "delivery_captain_report", "delivery_captain_question", "delivery_captain_answer", "delivery_captain_message", "delivery_captain_followup"],
+    "commands": ["delivery-captain"], "skills": [], "skillProviders": [], "events": [], "settingsNamespaces": [],
+    "routes": [{"kind":"exact","path":"/api/delivery-captain/state"},{"kind":"exact","path":"/api/delivery-captain/start"},{"kind":"exact","path":"/api/delivery-captain/control"}]
+  }
+}
