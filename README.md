@@ -87,7 +87,7 @@ Passing review is reused while waiting for CI only if worktree, head and target 
 ## Controls and recovery
 
 - **Pause:** hold new intake; existing work continues.
-- **Resume:** continue a paused/draining/stopped saved run.
+- **Resume:** continue a paused/draining/stopped saved run; cancelled workers requeue automatically within capacity using their existing sessions and worktrees. Merged tasks never restart.
 - **Drain:** finish runnable work, then stop; blocked work is preserved.
 - **Stop:** revoke admission, quiesce workers, archive their original teams, cancel command trees and drain selected continuable children, preserving files/state and the root session's ability to launch a recovery team on Resume.
 

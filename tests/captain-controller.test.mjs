@@ -74,6 +74,61 @@ test('pause and stop prevent new claims while preserving tasks',()=>fixture(asyn
   await f.controller.control('captain','stop');await f.controller.tick();assert.equal(f.starts.length,2)
   assert.equal(f.controller.state('captain').status,'stopped')
 }))
+
+test('stopped workers resume automatically in the same sessions with admission caps retained',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:2});await f.controller.tick()
+  const ids=run.tasks.map(t=>t.id),sessions=run.tasks.map(t=>t.sessionId)
+  await f.controller.control('captain','stop');await f.controller.dispose()
+  const next=new CaptainController(new RunStore(join(f.dir,'state')),f.runtime,()=>f.provider)
+  try {
+    await next.restore();await next.control('captain','resume');await next.tick()
+    const resumed=next.state('captain')
+    assert.deepEqual(resumed.tasks.map(t=>t.id),ids);assert.deepEqual(resumed.tasks.map(t=>t.sessionId),sessions)
+    assert.deepEqual(resumed.tasks.map(t=>t.status),['running','running'])
+    assert.equal(f.starts.length,4);assert.equal(resumed.config.maxTickets,2)
+  } finally {await next.dispose()}
+}))
+
+test('resumed parked tasks wait for capacity and merged tasks never restart',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:2});await f.controller.tick()
+  await f.controller.control('captain','stop');await f.controller.control('captain','parallelism',1)
+  await f.controller.control('captain','resume');await f.controller.tick()
+  assert.deepEqual(run.tasks.map(t=>t.status),['running','blocked']);assert.equal(f.starts.length,3)
+  await f.controller.report(run.tasks[0].sessionId,{phase:'review',ready:true});await f.controller.tick()
+  assert.deepEqual(run.tasks.map(t=>t.status),['merged','running']);assert.equal(f.starts.length,4)
+  await f.controller.control('captain','stop');await f.controller.control('captain','resume');await f.controller.tick()
+  assert.equal(run.tasks[0].status,'merged');assert.equal(f.starts.filter(id=>id===run.tasks[0].id).length,2)
+}))
+
+test('captain answers cannot append boilerplate that contradicts a specific hold',()=>fixture(async f=>{
+  await f.controller.start('captain',f.config);await f.controller.tick()
+  const task=f.controller.state('captain').tasks[0],q=await f.controller.question(task.sessionId,'Prerequisite missing')
+  const answer='Hold implementation until the prerequisite is verified; preserve existing work.'
+  await f.controller.answer('captain',q.id,answer)
+  assert.equal(f.messages.at(-1).text,`Captain answer to ${q.id}: ${answer}`)
+}))
+
+test('explicit guidance consumes a pending resume so a subsequent blocker is not silently relaunched',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick()
+  const task=run.tasks[0]
+  await f.controller.control('captain','stop');await f.controller.control('captain','resume')
+  await f.controller.message('captain',task.id,'Investigate only; preserve the prerequisite hold')
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Prerequisite still unavailable'})
+  await f.controller.tick()
+  assert.equal(task.status,'blocked');assert.equal(f.starts.length,1);assert.equal(task.resumeRequested,undefined)
+}))
+
+test('pause and drain park pending resumes until explicitly resumed again',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick()
+  run.tasks[0].startedAt=new Date(Date.now()-61000).toISOString()
+  await f.controller.control('captain','stop');await f.controller.control('captain','resume')
+  await f.controller.control('captain','pause');await f.controller.tick()
+  assert.equal(f.starts.length,1);assert.equal(run.tasks[0].resumeRequested,true)
+  await f.controller.control('captain','drain');await f.controller.tick()
+  assert.equal(f.starts.length,1);assert.equal(run.tasks[0].resumeRequested,true)
+  await f.controller.control('captain','resume');await f.controller.tick()
+  assert.equal(f.starts.length,2);assert.equal(run.tasks[0].status,'running')
+}))
 test('questions are durable and answers wake the owning worker',()=>fixture(async f=>{
   await f.controller.start('captain',f.config);await f.controller.tick()
   const task=f.controller.state('captain').tasks[0]

@@ -83,6 +83,7 @@ export interface Task {
     lastWakeAt?: string;
     followups: string[];
     recoveryAttempts?: number;
+    resumeRequested?: boolean;
     closedAt?: string;
     reviewHistory?: Array<ReviewResult & {
         at: string;

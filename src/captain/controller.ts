@@ -92,7 +92,7 @@ export class CaptainController {
       await this.providerFactory(run.config).preflight()
       await this.runtime.preflight(run.config)
       run.status = 'running'
-      for (const t of run.tasks.filter(t => t.status === 'cancelled')) { t.status = 'blocked'; delete t.finishedAt; t.recoveryAttempts = 0; delete t.lastWakeAt }
+      for (const t of run.tasks.filter(t => t.status === 'cancelled')) { t.status = 'blocked'; t.resumeRequested = true; delete t.finishedAt; t.recoveryAttempts = 0; delete t.lastWakeAt }
     } else if (action === 'stop') {
       run.status = 'stopped'
       this.activeProviders.get(run.id)?.cancel?.()
@@ -114,6 +114,7 @@ export class CaptainController {
     const { run, task } = this.worker(sessionId)
     if (!PHASES.includes(report.phase) || report.phase === 'complete') throw new Error('Only verified merge can complete a task')
     if (report.ready && report.blocked) throw new Error('A task cannot be ready and blocked together')
+    delete task.resumeRequested
     this.phase(task, report.phase, report.note)
     if (report.ready) { task.status = 'ready'; this.phase(task, 'waiting', 'Queued for independent verification and merge') }
     else if (report.blocked) { task.status = 'blocked'; task.error = report.note ?? 'Worker blocked'; task.lastWakeAt = now() }
@@ -147,8 +148,9 @@ export class CaptainController {
     const task = run.tasks.find(t => t.id === q.taskId)
     if (!task || TERMINAL.has(task.status) || isStopped(run)) return
     if (task.status === 'blocked' && this.activeCount(run) >= run.config.parallelism) return
+    delete task.resumeRequested
     task.status = 'running'; await this.save(run)
-    await this.runtime.send(task.sessionId, `Captain answer to ${q.id}: ${q.answer}\nContinue the assigned scope with your original AgentTeams team; approval is automatic.`)
+    await this.runtime.send(task.sessionId, `Captain answer to ${q.id}: ${q.answer}`)
     if (isStopped(run) || this.disposed) { await this.runtime.stop(task.sessionId); return }
     this.phase(task, 'analysis'); delete task.error
     q.deliveredAt = now(); task.lastWakeAt = now(); await this.save(run)
@@ -159,6 +161,7 @@ export class CaptainController {
     if (!task || TERMINAL.has(task.status) || isStopped(run)) throw new Error('Task is not active')
     if (!text.trim() || text.length > 30000) throw new Error('Invalid worker message')
     if (task.status === 'blocked' && this.activeCount(run) >= run.config.parallelism) throw new Error('No execution slot available; answer will need to wait')
+    delete task.resumeRequested
     task.status = 'running'; await this.save(run)
     await this.runtime.send(task.sessionId, `Captain guidance: ${text}`)
     if (isStopped(run) || this.disposed) { await this.runtime.stop(task.sessionId); return }
@@ -233,6 +236,10 @@ export class CaptainController {
       }
       if (task.status === 'ready') { await this.integrate(run, task, provider); continue }
       if (task.status === 'blocked') {
+        if (run.status === 'running' && task.resumeRequested && this.activeCount(run) < run.config.parallelism) {
+          delete task.resumeRequested; task.status = 'starting'; await this.save(run)
+          await this.launch(run, task, provider); continue
+        }
         if (await this.runtime.isRunning(task.sessionId)) await this.runtime.stop(task.sessionId)
         continue
       }
@@ -257,7 +264,8 @@ export class CaptainController {
     }
     // Retry parked technical blockers with bounded recovery, never unlimited model loops.
     for (const task of run.tasks.filter(t => t.status === 'blocked')) {
-      if (isStopped(run) || this.activeCount(run) >= run.config.parallelism) break
+      if (run.status !== 'running' || this.activeCount(run) >= run.config.parallelism) break
+      if (task.resumeRequested) continue
       if ((task.recoveryAttempts ?? 0) >= run.config.maxRepairRounds || Date.now() - Date.parse(task.lastWakeAt ?? task.startedAt) < 60000) continue
       task.recoveryAttempts = (task.recoveryAttempts ?? 0) + 1; task.status = 'running'; task.lastWakeAt = now(); this.phase(task, 'analysis'); await this.save(run)
       await this.launch(run, task, provider)

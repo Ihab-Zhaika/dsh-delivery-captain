@@ -33,7 +33,7 @@ export interface Task {
   phase: Phase; phases: PhaseEvent[]; startedAt: string; finishedAt?: string;
   reviewRounds: number; error?: string; prUrl?: string; mergedSha?: string;
   lastWakeAt?: string; followups: string[];
-  recoveryAttempts?: number; closedAt?: string;
+  recoveryAttempts?: number; resumeRequested?: boolean; closedAt?: string;
   reviewHistory?: Array<ReviewResult & { at: string }>;
 }
 export interface Run {
