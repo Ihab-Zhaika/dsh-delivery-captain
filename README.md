@@ -11,7 +11,7 @@ Development target: **DSH 0.2.0-rc.2**, **original AgentTeams 0.1.23**, **OCR >=
 ```powershell
 git clone https://github.com/Ihab-Zhaika/dsh-delivery-captain.git
 cd dsh-delivery-captain
-git switch feat/darkingdoom
+git switch feat/delivery-captain
 pnpm install --frozen-lockfile
 pnpm build
 pnpm verify
@@ -30,33 +30,26 @@ dsh plugin --profile web add @vectorize-io/hindsight-coding-agents
 dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
 ```
 
-Hindsight uses your configured memory endpoint and shares repository memory across linked worktrees. BrowserSkill also needs its `bsk` CLI and Chrome/Edge extension. Integrations are optional in run configuration: Hindsight defaults to required, browser validation does not.
+Hindsight uses your configured memory endpoint and shares repository memory across linked worktrees. BrowserSkill also needs its `bsk` CLI and Chrome/Edge extension. Both integrations are optional and can be required in run configuration once connected.
 
 Configure GitHub CLI authentication, or Azure CLI plus its `azure-devops` extension and authentication, outside the run. Install OCR and configure its model credentials. Repository policies must permit the intended automated merges; required reviews and checks are never bypassed.
 
 ## Start once
 
-Open an ordinary DSH session in your repository and click **DarKingDoom Plugin** in its header. The header appears after a new session has been created. Configure:
+Open an ordinary DSH session in your repository and click **DarKingDoom Plugin** in its header. The panel reads the session's repository on the host and automatically fills its matching remote, provider identity, remote default branch, delivery milestones and verification commands. Repository identity fields are read-only; a submitted configuration cannot redirect this session to another repository. GitHub/Azure switching discovers the matching remote and exact provider milestone names or iteration paths.
 
-- GitHub `owner/repository`, or Azure repository name/ID, organization URL and project.
-- Absolute repository path, remote and target branch.
-- Exact milestone names in delivery order. Azure uses exact `System.IterationPath` values.
-- Parallel tickets, team member count and execution/recovery limits.
-- At least one verification command, one per line, appropriate for the repository and host shell.
-- Optional GitHub search filters or Azure WIQL eligibility query.
+Milestone order comes from `.darkingdoom.json` or `docs/delivery/{github,azure-devops}/plan.json` when available. Otherwise the provider catalog supplies numeric name order, shown in the panel for adjustment. Azure iteration names must resolve uniquely to full paths. Verification uses `.darkingdoom.json` settings first, then the complete `scripts/ci-local.ps1` gate, then solution/package scripts. Discovery only reads metadata; it never executes repository scripts. Missing defaults and authentication failures are visible and require valid configuration before Start.
+
+Adjust parallel tickets, team size, execution limits, optional source filters, milestone scope and verification commands as needed. To declare defaults in another repository, commit `.darkingdoom.json` containing `milestones` (ordered exact names) and `verifyCommands` (host commands, one per array entry).
 
 **Start DarKingDoom Plugin** grants advance authority for full filesystem/shell/network access, original AgentTeams automatic approval, pushes, PR creation, gated merges, follow-ups and closure. Installing the plugin, opening its panel or reading ticket content never activates an ordinary session. There is no model-callable activation tool.
 
-Human command alternative: `/darkingdoom start <JSON configuration>`. Controls: `/darkingdoom status`, `pause`, `resume`, `drain`, `stop`.
+Human command alternative: `/darkingdoom start` discovers the current repository defaults. Optional JSON changes run preferences: `/darkingdoom start {"parallelism":4}`. Controls: `/darkingdoom status`, `pause`, `resume`, `drain`, `stop`.
 
 ```json
 {
   "provider": "github",
-  "repository": "owner/repository",
-  "workspace": "C:/Projects/repository",
   "milestones": ["Foundation", "Core", "Release"],
-  "remote": "origin",
-  "targetBranch": "main",
   "parallelism": 2,
   "maxTeamMembers": 3,
   "pollSeconds": 30,

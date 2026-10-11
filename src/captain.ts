@@ -14,6 +14,8 @@ import { createProvider } from './captain/providers.ts'
 import { createRuntime, configureFullAccess } from './captain/runtime.ts'
 import { eligibility, validateConfig, phaseDurations } from './captain/scheduler.ts'
 import type { Phase } from './captain/types.ts'
+import type { SessionId } from '@deepseek-ai/dsh-session'
+import { discoverRepository, bindRepositoryConfig } from './captain/repository-context.ts'
 
 export const name = 'darkingdoom'
 export const inject = ['tools', 'agents', 'sessionController', 'subagents', 'systemPrompt']
@@ -84,20 +86,29 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     output: { schema: { type: 'string' }, render: (_a,value) => [{ type: 'text', text: value as string }] },
     async execute(args, exec) { return await controller.followup(callerId(exec.agent), args) } }))
 
-  const start = async (sessionId: string, raw: unknown) => {
-    const parsed = validateConfig(raw)
+  const repositoryContext = async (sessionId: string, provider?: unknown) => {
+    if (provider !== undefined && provider !== 'github' && provider !== 'azure') throw new Error('Unknown ticket source')
+    const inspection = await ctx.sessionController.inspect(sessionId as SessionId)
+    if (!inspection.meta.cwd) throw new Error('The current session must belong to a repository')
+    if (inspection.meta.parentSession) throw new Error('Activate DarKingDoom from the main repository session')
+    return discoverRepository(inspection.meta.cwd, provider)
+  }
+  const start = async (sessionId: string, raw?: unknown) => {
+    const provider = raw && typeof raw === 'object' && 'provider' in raw ? raw.provider : undefined
+    const context = await repositoryContext(sessionId, provider)
+    const parsed = validateConfig(bindRepositoryConfig(context, raw))
     await configureFullAccess(ctx, sessionId)
     const run = await controller.start(sessionId, parsed)
     await controller.announce(run, `${CAPTAIN_PROMPT}\nRun ${run.id} started. Configuration: ${JSON.stringify(run.config)}. No further approval is needed.`)
     return { run }
   }
-  ctx.inject(['commands'], commands => commands.commands.register({ name: 'darkingdoom', description: 'Explicitly start autonomous delivery with JSON configuration, or pause/resume/drain/stop the current run.', input: { hint: 'start <JSON config> | pause | resume | drain | stop | status' },
+  ctx.inject(['commands'], commands => commands.commands.register({ name: 'darkingdoom', description: 'Explicitly start autonomous delivery in the current repository, optionally with JSON preferences, or control the current run.', input: { hint: 'start [JSON preferences] | pause | resume | drain | stop | status' },
     async handler(invocation) {
       try {
         const input = invocation.rawInput.trim(), space = input.indexOf(' ')
         const action = space < 0 ? input : input.slice(0, space)
         const id = invocation.agent.id
-        if (action === 'start') await start(id, JSON.parse(input.slice(space + 1)))
+        if (action === 'start') await start(id, space < 0 ? undefined : JSON.parse(input.slice(space + 1)))
         else if (action === 'status') return { kind: 'success', text: JSON.stringify(controller.state(id)) }
         else await controller.control(id, action)
         return { kind: 'success', text: `DarKingDoom Plugin: ${action}` }
@@ -117,6 +128,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       if (!id) throw new Error('sessionId is required')
       const run = controller.state(id)
       reply(res, 200, { run, eligibility: run ? eligibility(run.tickets,run.config.milestones,run.tasks) : [], metrics: run?.tasks.map(t => ({ taskId:t.id, phases:phaseDurations(t) })) ?? [] })
+    })
+    route('/api/darkingdoom/context', 'GET', async (req,res) => {
+      const params = new URL(req.url ?? '/', 'http://localhost').searchParams
+      const id = params.get('sessionId')
+      if (!id) throw new Error('sessionId is required')
+      reply(res, 200, await repositoryContext(id, params.get('provider') ?? undefined))
     })
     route('/api/darkingdoom/start', 'POST', async (req,res) => {
       const body = await readJsonRequest(req)

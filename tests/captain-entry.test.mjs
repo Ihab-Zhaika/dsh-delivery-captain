@@ -9,11 +9,13 @@ test('installed captain stays inert, rejects ordinary tool use and authenticates
   const dir = await mkdtemp(join(tmpdir(), 'captain-entry-'))
   const tools = new Map(), routes = new Map(), commands = new Map(), disposers = [], sections = []
   let rejection
+  const inspected = []
   const server = { register(route) { routes.set(route.path, route); return () => routes.delete(route.path) } }
   const ctx = {
     tools: { register(tool) { tools.set(tool.name, tool) } },
     systemPrompt: { section(section) { sections.push(section) } },
     commands: { register(command) { commands.set(command.name, command); return () => {} } },
+    sessionController: { async inspect(id) { inspected.push(id); throw new Error('No current repository') } },
     get(key) { if (key === 'webServer') return server; if (key === 'connection') return { requestRejection: () => rejection } },
     on() { return () => {} },
     effect(create) { const dispose = create(); if (dispose) disposers.push(dispose); return dispose },
@@ -29,6 +31,12 @@ test('installed captain stays inert, rejects ordinary tool use and authenticates
     const command = commands.get('darkingdoom')
     assert.equal((await command.handler({rawInput:'status',agent:{id:'ordinary'}})).text,'null')
     assert.equal((await command.handler({rawInput:'start {}',agent:{id:'ordinary'}})).kind,'error')
+    assert.deepEqual(inspected,['ordinary'])
+    let contextStatus, contextBody
+    await routes.get('/api/darkingdoom/context').handler({method:'GET',url:'/api/darkingdoom/context?sessionId=other&workspace=C:/unrelated'},{writeHead(v){contextStatus=v},end(v){contextBody=JSON.parse(v)}})
+    assert.equal(contextStatus,400)
+    assert.match(contextBody.error,/No current repository/)
+    assert.deepEqual(inspected,['ordinary','other'])
     for(const code of [401,403,undefined]) {
       rejection=code;let status,body
       await routes.get('/api/darkingdoom/state').handler({method:'GET',url:'/api/darkingdoom/state?sessionId=ordinary'},{writeHead(v){status=v},end(v){body=JSON.parse(v)}})

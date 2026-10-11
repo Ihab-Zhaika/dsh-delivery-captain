@@ -32,6 +32,14 @@ test('elapsed time freezes at task completion and rejects invalid timestamps', (
   assert.equal(ui.elapsedMs('2026-01-01T01:00:00Z', undefined, Date.parse('2026-01-01T00:00:00Z')), 0)
 })
 
+test('repository identity fields belong to the session and stay read-only', () => {
+  const html = renderToStaticMarkup(createElement(ui.CaptainPanel, {sessionId:'repo-session', workspace:'C:/repo', onClose(){}, openSession:async()=>{}}))
+  for (const name of ['Repository','Workspace','Remote','Target branch']) {
+    assert.match(html, new RegExp(`${name}<input[^>]+readOnly`, 'i'))
+  }
+  assert.match(html,/Loading repository configuration/)
+})
+
 test('worker session links use ordinary root session navigation on current and legacy hosts', async () => {
   for (const modern of [true, false]) {
     const slots = new Map(), opened = [], panels = []

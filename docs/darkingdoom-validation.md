@@ -1,16 +1,19 @@
-# DarKingDoom Plugin validation — 2026-10-11
+# DarKingDoom Plugin validation — 2026-10-12
 
 ## Verified locally
 
 - Windows, Node 24.15.0, DSH 0.2.0-rc.2, original AgentTeams 0.1.23, OCR installed v1.12.13.
 - `pnpm typecheck`: host and browser TypeScript passed.
 - `pnpm build`: host/browser artifacts built. The inherited DSH browser-loader contract requires CJS; tsdown's general ESM recommendation is expected.
-- `pnpm verify`: 94 tests passed, zero failures. Source/build artifact stamp matched.
+- `pnpm verify`: 98 tests passed, zero failures. Source/build artifact stamp matched.
+- Repository discovery: real temporary repositories, both remotes, remote default branch, repository plan order, full Azure iteration paths, safe metadata reads, missing authentication/defaults, and refusal to redirect a session to another repository.
 - Temporary real Git repositories: fetched target branch, isolated worktree/branch, idempotent adoption, dirty-worktree rejection and branch/target drift.
 - Provider contract fixtures: GitHub dependency closure and closing PRs; Azure native predecessors, custom workflow completion categories, acceptance fields, pagination, exact-head merge and remote policy checks.
 - Controller: explicit activation, milestone/dependency gates, failed claims, duplicate ticks, concurrent starts, stop-during-launch, capacity reservation, review repair, CI review caching, lost merge acknowledgement, closure failure, durable questions and cold recovery.
 - Runtime: genuine root-session APIs, inherited next model selection, original-team scope evidence, advance approval guards, descendants/command cancellation, BrowserSkill lazy discovery and complete OCR coverage validation.
 - UI: initial activation semantics, stopped-run resume, phase accounting, report rendering/download and production CSS compilation.
+- Authenticated TrucX discovery: GitHub default `Ihab-Zhaika/TrucX`, `github/main`, all ten M0–M9 milestones and complete local CI; Azure `origin/main`, organization/project/repository and all ten native iteration paths. No project scripts were executed during discovery.
+- Independent review of repository discovery caught the pnpm subdirectory flag, provider-specific plan precedence and unchecked milestone overrides. These were fixed with regression coverage; submitted milestones must exist in the selected provider catalog.
 
 ## Real host and browser checks
 

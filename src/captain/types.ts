@@ -14,6 +14,14 @@ export interface RunConfig {
   verifyCommands: string[]; workerPreset: string;
   requireBrowser: boolean; requireMemory: boolean;
 }
+export interface RepositoryContext {
+  config: RunConfig;
+  providers: RunConfig['provider'][];
+  warnings: string[];
+  milestoneSource: string;
+  verificationSource: string;
+  milestoneCatalog: string[];
+}
 export interface PhaseEvent { phase: Phase; at: string; note?: string }
 export interface Question { id: string; taskId: string; question: string; createdAt: string; answer?: string; answeredAt?: string; deliveredAt?: string; notifiedAt?: string; lastNotifyAttemptAt?: string }
 export interface Task {

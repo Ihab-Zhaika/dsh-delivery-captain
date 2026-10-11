@@ -34,6 +34,14 @@ export interface RunConfig {
     requireBrowser: boolean;
     requireMemory: boolean;
 }
+export interface RepositoryContext {
+    config: RunConfig;
+    providers: RunConfig['provider'][];
+    warnings: string[];
+    milestoneSource: string;
+    verificationSource: string;
+    milestoneCatalog: string[];
+}
 export interface PhaseEvent {
     phase: Phase;
     at: string;

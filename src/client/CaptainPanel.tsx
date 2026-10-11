@@ -1,6 +1,6 @@
 /** Browser-only DarKingDoom Plugin surface. Mounting never enables automation. */
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import type { Phase, Run, RunConfig, Task } from '../captain/types.ts'
+import type { Phase, Run, RunConfig, Task, RepositoryContext } from '../captain/types.ts'
 import css from './CaptainPanel.module.css'
 
 export const CAPTAIN_OPEN_EVENT = 'darkingdoom:open'
@@ -78,7 +78,7 @@ function duration(milliseconds: number): string {
   return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 function defaults(workspace = ''): RunConfig {
-  return { provider: 'github', repository: '', workspace, milestones: [], remote: 'origin', targetBranch: 'main', parallelism: 2, maxTeamMembers: 4, pollSeconds: 30, maxRepairRounds: 3, maxTaskMinutes: 60, verifyCommands: [], workerPreset: 'standard', requireBrowser: false, requireMemory: true }
+  return { provider: 'github', repository: '', workspace, milestones: [], remote: '', targetBranch: '', parallelism: 2, maxTeamMembers: 4, pollSeconds: 30, maxRepairRounds: 3, maxTaskMinutes: 120, verifyCommands: [], workerPreset: 'standard', requireBrowser: false, requireMemory: false }
 }
 function lines(value: string): string[] { return value.split(/\r?\n/).map(line => line.trim()).filter(Boolean) }
 function terminal(task: Task): boolean { return ['merged', 'failed', 'cancelled'].includes(task.status) }
@@ -112,6 +112,9 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
   const [commands, setCommands] = useState('')
   const [busy, setBusy] = useState(false)
   const [loaded, setLoaded] = useState(false)
+  const [repository, setRepository] = useState<RepositoryContext | null>(null)
+  const [contextLoading, setContextLoading] = useState(true)
+  const [source, setSource] = useState<RunConfig['provider']>()
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(Date.now())
   const [selected, setSelected] = useState<string | null>(null)
@@ -121,10 +124,26 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
   const generation = useRef(0)
   const mutation = useRef(false)
   const hydrated = useRef<string | null>(null)
+  const commandsEdited = useRef(false)
   const run = snapshot.run
   const allowed = captainActionAvailability(run?.status, loaded, busy)
   const task = run?.tasks.find(item => item.id === selected)
   const set = <K extends keyof RunConfig>(key: K, value: RunConfig[K]) => setConfig(previous => ({ ...previous, [key]: value }))
+
+  useEffect(() => {
+    if (!loaded || run) return
+    const abort = new AbortController()
+    setContextLoading(true)
+    void request<RepositoryContext>(`/api/darkingdoom/context?sessionId=${encodeURIComponent(sessionId)}${source ? `&provider=${source}` : ''}`, abort.signal).then(value => {
+      if (abort.signal.aborted || hydrated.current) return
+      setRepository(value)
+      setConfig(previous => ({ ...previous, provider:value.config.provider, workspace:value.config.workspace, repository:value.config.repository, organization:value.config.organization, project:value.config.project, remote:value.config.remote, targetBranch:value.config.targetBranch, query:undefined }))
+      setMilestones(value.config.milestones.join('\n'))
+      if (!commandsEdited.current) setCommands(value.config.verifyCommands.join('\n'))
+    }).catch(cause => { if (!abort.signal.aborted) { setRepository(null); setError(String(cause instanceof Error ? cause.message : cause)) } })
+      .finally(() => { if (!abort.signal.aborted) setContextLoading(false) })
+    return () => abort.abort()
+  }, [loaded, !!run, sessionId, source])
 
   const refresh = useCallback(async (signal: AbortSignal) => {
     const version = ++generation.current
@@ -204,18 +223,19 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
       {error && <div className={css.error} role="alert"><span>{error}</span><button type="button" onClick={() => setError(null)}>Dismiss</button></div>}
       {run?.error && <div className={css.error} role="alert">Captain: {run.error}</div>}
       <div className={css.body}>
-        <aside className={css.configuration}><div className={css.sectionTitle}><h2>Run configuration</h2><span>{run ? 'Saved run configuration' : 'Ready when you are'}</span></div>
+        <aside className={css.configuration}><div className={css.sectionTitle}><h2>Run configuration</h2><span>{run ? 'Saved run configuration' : contextLoading ? 'Loading repository configuration…' : 'From the current session repository'}</span></div>
+          {!run && repository?.warnings.map((warning,index) => <p className={css.muted} key={index}>{warning}</p>)}
           <form onSubmit={start}>
-            <fieldset disabled={!!run || busy} className={css.fields}>
-              <label>Ticket source<select value={config.provider} onChange={event => set('provider', event.target.value as RunConfig['provider'])}><option value="github">GitHub Issues</option><option value="azure">Azure DevOps</option></select></label>
-              <label>Repository<input required value={config.repository} placeholder="owner/repository" onChange={event => set('repository', event.target.value)} /></label>
-              <label>Workspace<input required value={config.workspace} placeholder="Absolute path on the DSH host" onChange={event => set('workspace', event.target.value)} /></label>
-              {config.provider === 'azure' && <><label>Organization URL<input required value={config.organization ?? ''} placeholder="https://dev.azure.com/organization" onChange={event => set('organization', event.target.value)} /></label><label>Project<input required value={config.project ?? ''} onChange={event => set('project', event.target.value)} /></label></>}
+            <fieldset disabled={!!run || busy || !loaded} className={css.fields}>
+              <label>Ticket source<select disabled={contextLoading && loaded} value={config.provider} onChange={event => { setContextLoading(true); setSource(event.target.value as RunConfig['provider']) }}><option value="github" disabled={repository ? !repository.providers.includes('github') : false}>GitHub Issues</option><option value="azure" disabled={repository ? !repository.providers.includes('azure') : false}>Azure DevOps</option></select></label>
+              <label>Repository<input required readOnly value={config.repository} placeholder="Detected from this session" /></label>
+              <label>Workspace<input required readOnly value={config.workspace} placeholder="Current session repository" /></label>
+              {config.provider === 'azure' && <><label>Organization URL<input required readOnly value={config.organization ?? ''} /></label><label>Project<input required readOnly value={config.project ?? ''} /></label></>}
               <label>Query <span className={css.optional}>(optional)</span><textarea rows={2} value={config.query ?? ''} onChange={event => set('query', event.target.value)} placeholder={config.provider === 'azure' ? 'WIQL query' : 'Additional issue search filters'} /></label>
-              <label>Milestones, in delivery order<textarea required rows={3} value={milestones} onChange={event => setMilestones(event.target.value)} placeholder={'Foundation\nCore experience\nRelease'} /><small>One exact milestone name per line.</small></label>
-              <div className={css.pair}><label>Remote<input required value={config.remote} onChange={event => set('remote', event.target.value)} /></label><label>Target branch<input required value={config.targetBranch} onChange={event => set('targetBranch', event.target.value)} /></label></div>
+              <label>Milestones, in delivery order<textarea disabled={contextLoading} required rows={3} value={milestones} onChange={event => setMilestones(event.target.value)} placeholder="Detected delivery milestones" /><small>{repository?.milestoneSource || 'One exact milestone name per line.'}</small></label>
+              <div className={css.pair}><label>Remote<input required readOnly value={config.remote} /></label><label>Target branch<input required readOnly value={config.targetBranch} /></label></div>
               <div className={css.pair}><label>Parallel tickets<input required type="number" min={1} max={32} value={config.parallelism} onChange={event => set('parallelism', Number(event.target.value))} /></label><label>Members / team<input required type="number" min={1} max={16} value={config.maxTeamMembers} onChange={event => set('maxTeamMembers', Number(event.target.value))} /></label></div>
-              <label>Verification commands<textarea required rows={3} value={commands} onChange={event => setCommands(event.target.value)} placeholder={'pnpm typecheck\npnpm test'} /><small>One host command per line, run in each task worktree.</small></label>
+              <label>Verification commands<textarea disabled={contextLoading} required rows={3} value={commands} onChange={event => { commandsEdited.current = true; setCommands(event.target.value) }} placeholder="Detected repository checks" /><small>{repository?.verificationSource || 'One host command per line, run in each task worktree.'}</small></label>
               <details><summary>Execution limits & verification</summary><div className={css.fields}>
                 <div className={css.pair}><label>Poll seconds<input required type="number" min={5} max={3600} value={config.pollSeconds} onChange={event => set('pollSeconds', Number(event.target.value))} /></label><label>Repair rounds<input required type="number" min={0} max={20} value={config.maxRepairRounds} onChange={event => set('maxRepairRounds', Number(event.target.value))} /></label></div>
                 <label>Task timeout (minutes)<input required type="number" min={1} max={1440} value={config.maxTaskMinutes} onChange={event => set('maxTaskMinutes', Number(event.target.value))} /></label>
@@ -225,7 +245,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
               </div></details>
             </fieldset>
             <p className={css.authorization}>Start authorizes full access execution, autonomous repair, review, merge and ticket closure within this configuration. The captain answers worker questions automatically.</p>
-            <button type="submit" className={css.primary} disabled={!allowed.start}>{busy ? 'Applying…' : run ? 'Run already created' : 'Start DarKingDoom Plugin'}</button>
+            <button type="submit" className={css.primary} disabled={!allowed.start || contextLoading || !repository || !config.targetBranch || !lines(milestones).length || lines(milestones).some(name=>!repository.milestoneCatalog.includes(name)) || !lines(commands).length}>{busy ? 'Applying…' : run ? 'Run already created' : 'Start DarKingDoom Plugin'}</button>
             {run?.status === 'stopped' && <p className={css.muted}>Use Resume to continue this saved run with its existing tasks and claims.</p>}
             {!loaded && <p className={css.muted}>Loading saved run before enabling Start…</p>}
           </form>
