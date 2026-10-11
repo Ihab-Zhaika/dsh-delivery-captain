@@ -10,3 +10,4 @@ export declare function eligibility(tickets: Ticket[], milestones: string[], tas
 export declare function phaseDurations(task: Pick<Task, 'phases' | 'finishedAt'>, now?: number): Record<string, number>;
 /** Validate the UI/command payload without admitting arbitrary configuration fields. */
 export declare function validateConfig(raw: unknown): RunConfig;
+export declare function taskConfig(config: RunConfig, ticketId: string): RunConfig;

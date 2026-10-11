@@ -77,7 +77,7 @@ function duration(milliseconds: number): string {
   return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 function defaults(workspace = ''): RunConfig {
-  return { provider: 'github', repository: '', workspace, milestones: [], remote: '', targetBranch: '', parallelism: 2, maxTeamMembers: 4, pollSeconds: 30, maxRepairRounds: 3, maxTaskMinutes: 120, verifyCommands: [], workerPreset: 'standard', requireBrowser: false, requireMemory: false }
+  return { provider: 'github', repository: '', workspace, milestones: [], remote: '', targetBranch: '', parallelism: 2, maxTickets: 0, maxTeamMembers: 4, pollSeconds: 30, maxRepairRounds: 3, maxTaskMinutes: 120, verifyCommands: [], workerPreset: 'standard', requireBrowser: false, requireMemory: false }
 }
 function lines(value: string): string[] { return value.split(/\r?\n/).map(line => line.trim()).filter(Boolean) }
 function terminal(task: Task): boolean { return ['merged', 'failed', 'cancelled'].includes(task.status) }
@@ -211,6 +211,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
               <details><summary>Execution limits & verification</summary><div className={css.fields}>
                 <div className={css.pair}><label>Poll seconds<input required type="number" min={5} max={3600} value={config.pollSeconds} onChange={event => set('pollSeconds', Number(event.target.value))} /></label><label>Repair rounds<input required type="number" min={0} max={20} value={config.maxRepairRounds} onChange={event => set('maxRepairRounds', Number(event.target.value))} /></label></div>
                 <label>Task timeout (minutes)<input required type="number" min={1} max={1440} value={config.maxTaskMinutes} onChange={event => set('maxTaskMinutes', Number(event.target.value))} /></label>
+                <label>Ticket limit<input required type="number" min={0} max={100000} value={config.maxTickets ?? 0} onChange={event => set('maxTickets', Number(event.target.value))} /><small>0 keeps consuming; 1 runs a single-ticket trial. Attempts count toward the limit.</small></label>
                 <label>Worker preset<input required value={config.workerPreset} onChange={event => set('workerPreset', event.target.value)} /></label>
                 <label className={css.check}><input type="checkbox" checked={config.requireMemory} onChange={event => set('requireMemory', event.target.checked)} />Require durable memory</label>
                 <label className={css.check}><input type="checkbox" checked={config.requireBrowser} onChange={event => set('requireBrowser', event.target.checked)} />Require browser verification</label>

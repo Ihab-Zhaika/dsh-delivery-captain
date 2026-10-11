@@ -44,9 +44,11 @@ Milestone order comes from `.darkingdoom.json` or `docs/delivery/{github,azure-d
 
 Adjust parallel tickets, team size, execution limits, optional source filters, milestone scope and verification commands as needed. To declare defaults in another repository, commit `.darkingdoom.json` containing `milestones` (ordered exact names) and `verifyCommands` (host commands, one per array entry).
 
+For a bounded trial, set **Ticket limit** to **1** under **Execution limits & verification**, and **Parallel tickets** to **1**. The limit counts admitted attempts, including blocked setup; it is retained through recovery and Resume. The run stops after its admitted tickets reach a terminal state (merged tickets must also be closed). **0** keeps consuming eligible tickets continuously. Parallelism alone does not limit the total tickets a run can consume.
+
 **Start DarKingDoom Plugin** grants advance authority for full filesystem/shell/network access, original AgentTeams automatic approval, pushes, PR creation, gated merges, follow-ups and closure. Installing the plugin, opening its panel or reading ticket content never activates an ordinary session. There is no model-callable activation tool.
 
-Human command alternative: `/darkingdoom start` discovers the current repository defaults. Optional JSON changes run preferences: `/darkingdoom start {"parallelism":4}`. Controls: `/darkingdoom status`, `pause`, `resume`, `drain`, `stop`.
+Human command alternative: `/darkingdoom start` discovers the current repository defaults. Optional JSON changes run preferences: `/darkingdoom start {"parallelism":1,"maxTickets":1}` for a one-ticket trial. Controls: `/darkingdoom status`, `pause`, `resume`, `drain`, `stop`.
 
 ```json
 {
@@ -66,9 +68,11 @@ Human command alternative: `/darkingdoom start` discovers the current repository
 
 ## Scheduling and autonomy
 
-Continuously dispatch ready work from the **earliest unfinished configured milestone**. Predecessors need confirmed merged delivery and closure. Related links are not dependencies. Cycles, missing references, later-milestone prerequisites, foreign claims and unavailable dependency APIs remain visible blockers. Query filters do not erase unfinished tickets from milestone accounting; avoid permanently excluding required work from the current milestone.
+Continuously dispatch ready work from the **earliest unfinished configured milestone**. Code predecessors need confirmed merged delivery and closure. GitHub decision tickets explicitly labelled `kind:decision` may instead satisfy dependencies when closed with reason `completed`; this never claims a code merge. Related links are not dependencies. Cycles, missing references, later-milestone prerequisites, foreign claims and unavailable dependency APIs remain visible blockers. Query filters do not erase unfinished tickets from milestone accounting; avoid permanently excluding required work from the current milestone.
 
-GitHub uses native blocked-by relationships supplemented by explicit `Depends on #123` text. Closed delivery uses closing PR references, not arbitrary mentions. Azure uses predecessor relations and linked completed target-branch PRs. Cross-repository prerequisites are inspected but never executed outside the configured repository. Failed/cancelled work is never silently redispatched as a new ticket.
+GitHub uses native blocked-by relationships supplemented by explicit `Depends on #123`, `Blocked by`, or `Predecessors` text, including bold delivery-template headings. Azure `AB#123` and foreign repository references are not interpreted as local GitHub IDs. Closed code delivery uses closing PR references, not arbitrary mentions. Azure uses predecessor relations and linked completed target-branch PRs. Cross-repository prerequisites are inspected but never executed outside the configured repository. Failed/cancelled work is never silently redispatched as a new ticket.
+
+For a selected-ticket trial, command JSON may supply `ticketIds:["448","371"]` with `maxTickets:2` and `parallelism:2`. Other tickets remain in milestone and dependency accounting but cannot be admitted. `verifyCommandsByTicket` can supply nonempty command arrays for individual ticket IDs, while `verifyCommands` remains the default for every other task. This supports a documentation-only gate alongside a full application CI gate without applying the documentation override to application changes.
 
 Each ordinary root worker leads an original AgentTeams team with `approval="automatic"`. Full-access policy is written through DSH's permission service and inherited by original descendants. Workers ask durable questions; the captain answers and wakes them. Recovery is bounded. Irresolvable work stays blocked while other eligible work continues; later milestones stay locked.
 
@@ -76,7 +80,7 @@ Independent follow-ups are linked to their source, assigned a configured milesto
 
 ## Review and merge
 
-The controller drains the worker team, requires original-team delivery evidence, checks a clean committed worktree, fetches the target, executes verification commands and runs OCR against immutable base/head commits. OCR must cover every changed path with no failed/waived coverage. Critical, high and medium findings require repair; low findings remain recorded. Incomplete or unsupported reports never pass.
+The controller drains the worker team, requires original-team delivery evidence, checks a clean committed worktree, fetches the target, executes verification commands and runs OCR against immutable base/head commits. Creation evidence comes from successful native tool call/result or PTC dispatch receipts in that worker's own session, bound to its task marker, automatic approval and durable team identity; inherited calls and quoted text cannot satisfy it. Completed delegated work remains mandatory. OCR must cover every changed path with no failed/waived coverage. Critical, high and medium findings require repair; low findings remain recorded. Incomplete or unsupported reports never pass.
 
 Passing review is reused while waiting for CI only if worktree, head and target remain unchanged. Remote checks and merge policies must pass. Accepted merge requests are reconciled until exact-head merged delivery is confirmed. Closure follows; closure failures are retried without reimplementation. GitHub currently uses normal merge commits; repositories disabling that method remain blocked.
 
@@ -85,7 +89,7 @@ Passing review is reused while waiting for CI only if worktree, head and target 
 - **Pause:** hold new intake; existing work continues.
 - **Resume:** continue a paused/draining/stopped saved run.
 - **Drain:** finish runnable work, then stop; blocked work is preserved.
-- **Stop:** revoke admission, cancel command trees and workers, drain descendants, preserve files/state.
+- **Stop:** revoke admission, quiesce workers, archive their original teams, cancel command trees and drain selected continuable children, preserving files/state and the root session's ability to launch a recovery team on Resume.
 
 The DSH host must stay running. Closing the dashboard does not stop automation. Cold restart restores explicitly enabled runs and rechecks prerequisites. A single-host repository lease prevents duplicate captain ownership. State: `$DSH_HOME/darkingdoom` (default `~/.dsh/darkingdoom`). Worktrees: beside the checkout under `.delivery-worktrees/`. Worktrees are retained for inspection, never automatically deleted. AgentTeams state is ignored through Git `info/exclude`.
 

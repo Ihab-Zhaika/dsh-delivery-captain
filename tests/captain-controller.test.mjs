@@ -24,6 +24,36 @@ test('explicit start schedules bounded independent tickets; overlapping ticks ca
   assert.equal(f.starts.length,2)
   assert.equal(f.controller.state('captain').tasks.length,2)
 }))
+
+test('a one-ticket trial never claims a second ticket and stops after verified closure',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1})
+  await Promise.all([f.controller.tick(),f.controller.tick()])
+  assert.equal(run.config.maxTickets,1)
+  assert.equal(run.tasks.length,1)
+  const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'review',ready:true})
+  await f.controller.tick();await f.controller.tick()
+  assert.equal(task.status,'merged');assert.ok(task.closedAt)
+  assert.equal(run.status,'stopped');assert.equal(f.starts.length,1)
+  await f.controller.control('captain','resume');await f.controller.tick()
+  assert.equal(run.status,'stopped');assert.equal(run.tasks.length,1)
+}))
+
+test('failed claims count toward a trial cap and cannot admit substitute tickets',()=>fixture(async f=>{
+  f.provider.claim=async()=>{throw new Error('Foreign claim')}
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxRepairRounds:0})
+  await f.controller.tick();await f.controller.tick()
+  assert.equal(run.tasks.length,1);assert.equal(f.starts.length,0)
+  assert.equal(run.tasks[0].status,'blocked')
+}))
+test('explicit ticket selection never substitutes another ready ticket and applies scoped verification',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:2,ticketIds:['2'],verifyCommandsByTicket:{'2':['documentation gate']}})
+  f.runtime.review=async(_task,cfg)=>{assert.deepEqual(cfg.verifyCommands,['documentation gate']);return{passed:true,headSha:'head',report:'pass',findings:[]}}
+  await f.controller.tick()
+  assert.deepEqual(run.tasks.map(t=>t.ticket.id),['2'])
+  await f.controller.report(run.tasks[0].sessionId,{phase:'testing',ready:true});await f.controller.tick()
+  assert.equal(run.tasks[0].status,'merged');assert.equal(run.tasks.length,1)
+}))
 test('ordinary sessions cannot report, answer, or create followups',()=>fixture(async f=>{
   await assert.rejects(f.controller.report('ordinary',{phase:'complete',ready:true}),/worker/i)
   await assert.rejects(f.controller.answer('ordinary','question','answer'),/captain/i)

@@ -3,16 +3,18 @@ export type Phase = 'setup' | 'analysis' | 'implementation' | 'testing' | 'revie
 export interface Ticket {
   id: string; title: string; body: string; url: string; milestone: string;
   predecessors: string[]; state: 'open' | 'closed'; merged: boolean;
-  priority: number; createdAt: string; labels: string[]; exclusion?: string;
+  priority: number; createdAt: string; labels: string[]; exclusion?: string; completedDecision?: boolean;
 }
 export interface RunConfig {
   provider: 'github' | 'azure'; repository: string; workspace: string;
   organization?: string; project?: string; query?: string;
   milestones: string[]; remote: string; targetBranch: string;
-  parallelism: number; maxTeamMembers: number; pollSeconds: number;
+  parallelism: number; maxTeamMembers: number; pollSeconds: number; maxTickets: number;
   maxRepairRounds: number; maxTaskMinutes: number;
   verifyCommands: string[]; workerPreset: string;
   requireBrowser: boolean; requireMemory: boolean;
+  ticketIds?: string[];
+  verifyCommandsByTicket?: Record<string,string[]>;
 }
 export interface RepositoryContext {
   config: RunConfig;

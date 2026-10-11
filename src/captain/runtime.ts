@@ -13,6 +13,8 @@ import { runCommand } from './commands.ts'
 import { prepareWorktree, resolveHead } from './worktrees.ts'
 import { isReviewCurrent, reviewTask } from './review.ts'
 import type { CommandRunner, Run, RunConfig, Task, WorkerRuntime } from './types.ts'
+import { originalTeamReceipt } from './team-receipt.ts'
+import { taskConfig } from './scheduler.ts'
 
 interface PermissionPresets {
   resolve(name: string): { sandbox: string; approval: string }
@@ -108,7 +110,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
   }
   async function attach(task: Task, run: Run): Promise<Agent> {
     stopped.delete(task.sessionId)
-    workers.set(task.sessionId, { task, config: run.config })
+    workers.set(task.sessionId, { task, config: taskConfig(run.config,task.ticket.id) })
     await ctx.sessionController.create({ sessionId: task.sessionId as SessionId, cwd: task.worktree, agentPreset: run.config.workerPreset })
     const agent = await resolveAgent(ctx, task.sessionId)
     await configure(agent, task, run.config)
@@ -122,13 +124,13 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
   }
   async function teamEvidence(task: Task): Promise<void> {
     const agent = ctx.agents.get(task.sessionId as SessionId)
-    const created = agent && [...agent.session.snapshotEvents()].reverse().find(event => event.type === 'agent-teams/team-created')
-    if (!created || created.type !== 'agent-teams/team-created') throw new Error('Original AgentTeams creation evidence is missing from the worker session')
-    const teamId = created.data.teamId
-    if (!/^[a-zA-Z0-9_-]+$/.test(teamId)) throw new Error('Invalid original AgentTeams identity')
+    const inspection = await ctx.sessionController.inspect(task.sessionId as SessionId)
+    const receipt = originalTeamReceipt(inspection,task.sessionId,task.id)
+    if (!agent || !receipt) throw new Error('Original AgentTeams creation evidence is missing from the worker session')
+    const teamId = receipt.id
     const root = join(task.worktree, options.teamStateDir ?? '.agent-teams')
     const team = await readTeam(root, teamId) ?? await readArchivedTeam(root, teamId)
-    if (!team || team.captainSessionId !== task.sessionId || !team.description?.includes(`Delivery task ${task.id}`)) throw new Error('Original AgentTeams durable task scope evidence is missing')
+    if (!team || team.name !== receipt.name || team.captainSessionId !== task.sessionId || !team.description?.includes(`Delivery task ${task.id}`)) throw new Error('Original AgentTeams durable task scope evidence is missing')
     if (team.members.some(member => member.status === 'working') || agent.status === 'running') throw new Error('Original AgentTeams work has not stopped')
     const delegated = team.tasks.some(item => item.status === 'completed' && !!item.output?.trim() && team.members.some(member => member.id !== '' && item.assignee === member.name))
     if (!delegated) throw new Error('Original AgentTeams has no completed delegated work with evidence')
@@ -151,7 +153,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
   }
   return {
     async preflight(config) {
-      if (typeof ctx.sessionController?.create !== 'function' || typeof ctx.sessionController?.resolveAgent !== 'function' || typeof ctx.sessionController?.prompt !== 'function' || typeof ctx.subagents?.drainContinuableDescendants !== 'function' || typeof ctx.agents?.get !== 'function') throw new Error('DSH 0.2.0-rc.2 root session and descendant drain APIs are required')
+      if (typeof ctx.sessionController?.create !== 'function' || typeof ctx.sessionController?.resolveAgent !== 'function' || typeof ctx.sessionController?.prompt !== 'function' || typeof ctx.sessionController?.inspect !== 'function' || typeof ctx.subagents?.drainContinuableChildren !== 'function' || typeof ctx.subagents?.listChildren !== 'function' || typeof ctx.agents?.get !== 'function') throw new Error('DSH 0.2.0-rc.2 root session, inspection and scoped child drain APIs are required')
       permissions(ctx); await checkTools(config)
       await runCommandImpl('git', ['--version'], { cwd: config.workspace })
       const version = await runCommandImpl('ocr', ['--version'], { cwd: config.workspace })
@@ -166,7 +168,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
     async start(task: Task, run: Run) {
       const agent = await attach(task, run)
       // An adopted live worker needs its policy refreshed but not a duplicate assignment.
-      if (agent.status !== 'running') await ctx.sessionController.prompt({ requestId: randomUUID() as SessionRequestId, sessionId: task.sessionId as SessionId, mode: 'queue', content: [{ type: 'text', text: workerPrompt(task, run.config) }] }, new AbortController().signal)
+      if (agent.status !== 'running') await ctx.sessionController.prompt({ requestId: randomUUID() as SessionRequestId, sessionId: task.sessionId as SessionId, mode: 'queue', content: [{ type: 'text', text: workerPrompt(task, taskConfig(run.config,task.ticket.id)) }] }, new AbortController().signal)
     },
     send: prompt,
     async stop(sessionId) {
@@ -176,18 +178,26 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       const agent = ctx.agents.get(sessionId as SessionId)
       if (!agent) return
       try {
+        // In-flight create may commit and publish members before the cancelled
+        // parent reaches idle. Read the final team/catalog only after that barrier.
+        agent.cancel({ kind: 'user' })
+        await agent.whenIdle()
         if (worker) {
           const stateRoot = join(worker.task.worktree, options.teamStateDir ?? '.agent-teams')
           const team = await findTeamByCaptain(stateRoot, sessionId)
           if (team) {
-            agent.cancel({ kind: 'user' })
-            await agent.whenIdle()
             await archiveOriginalTeam(agent)
           }
         }
       } finally {
         agent.cancel({ kind: 'user' })
-        try { await ctx.subagents.drainContinuableDescendants([agent]) }
+        try {
+          // Full descendant teardown permanently closes this exact parent's admission.
+          // Release its durable direct children instead, so the SAME worker can repair
+          // a failed review with a new original team through supported APIs.
+          const children=await ctx.subagents.listChildren(agent.id)
+          await ctx.subagents.drainContinuableChildren(agent,children.filter(child=>child.mode==='continuable').map(child=>child.id))
+        }
         finally {
           // Member-settled notifications may have enqueued a trailing captain wake.
           agent.cancel({ kind: 'user' })

@@ -8,7 +8,7 @@ export function eligibility(tickets: Ticket[], milestones: string[], tasks: Pick
   const byId = new Map(tickets.map(t => [t.id, t]))
   if (byId.size !== tickets.length) throw new Error('Duplicate ticket identities in discovery')
   const delivered = new Set(tasks.filter(t => t.status === 'merged' && t.closedAt).map(t => t.ticket.id))
-  const satisfied = (t: Ticket): boolean => delivered.has(t.id) || (t.state === 'closed' && t.merged)
+  const satisfied = (t: Ticket): boolean => delivered.has(t.id) || (t.state === 'closed' && (t.merged || t.completedDecision === true))
   const current = milestones.find(m => tickets.some(t => t.milestone === m && !satisfied(t)))
   const dependencyIssue = (ticket: Ticket, path: Set<string>): string | undefined => {
     if (path.has(ticket.id)) return `Dependency cycle involving ${ticket.id}`
@@ -25,7 +25,7 @@ export function eligibility(tickets: Ticket[], milestones: string[], tasks: Pick
     return undefined
   }
   return tickets.map(t => {
-    const reason = satisfied(t) ? 'Delivered' : !milestones.includes(t.milestone) ? 'Outside configured milestones'
+    const reason = satisfied(t) ? t.completedDecision && !t.merged && !delivered.has(t.id) ? 'Decision completed (no code merge claimed)' : 'Delivered' : !milestones.includes(t.milestone) ? 'Outside configured milestones'
       : tasks.some(task => task.ticket.id === t.id) ? 'Already claimed; see task status'
       : t.exclusion ? t.exclusion
       : t.state === 'closed' ? 'Closed without verified merged delivery'
@@ -75,8 +75,24 @@ export function validateConfig(raw: unknown): RunConfig {
   const result: RunConfig = { provider: c.provider, repository: str('repository'), workspace, remote, targetBranch,
     milestones: c.milestones as string[], parallelism: integer('parallelism', 2, 1, 32), maxTeamMembers: integer('maxTeamMembers', 3, 1, 16),
     pollSeconds: integer('pollSeconds', 30, 5, 3600), maxRepairRounds: integer('maxRepairRounds', 3, 0, 20), maxTaskMinutes: integer('maxTaskMinutes', 120, 1, 1440),
+    maxTickets: integer('maxTickets', 0, 0, 100000),
     verifyCommands: c.verifyCommands as string[], workerPreset: str('workerPreset', 'standard'), requireBrowser: bool('requireBrowser', false), requireMemory: bool('requireMemory', true),
     ...optional('organization') ? { organization: optional('organization') } : {}, ...optional('project') ? { project: optional('project') } : {}, ...optional('query') ? { query: optional('query') } : {} }
+  if(c.ticketIds!==undefined) {
+    if(!Array.isArray(c.ticketIds)||!c.ticketIds.length||c.ticketIds.some(id=>typeof id!=='string'||!/^[1-9][0-9]*$/.test(id))||new Set(c.ticketIds).size!==c.ticketIds.length)throw new Error('ticketIds must be distinct positive ticket IDs')
+    result.ticketIds=c.ticketIds as string[]
+  }
+  if(c.verifyCommandsByTicket!==undefined) {
+    if(!c.verifyCommandsByTicket||typeof c.verifyCommandsByTicket!=='object'||Array.isArray(c.verifyCommandsByTicket))throw new Error('Invalid per-ticket verification commands')
+    const entries=Object.entries(c.verifyCommandsByTicket)
+    if(entries.some(([id,commands])=>!/^[1-9][0-9]*$/.test(id)||!Array.isArray(commands)||!commands.length||commands.some(cmd=>typeof cmd!=='string'||!cmd.trim())))throw new Error('Per-ticket verification requires valid ticket IDs and nonempty command arrays')
+    result.verifyCommandsByTicket=Object.fromEntries(entries) as Record<string,string[]>
+  }
   if (result.provider === 'azure' && (!result.organization || !result.project)) throw new Error('Azure mode needs organization URL and project')
   return result
+}
+
+export function taskConfig(config:RunConfig,ticketId:string):RunConfig {
+  const commands=config.verifyCommandsByTicket?.[ticketId]
+  return commands?{...config,verifyCommands:commands}:config
 }

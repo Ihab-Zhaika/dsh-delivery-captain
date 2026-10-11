@@ -62,8 +62,9 @@ function host() {
     get: name => name === 'permissionPresets' ? permissions : ctx[name],
     tools: { get: () => ({}), schemas: () => [{ name: 'hindsight_recall' }, { name: 'ego_browser' }] },
     agents: { get: id => agents.get(id), list: () => [...agents.values()], isOwnedBy: () => false },
-    subagents: { drainContinuableDescendants: async roots => calls.push(['drain', roots[0].id]) },
+    subagents: { drainContinuableDescendants: async roots => calls.push(['permanent-drain', roots[0].id]), listChildren: async()=>[{id:'owned-child',mode:'continuable'}], drainContinuableChildren: async(parent,ids)=>calls.push(['drain',parent.id,ids]) },
     sessionController: {
+      inspect: async id=>({meta:{id},inheritedEventCount:0,events:agents.get(id)?.events??[]}),
       create: async req => { calls.push(['create', req]); if (!agents.has(req.sessionId)) agents.set(req.sessionId, { id: req.sessionId, status: 'idle', session: { id: req.sessionId, header: { cwd: req.cwd } }, ctx: { on: (name, fn) => hooks.push([name, fn]) }, cancel: () => calls.push(['cancel']), whenIdle: async () => calls.push(['idle']) }); return { sessionId: req.sessionId } },
       resolveAgent: async id => ({ agent: agents.get(id) }),
       prompt: async req => { calls.push(['prompt', req]); agents.get(req.sessionId).status = 'running'; return { accepted: true } },
@@ -77,7 +78,10 @@ async function seedTeam(root, h, item, archived = true) {
   await mkdir(dir, { recursive: true }); await writeFile(join(dir, 'team.json'), JSON.stringify(team))
   await writeFile(join(root, '.git', 'info', 'exclude'), '/.agent-teams/\n')
   await h.ctx.sessionController.create({ sessionId: item.sessionId, cwd: root })
-  h.agents.get(item.sessionId).session.snapshotEvents = () => [{ type: 'agent-teams/team-created', data: { teamId: team.id, captainSessionId: item.sessionId } }]
+  h.agents.get(item.sessionId).events = [
+    {type:'tool/call',seq:1,data:{callId:'create-original',name:'agent_teams_create',arguments:JSON.stringify({name:team.name,approval:'automatic',description:team.description})}},
+    {type:'tool/result',seq:2,sourceEventSeqs:[1],data:{message:{toolCallId:'create-original',isError:false,content:[]},meta:{team_id:team.id,team_name:team.name,captain_session_id:item.sessionId}}},
+  ]
   return team
 }
 test('worker is ordinary root, permissions precede prompt, genuine activity and descendants drain', async () => {
@@ -260,7 +264,7 @@ test('original team evidence rejects unfinished scope and disk state without its
   team.tasks.push({ ...team.tasks[0], id: 't2', status: 'pending' })
   await writeFile(join(root, '.agent-teams', 'archive', team.id, 'team.json'), JSON.stringify(team))
   assert.match((await rt.review(item, config)).findings.join(' '), /scope is incomplete/)
-  h.agents.get(item.sessionId).session.snapshotEvents = () => []
+  h.agents.get(item.sessionId).events = []
   assert.match((await rt.review(item, config)).findings.join(' '), /creation evidence/)
 })
 test('stop safely handles session creation not yet published', async () => {
@@ -273,6 +277,21 @@ test('stop safely handles session creation not yet published', async () => {
   await publish(); await starting
   await rt.stop('session-1')
   assert.ok(h.calls.some(call => call[0] === 'drain'))
+})
+test('stop quiesces an in-flight original creation before discovering and archiving its team',async t=>{
+  const root=await repo(t), h=host(), item=task({worktree:root})
+  const rt=runtime.createRuntime(h.ctx)
+  await rt.restore(item,{config})
+  let written=false
+  h.agents.get(item.sessionId).whenIdle=async()=>{
+    h.calls.push(['idle'])
+    if(!written){written=true;const dir=join(root,'.agent-teams','late-team');await mkdir(dir,{recursive:true});await writeFile(join(dir,'team.json'),JSON.stringify({id:'late-team',name:'late-team',captainSessionId:item.sessionId,createdAt:Date.now(),taskSeq:0,members:[],tasks:[]}))}
+  }
+  h.ctx.tools.execute=async exec=>{h.calls.push(['installed-tool',exec.name]);return {isError:false,content:[]}}
+  await rt.stop(item.sessionId)
+  assert.ok(h.calls.some(call=>call[0]==='installed-tool'&&call[1]==='agent_teams_delete'))
+  assert.ok(h.calls.findIndex(call=>call[0]==='idle')<h.calls.findIndex(call=>call[0]==='drain'))
+  assert.equal(h.calls.some(call=>call[0]==='permanent-drain'),false)
 })
 test('failed original archive still drains the root and descendants', async t => {
   const root = await repo(t); const h = host(); const item = task({ worktree: root })

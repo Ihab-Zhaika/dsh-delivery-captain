@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import type { FollowupInput, Phase, Question, Run, RunConfig, Task, TicketProvider, WorkerRuntime } from './types.ts'
-import { eligibility, validateConfig } from './scheduler.ts'
+import { eligibility, validateConfig, taskConfig } from './scheduler.ts'
 import { RunStore } from './store.ts'
 
 const TERMINAL = new Set<Task['status']>(['merged', 'failed', 'cancelled'])
@@ -208,6 +208,7 @@ export class CaptainController {
       delete run.recoveryPending
     }
     run.tickets = await provider.discover(); run.lastPollAt = now(); delete run.error
+    if(run.config.ticketIds)run.tickets=run.tickets.map(ticket=>!ticket.exclusion&&!run.config.ticketIds!.includes(ticket.id)?{...ticket,exclusion:'Outside configured ticket selection'}:ticket)
     // Reconcile confirmed delivery/closure even if the previous process died after merge.
     for (const task of run.tasks) {
       if (isStopped(run) || this.disposed) return
@@ -249,6 +250,11 @@ export class CaptainController {
       if (q.answer && !q.deliveredAt) await this.deliverAnswer(run, q)
       if (!q.answer && Date.now() - Date.parse(q.lastNotifyAttemptAt ?? q.createdAt) >= (q.notifiedAt ? 300000 : 60000)) await this.notifyQuestion(run, q)
     }
+    // Admission counts persisted attempts, including blocked/failed setup. A trial
+    // must never substitute another ticket or reset its cap after a restart.
+    if (run.config.maxTickets > 0 && run.tasks.length >= run.config.maxTickets && run.tasks.every(t => TERMINAL.has(t.status) && (t.status !== 'merged' || t.closedAt))) {
+      run.status = 'stopped'; await this.save(run); await this.store.release(repositoryKey(run.config)); return
+    }
     // Retry parked technical blockers with bounded recovery, never unlimited model loops.
     for (const task of run.tasks.filter(t => t.status === 'blocked')) {
       if (isStopped(run) || this.activeCount(run) >= run.config.parallelism) break
@@ -264,7 +270,7 @@ export class CaptainController {
     const eligible = new Set(rows.filter(r => r.eligible).map(r => r.ticketId))
     const queue = run.tickets.filter(t => eligible.has(t.id)).sort((a,b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
     for (const ticket of queue) {
-      if (run.status !== 'running' || this.disposed || this.activeCount(run) >= run.config.parallelism) break
+      if (run.status !== 'running' || this.disposed || this.activeCount(run) >= run.config.parallelism || run.config.maxTickets > 0 && run.tasks.length >= run.config.maxTickets) break
       const id = randomUUID(), attempt = randomUUID(), startedAt = now()
       const safe = ticket.id.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 40)
       const branch = `captain/${safe}-${id.slice(0,8)}`
@@ -294,9 +300,10 @@ export class CaptainController {
       await this.runtime.stop(task.sessionId)
       if (isStopped(run) || this.disposed) return
       const previous = task.reviewHistory?.at(-1)
-      const cached = previous?.passed && await this.runtime.isReviewCurrent?.(task, run.config, previous)
+      const verification=taskConfig(run.config,task.ticket.id)
+      const cached = previous?.passed && await this.runtime.isReviewCurrent?.(task, verification, previous)
       if (!cached) { this.phase(task, 'testing'); await this.save(run) }
-      const review = cached && previous ? previous : await this.runtime.review(task, run.config, async phase => { if (isStopped(run) || this.disposed) throw new Error('Run stopped'); this.phase(task, phase); await this.save(run) })
+      const review = cached && previous ? previous : await this.runtime.review(task, verification, async phase => { if (isStopped(run) || this.disposed) throw new Error('Run stopped'); this.phase(task, phase); await this.save(run) })
       if (!cached) (task.reviewHistory ??= []).push({ ...review, at: now() })
       await this.save(run)
       if (isStopped(run) || this.disposed) return
@@ -309,7 +316,7 @@ export class CaptainController {
       if (isStopped(run) || this.disposed) return
       if (!pr.merged) {
         if (await this.runtime.head(task) !== review.headSha) { await this.repair(run, task, 'Branch changed after verification; review the latest commit'); return }
-        if (this.runtime.isReviewCurrent && !await this.runtime.isReviewCurrent(task, run.config, review)) { await this.repair(run, task, 'Reviewed head or target branch changed before merge; synchronize and verify again'); return }
+        if (this.runtime.isReviewCurrent && !await this.runtime.isReviewCurrent(task, verification, review)) { await this.repair(run, task, 'Reviewed head or target branch changed before merge; synchronize and verify again'); return }
         if (isStopped(run) || this.disposed) return
         pr = await provider.merge(task, review.headSha)
       }

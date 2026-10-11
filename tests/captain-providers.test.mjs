@@ -41,6 +41,42 @@ test('GitHub dependency API failure fails closed even with textual fallback', as
   const f = fake((file, a) => a[1]?.startsWith('repos/owner/repo/issues?') ? [[issue(1, { body: 'Depends on #2' })]] : Promise.reject(new Error('HTTP 403')))
   await assert.rejects(() => mod.createProvider(config, f.run).discover(), /dependencies|403/)
 })
+test('GitHub records completed decision disposition separately from merged code proof',async()=>{
+  const f=fake((_file,args)=>{
+    if(args[1]==='repos/owner/repo/issues?state=all&per_page=100')return [[issue(1,{state:'closed',state_reason:'completed',labels:[{name:'kind:decision'}]})]]
+    if(/dependencies\/blocked_by/.test(args[1]))return [[]]
+    if(args[1]==='graphql')return [{data:{repository:{issue:{closedByPullRequestsReferences:{nodes:[],pageInfo:{hasNextPage:false}}}}}}]
+  })
+  const rows=await mod.createProvider(config,f.run).discover()
+  assert.equal(rows[0].completedDecision,true);assert.equal(rows[0].merged,false)
+})
+test('GitHub recognizes explicit Markdown predecessor declarations without treating related links as blockers',async()=>{
+  const f=fake((_file,args)=>{
+    const path=args[1]
+    if(path==='repos/owner/repo/issues?state=all&per_page=100')return [[issue(1,{body:'**Predecessors (must be closed first):** AB#200 [Foundation] #2 (Done).\nRelated: #3'})]]
+    if(path==='repos/owner/repo/issues/2')return issue(2,{milestone:null})
+    if(/dependencies\/blocked_by/.test(path))return [[]]
+  })
+  const tickets=await mod.createProvider(config,f.run).discover()
+  assert.deepEqual(tickets.find(t=>t.id==='1').predecessors,['2'])
+  assert.equal(tickets.some(t=>t.id==='3'),false)
+})
+test('GitHub preserves dependency declarations with no space after the colon',async()=>{
+  const f=fake((_file,args)=>{
+    if(args[1]==='repos/owner/repo/issues?state=all&per_page=100')return [[issue(1,{body:'Depends on:#2'})]]
+    if(args[1]==='repos/owner/repo/issues/2')return issue(2,{milestone:null})
+    if(/dependencies\/blocked_by/.test(args[1]))return [[]]
+  })
+  assert.deepEqual((await mod.createProvider(config,f.run).discover()).find(t=>t.id==='1').predecessors,['2'])
+})
+test('GitHub does not reinterpret foreign references ending in punctuation as local issues',async()=>{
+  const f=fake((_file,args)=>{
+    if(args[1]==='repos/owner/repo/issues?state=all&per_page=100')return [[issue(1,{body:'Blocked by: other/repo-#3 other/repo.#4, #2'})]]
+    if(args[1]==='repos/owner/repo/issues/2')return issue(2,{milestone:null})
+    if(/dependencies\/blocked_by/.test(args[1]))return [[]]
+  })
+  assert.deepEqual((await mod.createProvider(config,f.run).discover()).find(t=>t.id==='1').predecessors,['2'])
+})
 const task = { id: '1', ticket: issue(1), branch: 'captain/1', worktree: '.', headSha: 'abc', prUrl: 'https://github.com/owner/repo/pull/9' }
 const pr = { number: 9, url: task.prUrl, headRefOid: 'abc', headRefName: task.branch, baseRefName: 'main', isCrossRepository: false, state: 'OPEN', isDraft: false, mergeStateStatus: 'CLEAN', reviewDecision: '', statusCheckRollup: [] }
 test('GitHub refuses changed head and never requests merge', async () => {
@@ -150,6 +186,15 @@ test('GitHub query keeps excluded milestone tickets visible as barriers', async 
 test('GitHub preflight rejects a mismatched push repository', async () => {
   const f = fake((file) => file === 'git' ? 'git@github.com:someone/else.git' : '{}')
   await assert.rejects(() => mod.createProvider(config, f.run).preflight(), /remote|repository/)
+})
+test('GitHub preflight uses the canonical repository endpoint without a trailing slash',async()=>{
+  const f=fake((file,args)=>{
+    if(file==='git')return 'https://github.com/owner/repo.git'
+    if(args[0]==='auth')return ''
+    assert.equal(args[1],'repos/owner/repo')
+    return {full_name:'owner/repo'}
+  })
+  await mod.createProvider(config,f.run).preflight()
 })
 test('GitHub claim rejects another captain marker', async () => {
   const f = fake(() => [[{ body: '<!-- darkingdoom-claim:foreign -->' }]])

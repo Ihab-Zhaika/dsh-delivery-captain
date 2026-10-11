@@ -11,6 +11,12 @@ test('closed but unmerged predecessors do not unlock children', () => {
   const rows = eligibility([ticket('1', 'M1', ['2']), ticket('2', 'M1', [], { state: 'closed' })], ['M1'], [])
   assert.equal(rows.find(r => r.ticketId === '1').eligible, false)
 })
+test('completed non-code decisions satisfy prerequisites without claiming a code merge',()=>{
+  const decision=ticket('2','M1',[],{state:'closed',merged:false,completedDecision:true})
+  assert.equal(eligibility([ticket('1','M1',['2']),decision],['M1'],[])[0].eligible,true)
+  assert.equal(decision.merged,false)
+  assert.match(eligibility([decision],['M1'],[])[0].reason,/Decision completed/)
+})
 test('merged predecessor unlocks task and completed milestone advances', () => {
   const rows = eligibility([ticket('1', 'M2', ['2']), ticket('2', 'M1', [], { state: 'closed', merged: true })], ['M1', 'M2'], [])
   assert.equal(rows.find(r => r.ticketId === '1').eligible, true)

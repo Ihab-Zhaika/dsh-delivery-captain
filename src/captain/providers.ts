@@ -12,7 +12,14 @@ function array(value: unknown): Row[] { if (!Array.isArray(value)) throw new Err
 function required(value: unknown, name: string): string { if (typeof value !== 'string' || !value.trim()) throw new Error(`Provider missing ${name}`); return value }
 function numberId(value: unknown): string { const id = String(value); if (!/^[1-9]\d*$/.test(id)) throw new Error('Invalid ticket/PR id'); return id }
 function unique(items: string[]): string[] { return [...new Set(items)] }
-function textDependencies(body: string): string[] { return unique([...body.matchAll(/^\s*(?:depends on|blocked by)\s*:?\s*((?:#\d+[\s,]*)+)\s*$/gim)].flatMap(m => [...m[1]!.matchAll(/#(\d+)/g)].map(n => n[1]!))) }
+function textDependencies(body: string): string[] {
+  return unique(body.split(/\r?\n/).flatMap(line => {
+    const declaration = line.replace(/\*\*/g, '').replace(/^\s*[-*]\s+/, '').match(/^\s*(?:depends on|blocked by|predecessors)\b(?:\s*\([^)]*\))?\s*:?\s*(.*)$/i)
+    // Mirrored tickets contain AB#123 alongside their GitHub #456 reference.
+    // Azure IDs are not local GitHub issue numbers.
+    return declaration ? [...declaration[1]!.matchAll(/(?<![\w/.-])#(\d+)\b/g)].map(match=>match[1]!) : []
+  }))
+}
 function marker(task: Task, input: FollowupInput): string { return `darkingdoom-followup:${createHash('sha256').update(JSON.stringify([task.ticket.id, input.title, input.milestone, [...input.predecessors].sort()])).digest('hex').slice(0, 24)}` }
 function assertClaims(comments: string[], runId: string): void {
   for (const body of comments) for (const match of body.matchAll(/darkingdoom-claim:([^\s<>]+)/g)) {
@@ -57,7 +64,7 @@ abstract class Provider implements TicketProvider {
 }
 
 class GithubProvider extends Provider {
-  private endpoint(path: string, repo = this.config.repository): string { return `repos/${repo}/${path}` }
+  private endpoint(path: string, repo = this.config.repository): string { return `repos/${repo}${path ? `/${path}` : ''}` }
   private api(path: string, args: string[] = []): Promise<any> { return this.json('gh', ['api', path, ...args]) }
   private async pages(path: string): Promise<Row[]> { const pages = await this.api(path, ['--paginate', '--slurp']); if (!Array.isArray(pages)) throw new Error('Invalid paginated GitHub response'); return pages.flatMap(array) }
   private identity(item: Row): { id: string; repo: string; number: string } {
@@ -113,7 +120,7 @@ class GithubProvider extends Provider {
       }
       const labels: string[] = array(item.labels ?? []).map(x => required(x.name, 'label name'))
       const priorityLabel = labels.find(x => /^p[0-9]$/i.test(x))
-      tickets.set(id, { id, title: required(item.title, 'issue title'), body, url: item.html_url, milestone: item.milestone?.title ?? '', predecessors, state: item.state, merged, priority: priorityLabel ? Number(priorityLabel.slice(1)) : 99, createdAt: item.created_at ?? '', labels, exclusion: repo.toLowerCase() !== this.config.repository.toLowerCase() ? 'Dependency belongs to another repository' : undefined })
+      tickets.set(id, { id, title: required(item.title, 'issue title'), body, url: item.html_url, milestone: item.milestone?.title ?? '', predecessors, state: item.state, merged, completedDecision: item.state==='closed'&&item.state_reason==='completed'&&labels.includes('kind:decision'), priority: priorityLabel ? Number(priorityLabel.slice(1)) : 99, createdAt: item.created_at ?? '', labels, exclusion: repo.toLowerCase() !== this.config.repository.toLowerCase() ? 'Dependency belongs to another repository' : undefined })
       pending.push(...native)
       for (const dependency of predecessors) {
         if (tickets.has(dependency) || pending.some(x => this.identity(x).id === dependency)) continue

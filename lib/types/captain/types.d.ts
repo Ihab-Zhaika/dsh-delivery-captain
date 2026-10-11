@@ -13,6 +13,7 @@ export interface Ticket {
     createdAt: string;
     labels: string[];
     exclusion?: string;
+    completedDecision?: boolean;
 }
 export interface RunConfig {
     provider: 'github' | 'azure';
@@ -27,12 +28,15 @@ export interface RunConfig {
     parallelism: number;
     maxTeamMembers: number;
     pollSeconds: number;
+    maxTickets: number;
     maxRepairRounds: number;
     maxTaskMinutes: number;
     verifyCommands: string[];
     workerPreset: string;
     requireBrowser: boolean;
     requireMemory: boolean;
+    ticketIds?: string[];
+    verifyCommandsByTicket?: Record<string, string[]>;
 }
 export interface RepositoryContext {
     config: RunConfig;
