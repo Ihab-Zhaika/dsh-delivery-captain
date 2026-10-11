@@ -1,5 +1,5 @@
 import type { Phase, Run, Task } from '../captain/types.ts';
-export declare const CAPTAIN_OPEN_EVENT = "delivery-captain:open";
+export declare const CAPTAIN_OPEN_EVENT = "darkingdoom:open";
 export interface CaptainOpenDetail {
     sessionId: string;
     workspace?: string;

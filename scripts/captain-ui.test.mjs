@@ -73,7 +73,7 @@ test('initial dashboard makes authorization explicit and prevents starting befor
   const html = renderToStaticMarkup(createElement(ui.CaptainPanel, { sessionId: 'captain-one', workspace: 'C:/repo', onClose() {}, openSession: async () => {} }))
   assert.match(html, /role="dialog" aria-modal="true"/)
   assert.match(html, /value="C:\/repo"/)
-  assert.match(html, /disabled="">Start Delivery Captain/)
+  assert.match(html, /disabled="">Start DarKingDoom Plugin/)
   assert.match(html, /Start authorizes full access execution, autonomous repair, review, merge and ticket closure/)
   assert.match(html, /Active agent effort/)
   assert.match(html, /Not measured/)

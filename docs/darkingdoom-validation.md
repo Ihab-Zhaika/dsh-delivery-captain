@@ -1,11 +1,11 @@
-# Delivery Captain validation — 2026-10-11
+# DarKingDoom Plugin validation — 2026-10-11
 
 ## Verified locally
 
 - Windows, Node 24.15.0, DSH 0.2.0-rc.2, original AgentTeams 0.1.23, OCR installed v1.12.13.
 - `pnpm typecheck`: host and browser TypeScript passed.
 - `pnpm build`: host/browser artifacts built. The inherited DSH browser-loader contract requires CJS; tsdown's general ESM recommendation is expected.
-- `pnpm verify`: 93 tests passed, zero failures. Source/build artifact stamp matched.
+- `pnpm verify`: 94 tests passed, zero failures. Source/build artifact stamp matched.
 - Temporary real Git repositories: fetched target branch, isolated worktree/branch, idempotent adoption, dirty-worktree rejection and branch/target drift.
 - Provider contract fixtures: GitHub dependency closure and closing PRs; Azure native predecessors, custom workflow completion categories, acceptance fields, pagination, exact-head merge and remote policy checks.
 - Controller: explicit activation, milestone/dependency gates, failed claims, duplicate ticks, concurrent starts, stop-during-launch, capacity reservation, review repair, CI review caching, lost merge acknowledgement, closure failure, durable questions and cold recovery.
@@ -16,7 +16,7 @@
 
 Two isolated DSH_HOME profiles were created under the ignored `.captain-smoke/` directory. Both original AgentTeams and this fork were installed side by side. No customer backlog run was started.
 
-The real Web UI rendered the Delivery Captain session-header action and dashboard. Saved-state loading completed; GitHub/Azure switching exposed the expected fields. The dashboard remained **Not Started** and automation disabled. No browser console errors were observed. Preview screenshot: `artifacts/delivery-captain-dashboard.png` (local artifact).
+The real Web UI rendered the DarKingDoom Plugin session-header action and dashboard. Saved-state loading completed; GitHub/Azure switching exposed the expected fields. The dashboard remained **Not Started** and automation disabled. No browser console errors were observed. Preview screenshot: `artifacts/delivery-captain-dashboard.png` (local artifact).
 
 The host contract probe created an ordinary root worker without a model turn. Its session retained the original `agent_teams_create`, `agent_teams_add_member`, `agent_teams_create_task`, and `agent_teams_delete` tools. Durable events confirmed `permission/preset=danger-full-access`, `sandbox/mode=danger-full-access`, and `approval/policy=never`; the worker remained idle. Reusable probe: `scripts/captain-host-probe.mjs`, mounted only in an isolated profile using a patch and `CAPTAIN_PROBE_WORKSPACE` / `CAPTAIN_PROBE_OUTPUT`.
 

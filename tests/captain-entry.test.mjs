@@ -21,17 +21,17 @@ test('installed captain stays inert, rejects ordinary tool use and authenticates
   }
   try {
     await apply(ctx, { stateDirectory: dir })
-    assert.equal(name, 'delivery-captain')
-    assert.equal(tools.has('delivery_captain_start'), false)
+    assert.equal(name, 'darkingdoom')
+    assert.equal(tools.has('darkingdoom_start'), false)
     assert.equal(tools.has('agent_teams_create'), false)
     assert.equal(sections[0].text({agent:{id:'ordinary'}}), '')
-    await assert.rejects(tools.get('delivery_captain_report').execute({phase:'review',ready:true},{agent:{id:'ordinary'}}), /assigned worker/)
-    const command = commands.get('delivery-captain')
+    await assert.rejects(tools.get('darkingdoom_report').execute({phase:'review',ready:true},{agent:{id:'ordinary'}}), /assigned worker/)
+    const command = commands.get('darkingdoom')
     assert.equal((await command.handler({rawInput:'status',agent:{id:'ordinary'}})).text,'null')
     assert.equal((await command.handler({rawInput:'start {}',agent:{id:'ordinary'}})).kind,'error')
     for(const code of [401,403,undefined]) {
       rejection=code;let status,body
-      await routes.get('/api/delivery-captain/state').handler({method:'GET',url:'/api/delivery-captain/state?sessionId=ordinary'},{writeHead(v){status=v},end(v){body=JSON.parse(v)}})
+      await routes.get('/api/darkingdoom/state').handler({method:'GET',url:'/api/darkingdoom/state?sessionId=ordinary'},{writeHead(v){status=v},end(v){body=JSON.parse(v)}})
       assert.equal(status,code??200)
       if(!code)assert.equal(body.run,null)
     }
@@ -41,9 +41,9 @@ test('installed captain stays inert, rejects ordinary tool use and authenticates
 test('fork package mounts distinct host and browser entry points',async()=>{
   const pkg=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8'))
   const patch=await readFile(new URL('../cordis.patch.yml',import.meta.url),'utf8')
-  assert.equal(pkg.name,'@ihab-zhaika/dsh-delivery-captain')
+  assert.equal(pkg.name,'@ihab-zhaika/dsh-darkingdoom')
   assert.equal(pkg.exports['.'].default,'./lib/captain.js')
-  assert.match(patch,/id: delivery-captain/)
+  assert.match(patch,/id: darkingdoom/)
   assert.doesNotMatch(patch,/id: agent-teams/)
   assert.equal(pkg.peerDependencies['@deepseek-ai/dsh-agent'],'0.2.0-rc.2')
 })

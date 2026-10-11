@@ -1,9 +1,9 @@
-# Delivery Captain is inert until the user explicitly starts a run.
+# DarKingDoom Plugin is inert until the user explicitly starts a run.
 # Install original @nanmicoder/dsh-agent-teams separately for worker teams.
 - insert:
-    - id: delivery-captain
+    - id: darkingdoom
       # Node-resolvable package name — must stay in sync with package.json
       # `name`. Quoted because `@` is a reserved indicator in YAML and cannot
       # open a plain scalar.
-      name: '@ihab-zhaika/dsh-delivery-captain'
+      name: '@ihab-zhaika/dsh-darkingdoom'
       config: {}

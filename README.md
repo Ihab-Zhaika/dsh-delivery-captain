@@ -1,4 +1,4 @@
-# Delivery Captain for DeepSeek Harness
+# DarKingDoom Plugin for DeepSeek Harness
 
 An explicitly activated, continuous GitHub / Azure DevOps delivery orchestrator. Each ticket gets a dedicated DSH session and Git worktree. Workers use the **original installed AgentTeams** with advance approval. Delivery proceeds through implementation, tests, OpenCodeReview, repair, PR checks, merge and closure.
 
@@ -11,7 +11,7 @@ Development target: **DSH 0.2.0-rc.2**, **original AgentTeams 0.1.23**, **OCR >=
 ```powershell
 git clone https://github.com/Ihab-Zhaika/dsh-delivery-captain.git
 cd dsh-delivery-captain
-git switch feat/delivery-captain
+git switch feat/darkingdoom
 pnpm install --frozen-lockfile
 pnpm build
 pnpm verify
@@ -21,7 +21,7 @@ dsh plugin --profile web add --save-exact @nanmicoder/dsh-agent-teams@0.1.23
 dsh plugin --profile web add C:/absolute/path/to/dsh-delivery-captain
 ```
 
-Restart that DSH profile and refresh the browser. This fork mounts only the distinct `delivery-captain` row and `delivery_captain_*` tools; it never replaces the original `agent-teams` row.
+Restart that DSH profile and refresh the browser. This fork mounts only the distinct `darkingdoom` row and `darkingdoom_*` tools; it never replaces the original `agent-teams` row.
 
 Configure integrations in the same profile:
 
@@ -36,7 +36,7 @@ Configure GitHub CLI authentication, or Azure CLI plus its `azure-devops` extens
 
 ## Start once
 
-Open an ordinary DSH session in your repository and click **Delivery Captain** in its header. The header appears after a new session has been created. Configure:
+Open an ordinary DSH session in your repository and click **DarKingDoom Plugin** in its header. The header appears after a new session has been created. Configure:
 
 - GitHub `owner/repository`, or Azure repository name/ID, organization URL and project.
 - Absolute repository path, remote and target branch.
@@ -45,9 +45,9 @@ Open an ordinary DSH session in your repository and click **Delivery Captain** i
 - At least one verification command, one per line, appropriate for the repository and host shell.
 - Optional GitHub search filters or Azure WIQL eligibility query.
 
-**Start Delivery Captain** grants advance authority for full filesystem/shell/network access, original AgentTeams automatic approval, pushes, PR creation, gated merges, follow-ups and closure. Installing the plugin, opening its panel or reading ticket content never activates an ordinary session. There is no model-callable activation tool.
+**Start DarKingDoom Plugin** grants advance authority for full filesystem/shell/network access, original AgentTeams automatic approval, pushes, PR creation, gated merges, follow-ups and closure. Installing the plugin, opening its panel or reading ticket content never activates an ordinary session. There is no model-callable activation tool.
 
-Human command alternative: `/delivery-captain start <JSON configuration>`. Controls: `/delivery-captain status`, `pause`, `resume`, `drain`, `stop`.
+Human command alternative: `/darkingdoom start <JSON configuration>`. Controls: `/darkingdoom status`, `pause`, `resume`, `drain`, `stop`.
 
 ```json
 {
@@ -92,7 +92,7 @@ Passing review is reused while waiting for CI only if worktree, head and target 
 - **Drain:** finish runnable work, then stop; blocked work is preserved.
 - **Stop:** revoke admission, cancel command trees and workers, drain descendants, preserve files/state.
 
-The DSH host must stay running. Closing the dashboard does not stop automation. Cold restart restores explicitly enabled runs and rechecks prerequisites. A single-host repository lease prevents duplicate captain ownership. State: `$DSH_HOME/delivery-captain` (default `~/.dsh/delivery-captain`). Worktrees: beside the checkout under `.delivery-worktrees/`. Worktrees are retained for inspection, never automatically deleted. AgentTeams state is ignored through Git `info/exclude`.
+The DSH host must stay running. Closing the dashboard does not stop automation. Cold restart restores explicitly enabled runs and rechecks prerequisites. A single-host repository lease prevents duplicate captain ownership. State: `$DSH_HOME/darkingdoom` (default `~/.dsh/darkingdoom`). Worktrees: beside the checkout under `.delivery-worktrees/`. Worktrees are retained for inspection, never automatically deleted. AgentTeams state is ignored through Git `info/exclude`.
 
 ## Statistics
 
@@ -107,7 +107,7 @@ pnpm verify
 pnpm pack --pack-destination artifacts
 ```
 
-Tests cover scheduling, durable claims, stop/restart races, provider contracts, exact-head gates, real temporary Git worktrees, OCR parsing, process cancellation, permissions, approvals and UI rendering. See [validation evidence](docs/delivery-captain-validation.md). Live authenticated provider delivery with a model remains a separate integration trial; local tests are not evidence of production delivery.
+Tests cover scheduling, durable claims, stop/restart races, provider contracts, exact-head gates, real temporary Git worktrees, OCR parsing, process cancellation, permissions, approvals and UI rendering. See [validation evidence](docs/darkingdoom-validation.md). Live authenticated provider delivery with a model remains a separate integration trial; local tests are not evidence of production delivery.
 
 Built artifacts support local/Git installation. Keep `lib/` and its source stamp synchronized. `verify:upstream` retains original branding/version-specific checks; it is not the fork's release gate.
 

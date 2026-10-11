@@ -13,10 +13,10 @@ function required(value: unknown, name: string): string { if (typeof value !== '
 function numberId(value: unknown): string { const id = String(value); if (!/^[1-9]\d*$/.test(id)) throw new Error('Invalid ticket/PR id'); return id }
 function unique(items: string[]): string[] { return [...new Set(items)] }
 function textDependencies(body: string): string[] { return unique([...body.matchAll(/^\s*(?:depends on|blocked by)\s*:?\s*((?:#\d+[\s,]*)+)\s*$/gim)].flatMap(m => [...m[1]!.matchAll(/#(\d+)/g)].map(n => n[1]!))) }
-function marker(task: Task, input: FollowupInput): string { return `delivery-captain-followup:${createHash('sha256').update(JSON.stringify([task.ticket.id, input.title, input.milestone, [...input.predecessors].sort()])).digest('hex').slice(0, 24)}` }
+function marker(task: Task, input: FollowupInput): string { return `darkingdoom-followup:${createHash('sha256').update(JSON.stringify([task.ticket.id, input.title, input.milestone, [...input.predecessors].sort()])).digest('hex').slice(0, 24)}` }
 function assertClaims(comments: string[], runId: string): void {
-  for (const body of comments) for (const match of body.matchAll(/delivery-captain-claim:([^\s<>]+)/g)) {
-    if (match[1] !== runId) throw new Error('Ticket has a claim from another Delivery Captain; reconcile ownership before retrying')
+  for (const body of comments) for (const match of body.matchAll(/darkingdoom-claim:([^\s<>]+)/g)) {
+    if (match[1] !== runId) throw new Error('Ticket has a claim from another DarKingDoom Plugin; reconcile ownership before retrying')
   }
 }
 
@@ -126,9 +126,9 @@ class GithubProvider extends Provider {
   async claim(ticket: Ticket, runId: string): Promise<void> {
     const ref = this.splitId(ticket.id)
     const comments = await this.pages(this.endpoint(`issues/${ref.number}/comments?per_page=100`, ref.repo))
-    const tag = `<!-- delivery-captain-claim:${runId} -->`
+    const tag = `<!-- darkingdoom-claim:${runId} -->`
     assertClaims(comments.map(x => typeof x.body === 'string' ? x.body : ''), runId)
-    if (!comments.some(x => typeof x.body === 'string' && x.body.includes(tag))) await this.api(this.endpoint(`issues/${ref.number}/comments`, ref.repo), ['--method', 'POST', '-f', `body=${tag}\nDelivery Captain is working on this ticket.`])
+    if (!comments.some(x => typeof x.body === 'string' && x.body.includes(tag))) await this.api(this.endpoint(`issues/${ref.number}/comments`, ref.repo), ['--method', 'POST', '-f', `body=${tag}\nDarKingDoom Plugin is working on this ticket.`])
   }
   async ensurePullRequest(task: Task): Promise<PullRequest> {
     const prs = await this.pages(this.endpoint(`pulls?state=all&head=${encodeURIComponent(this.config.repository.split('/')[0] + ':' + task.branch)}&base=${encodeURIComponent(this.config.targetBranch)}&per_page=100`))
@@ -136,7 +136,7 @@ class GithubProvider extends Provider {
     if (matches.length > 1) throw new Error('Multiple pull requests match worker branch')
     if (matches[0]?.merged_at) { task.prUrl = required(matches[0].html_url, 'PR URL'); return this.inspectPullRequest(task) }
     await this.push(task)
-    const pr = matches[0] ?? object(await this.api(this.endpoint('pulls'), ['--method', 'POST', '-f', `title=${task.ticket.title}`, '-f', `head=${task.branch}`, '-f', `base=${this.config.targetBranch}`, '-f', `body=Closes #${numberId(task.ticket.id)}\n\nDelivery Captain task ${task.id}`]))
+    const pr = matches[0] ?? object(await this.api(this.endpoint('pulls'), ['--method', 'POST', '-f', `title=${task.ticket.title}`, '-f', `head=${task.branch}`, '-f', `base=${this.config.targetBranch}`, '-f', `body=Closes #${numberId(task.ticket.id)}\n\nDarKingDoom Plugin task ${task.id}`]))
     const closingLine = `Closes #${numberId(task.ticket.id)}`
     if (matches[0] && !String(pr.body ?? '').split(/\r?\n/).includes(closingLine)) await this.api(this.endpoint(`pulls/${numberId(pr.number)}`), ['--method', 'PATCH', '-f', `body=${pr.body ?? ''}\n\n${closingLine}`])
     task.prUrl = required(pr.html_url, 'PR URL')
@@ -296,7 +296,7 @@ class AzureProvider extends Provider {
       continuation = page.continuationToken || page.continuation_token ? String(page.continuationToken || page.continuation_token) : undefined
     } while (continuation)
     assertClaims(comments, runId)
-    const tag = `delivery-captain-claim:${runId}`
+    const tag = `darkingdoom-claim:${runId}`
     // Local repository ownership and persisted claims provide the authoritative lock.
     if (!comments.some(x => x.includes(tag))) await this.az(['boards', 'work-item', 'update', '--id', numberId(ticket.id), '--discussion', tag], false)
   }
@@ -323,7 +323,7 @@ class AzureProvider extends Provider {
     if (matches.length > 1) throw new Error('Multiple pull requests match worker branch')
     if (matches[0]?.status === 'completed') { task.prUrl = this.prUrl(matches[0]); return this.inspectPullRequest(task) }
     await this.push(task)
-    const pr = matches[0] ?? object(await this.az(['repos', 'pr', 'create', '--repository', this.config.repository, '--source-branch', task.branch, '--target-branch', this.config.targetBranch, '--title', task.ticket.title, '--description', `Delivery Captain task ${task.id}`, '--work-items', numberId(task.ticket.id)]))
+    const pr = matches[0] ?? object(await this.az(['repos', 'pr', 'create', '--repository', this.config.repository, '--source-branch', task.branch, '--target-branch', this.config.targetBranch, '--title', task.ticket.title, '--description', `DarKingDoom Plugin task ${task.id}`, '--work-items', numberId(task.ticket.id)]))
     if (matches[0]) {
       const linked = array(await this.az(['repos', 'pr', 'work-item', 'list', '--id', numberId(pr.pullRequestId)], false))
       if (!linked.some(x => String(x.id) === task.ticket.id)) await this.az(['repos', 'pr', 'work-item', 'add', '--id', numberId(pr.pullRequestId), '--work-items', numberId(task.ticket.id)], false)

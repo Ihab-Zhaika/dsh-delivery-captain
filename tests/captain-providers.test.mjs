@@ -152,7 +152,7 @@ test('GitHub preflight rejects a mismatched push repository', async () => {
   await assert.rejects(() => mod.createProvider(config, f.run).preflight(), /remote|repository/)
 })
 test('GitHub claim rejects another captain marker', async () => {
-  const f = fake(() => [[{ body: '<!-- delivery-captain-claim:foreign -->' }]])
+  const f = fake(() => [[{ body: '<!-- darkingdoom-claim:foreign -->' }]])
   await assert.rejects(() => mod.createProvider(config, f.run).claim({ id: '1' }, 'mine'), /another|foreign/)
 })
 test('Azure configured query preserves unmatched milestone catalog', async () => {
@@ -200,7 +200,7 @@ test('Azure follow-up retries reuse marker and add Reverse relation only once', 
   let created = false; let linked = false
   const f = fake((file, a) => {
     if (a[1] === 'query') return created ? [{ id: 8 }] : 'null'
-    if (a[2] === 'create') { assert.ok(a.some(x => x.startsWith('System.Tags=delivery-captain-followup:'))); created = true; return { id: 8 } }
+    if (a[2] === 'create') { assert.ok(a.some(x => x.startsWith('System.Tags=darkingdoom-followup:'))); created = true; return { id: 8 } }
     if (a[2] === 'show') return { id: 8, relations: linked ? [{ rel: 'System.LinkTypes.Dependency-Reverse', url: 'https://dev.azure.com/org/_apis/wit/workItems/1' }] : [] }
     if (a[2] === 'relation') { assert.ok(a.includes('System.LinkTypes.Dependency-Reverse')); linked = true; return {} }
   })
@@ -279,7 +279,7 @@ test('Azure uses configured process completed state after a confirmed merge', as
 })
 test('Azure claim checks every comment page before rejecting foreign ownership', async () => {
   const f = fake((file, a) => {
-    if (a.includes('comments')) { assert.equal(a[a.indexOf('--api-version') + 1], '7.1-preview'); return a.includes('continuationToken=next') ? { comments: [{ text: 'delivery-captain-claim:foreign' }] } : { comments: [], continuationToken: 'next' } }
+    if (a.includes('comments')) { assert.equal(a[a.indexOf('--api-version') + 1], '7.1-preview'); return a.includes('continuationToken=next') ? { comments: [{ text: 'darkingdoom-claim:foreign' }] } : { comments: [], continuationToken: 'next' } }
   })
   await assert.rejects(() => mod.createProvider(azureConfig, f.run).claim({ id: '1' }, 'mine'), /another/)
   assert.ok(!f.calls.some(x => x.args.includes('update')))

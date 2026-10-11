@@ -1,9 +1,9 @@
-/** Browser-only Delivery Captain surface. Mounting never enables automation. */
+/** Browser-only DarKingDoom Plugin surface. Mounting never enables automation. */
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import type { Phase, Run, RunConfig, Task } from '../captain/types.ts'
 import css from './CaptainPanel.module.css'
 
-export const CAPTAIN_OPEN_EVENT = 'delivery-captain:open'
+export const CAPTAIN_OPEN_EVENT = 'darkingdoom:open'
 export interface CaptainOpenDetail { sessionId: string; workspace?: string }
 interface Eligibility { ticketId: string; eligible: boolean; reason: string }
 interface Snapshot { run: Run | null; eligibility?: Eligibility[] }
@@ -87,7 +87,7 @@ async function request<T>(url: string, signal: AbortSignal, body?: unknown): Pro
   const value: unknown = await response.json().catch(() => null)
   if (!response.ok) {
     const detail = value && typeof value === 'object' && 'error' in value ? String(value.error) : response.statusText
-    throw new Error(`${response.status}: ${detail || 'Delivery Captain request failed'}`)
+    throw new Error(`${response.status}: ${detail || 'DarKingDoom Plugin request failed'}`)
   }
   return value as T
 }
@@ -128,8 +128,8 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
 
   const refresh = useCallback(async (signal: AbortSignal) => {
     const version = ++generation.current
-    const value = await request<Snapshot>(`/api/delivery-captain/state?sessionId=${encodeURIComponent(sessionId)}`, signal)
-    if (!value || typeof value !== 'object' || !('run' in value)) throw new Error('Delivery Captain returned an invalid state')
+    const value = await request<Snapshot>(`/api/darkingdoom/state?sessionId=${encodeURIComponent(sessionId)}`, signal)
+    if (!value || typeof value !== 'object' || !('run' in value)) throw new Error('DarKingDoom Plugin returned an invalid state')
     if (signal.aborted || version !== generation.current) return
     setSnapshot(value)
     setLoaded(true)
@@ -177,7 +177,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
     if (!signal || mutation.current) return
     mutation.current = true; generation.current++; setBusy(true)
     try {
-      await request(action ? '/api/delivery-captain/control' : '/api/delivery-captain/start', signal, action
+      await request(action ? '/api/darkingdoom/control' : '/api/darkingdoom/start', signal, action
         ? { sessionId, action, ...(action === 'parallelism' ? { parallelism } : {}) }
         : { sessionId, config: { ...config, milestones: lines(milestones), verifyCommands: lines(commands) } })
       await refresh(signal)
@@ -198,8 +198,8 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
   }) ?? []
 
   return <div className={css.backdrop}>
-    <div className={css.panel} ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="captain-title" data-delivery-captain>
-      <header className={css.header}><div className={css.heading}><span className={css.mark} aria-hidden>⌁</span><div><span className={css.eyebrow}>AUTONOMOUS DELIVERY</span><h1 id="captain-title">Delivery Captain</h1></div><span className={css.status} data-status={run?.status ?? 'idle'}>{run?.status ?? 'Not started'}</span></div><button type="button" onClick={onClose} aria-label="Close Delivery Captain">✕</button></header>
+    <div className={css.panel} ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="darkingdoom-title" data-darkingdoom>
+      <header className={css.header}><div className={css.heading}><span className={css.mark} aria-hidden>⌁</span><div><span className={css.eyebrow}>AUTONOMOUS DELIVERY</span><h1 id="darkingdoom-title">DarKingDoom Plugin</h1></div><span className={css.status} data-status={run?.status ?? 'idle'}>{run?.status ?? 'Not started'}</span></div><button type="button" onClick={onClose} aria-label="Close DarKingDoom Plugin">✕</button></header>
       <div className={css.owner}>Session <code>{sessionId}</code><span>Opening this panel never starts a run.</span></div>
       {error && <div className={css.error} role="alert"><span>{error}</span><button type="button" onClick={() => setError(null)}>Dismiss</button></div>}
       {run?.error && <div className={css.error} role="alert">Captain: {run.error}</div>}
@@ -225,7 +225,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
               </div></details>
             </fieldset>
             <p className={css.authorization}>Start authorizes full access execution, autonomous repair, review, merge and ticket closure within this configuration. The captain answers worker questions automatically.</p>
-            <button type="submit" className={css.primary} disabled={!allowed.start}>{busy ? 'Applying…' : run ? 'Run already created' : 'Start Delivery Captain'}</button>
+            <button type="submit" className={css.primary} disabled={!allowed.start}>{busy ? 'Applying…' : run ? 'Run already created' : 'Start DarKingDoom Plugin'}</button>
             {run?.status === 'stopped' && <p className={css.muted}>Use Resume to continue this saved run with its existing tasks and claims.</p>}
             {!loaded && <p className={css.muted}>Loading saved run before enabling Start…</p>}
           </form>
@@ -260,7 +260,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
           </section>}
           <div className={css.lowerGrid}>
             <section className={css.card}><div className={css.sectionTitle}><h2>Eligibility</h2><span>{eligibility.length} tickets</span></div><ul className={css.records}>{eligibility.map(row => <li key={row.ticketId}><code>{row.ticketId}</code><span className={css.status} data-status={row.eligible ? 'ready' : 'waiting'}>{row.eligible ? 'Eligible' : 'Held'}</span><p>{row.reason}</p></li>)}</ul>{!eligibility.length && <p className={css.placeholder}>Discovery decisions will appear here.</p>}</section>
-            <section className={css.card}><div className={css.sectionTitle}><h2>Blockers & decisions</h2><span>Captain managed</span></div><ul className={css.records}>{blockers.map(item => <li key={item.id}><strong>{item.ticket.id} · {item.status}</strong><p>{item.error ?? 'Waiting for the captain to resolve this blocker.'}</p></li>)}{run?.questions.map(question => <li key={question.id}><small>{question.taskId} · {new Date(question.createdAt).toLocaleTimeString()}</small><strong>{question.question}</strong><p className={question.answer ? css.answer : css.muted}>{question.answer ?? 'Captain is preparing an automatic answer…'}</p>{question.answer && <small>{question.deliveredAt ? 'Delivered to worker' : 'Answer queued for delivery'}</small>}</li>)}</ul>{!blockers.length && !run?.questions.length && <p className={css.placeholder}>No blockers or worker questions recorded.</p>}</section>
+            <section className={css.card}><div className={css.sectionTitle}><h2>Blockers & decisions</h2><span>Orchestrator managed</span></div><ul className={css.records}>{blockers.map(item => <li key={item.id}><strong>{item.ticket.id} · {item.status}</strong><p>{item.error ?? 'Waiting for the captain to resolve this blocker.'}</p></li>)}{run?.questions.map(question => <li key={question.id}><small>{question.taskId} · {new Date(question.createdAt).toLocaleTimeString()}</small><strong>{question.question}</strong><p className={question.answer ? css.answer : css.muted}>{question.answer ?? 'Orchestrator is preparing an automatic answer…'}</p>{question.answer && <small>{question.deliveredAt ? 'Delivered to worker' : 'Answer queued for delivery'}</small>}</li>)}</ul>{!blockers.length && !run?.questions.length && <p className={css.placeholder}>No blockers or worker questions recorded.</p>}</section>
           </div>
           <footer className={css.footer}><span className={css.liveDot} />Refreshes every 3 seconds while open<span>{run ? `Run ${run.id}` : 'Automation is disabled'}</span></footer>
         </main>

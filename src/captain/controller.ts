@@ -118,7 +118,7 @@ export class CaptainController {
     if (report.ready) { task.status = 'ready'; this.phase(task, 'waiting', 'Queued for independent verification and merge') }
     else if (report.blocked) { task.status = 'blocked'; task.error = report.note ?? 'Worker blocked'; task.lastWakeAt = now() }
     await this.save(run)
-    if (report.blocked) await this.notify(run, `Worker ${task.id} is blocked: ${task.error}. Resolve within its acceptance criteria; use delivery_captain_message to guide the worker. No human approval is required.`)
+    if (report.blocked) await this.notify(run, `Worker ${task.id} is blocked: ${task.error}. Resolve within its acceptance criteria; use darkingdoom_message to guide the worker. No human approval is required.`)
     return task
   }
 
@@ -180,7 +180,7 @@ export class CaptainController {
   }
   private async notifyQuestion(run: Run, q: Question): Promise<void> {
     q.lastNotifyAttemptAt = now(); await this.save(run)
-    if (await this.notify(run, `Worker question ${q.id} (task ${q.taskId}):\n${q.question}\nDecide autonomously using project evidence and reply using delivery_captain_answer. Do not ask the human.`)) q.notifiedAt = now()
+    if (await this.notify(run, `Worker question ${q.id} (task ${q.taskId}):\n${q.question}\nDecide autonomously using project evidence and reply using darkingdoom_answer. Do not ask the human.`)) q.notifiedAt = now()
     await this.save(run)
   }
 

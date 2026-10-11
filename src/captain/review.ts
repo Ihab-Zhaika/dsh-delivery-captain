@@ -47,7 +47,7 @@ export function parseOcrReport(text: string, head: string, base: string, changed
 
 export async function reviewTask(task: Task, config: RunConfig, run: CommandRunner, onPhase?: (phase: Phase) => Promise<void>, signal?: AbortSignal): Promise<ReviewResult> {
   let headSha = ''; let baseSha: string | undefined; let report = ''; const findings: string[] = []
-  const directory = await mkdtemp(join(tmpdir(), 'delivery-captain-review-'))
+  const directory = await mkdtemp(join(tmpdir(), 'darkingdoom-review-'))
   const timeoutMs = Math.max(1, config.maxTaskMinutes) * 60_000
   const started = Date.parse(task.startedAt)
   const deadline = Number.isFinite(started) ? started + timeoutMs : Date.now()

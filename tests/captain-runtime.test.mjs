@@ -86,7 +86,7 @@ test('worker is ordinary root, permissions precede prompt, genuine activity and 
   assert.equal(h.calls[0][0], 'create'); assert.equal(h.calls[0][1].cwd, '/worker'); assert.equal(h.calls[0][1].parentAgent, undefined)
   assert.equal(h.calls[1][0], 'permission'); assert.equal(h.calls[2][0], 'prompt')
   const prompt = h.calls[2][1].content[0].text
-  assert.match(prompt, /agent_teams_create/); assert.match(prompt, /automatic/); assert.match(prompt, /delivery_captain_report/)
+  assert.match(prompt, /agent_teams_create/); assert.match(prompt, /automatic/); assert.match(prompt, /darkingdoom_report/)
   assert.equal(await rt.isRunning('session-1'), true)
   h.agents.get('session-1').status = 'idle'; assert.equal(await rt.isRunning('session-1'), false)
   await rt.send('session-1', 'Repair findings'); assert.equal(await rt.isRunning('session-1'), true)

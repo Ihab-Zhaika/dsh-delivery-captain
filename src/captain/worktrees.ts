@@ -26,7 +26,7 @@ export async function prepareWorktree(task: Task, config: RunConfig, run: Comman
   try { text = await readFile(exclude, 'utf8') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   if (!text.split(/\r?\n/).includes(`/${teamStateDir}/`)) {
     await mkdir(resolve(common, 'info'), { recursive: true })
-    await appendFile(exclude, `\n# Delivery Captain: original AgentTeams runtime state\n/${teamStateDir}/\n`)
+    await appendFile(exclude, `\n# DarKingDoom Plugin: original AgentTeams runtime state\n/${teamStateDir}/\n`)
   }
   const expected = resolve(task.worktree)
   const listed = await run('git', ['worktree', 'list', '--porcelain', '-z'], { cwd: config.workspace })

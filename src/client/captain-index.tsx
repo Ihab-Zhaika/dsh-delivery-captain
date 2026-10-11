@@ -16,7 +16,7 @@ export function apply(ctx: Context): void {
   const Entry = ({ sessionId }: PropsRuntime<'conversation.session.header.actions'>) => <button type="button" className={css.entry} title="Configure and monitor autonomous ticket delivery" onClick={() => {
     const detail: CaptainOpenDetail = { sessionId, workspace: ctx.sessions.list.getSnapshot().byId[sessionId]?.cwd }
     window.dispatchEvent(new CustomEvent(CAPTAIN_OPEN_EVENT, { detail }))
-  }}><span aria-hidden>⌁</span>Delivery Captain</button>
+  }}><span aria-hidden>⌁</span>DarKingDoom Plugin</button>
   const openSession = async (_parentId: string, childId: string): Promise<void> => {
     // Delivery workers are ordinary root sessions, not native continuable subagents.
     const workspace = ctx.get('uiWorkspace') as AgentTeamsWorkspaceNavigator | undefined
@@ -28,9 +28,9 @@ export function apply(ctx: Context): void {
   }
   const Surface = () => <CaptainSurface openSession={openSession} />
   ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
-    name: 'conversation.session.header.actions', id: 'delivery-captain-entry', order: 55,
+    name: 'conversation.session.header.actions', id: 'darkingdoom-entry', order: 55,
   }, Entry))
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
-    name: 'shell.overlay', id: 'delivery-captain-panel', order: 90, label: 'Delivery Captain',
+    name: 'shell.overlay', id: 'darkingdoom-panel', order: 90, label: 'DarKingDoom Plugin',
   }, Surface))
 }
