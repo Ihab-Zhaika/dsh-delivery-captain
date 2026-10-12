@@ -92,19 +92,44 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
     const budget = ocrTokensBudget(worker.task.assignmentConfig ?? worker.config)
     return `## Current OCR policy\nEvery worker, member and repair OCR invocation must use --max-tokens-budget ${budget} per independent OCR review session. This current policy supersedes earlier ad hoc 100K/120K budget instructions. The budget is not shared across workers, members, controller reviews or the delivery run. Do not lower this budget ad hoc unless the human explicitly chooses a lower value. Require complete exact-base/HEAD coverage with no failed, waived or budget-exceeded paths. A higher ceiling is not approval; preserve all verification gates, captain holds and scope.\n\n${text}`
   }
-  function hasNativeActivity(sessionId:string):boolean {
+  let observedJobs = false
+  async function hasNativeActivity(sessionId:string):Promise<boolean> {
+    const owners = new Set<string>([sessionId])
+    const liveActivity = ():boolean => {
       const root = ctx.agents.get(sessionId as SessionId)
-      if (!root) return false
-      const pending = [root]; const seen = new Set<Agent>()
+      const pending = root ? [root] : []; const seen = new Set<Agent>()
       while (pending.length) {
         const agent = pending.pop()!
         if (seen.has(agent)) continue
         seen.add(agent)
+        owners.add(agent.id)
         if (agent.status === 'running') return true
         if(agent.inbox.nextTurn.length||agent.inbox.nextStep.length)return true
         pending.push(...ctx.agents.list().filter(candidate => ctx.agents.isOwnedBy(candidate.id, agent)))
       }
       return false
+    }
+    if(liveActivity())return true
+    const jobs=ctx.get('jobs') as {list(owner:SessionId):readonly {owner?:string;status:string}[]} | undefined
+    if(!jobs){if(observedJobs)throw new Error('Native job registry became unavailable');return false}
+    observedJobs=true
+    // Durable ownership includes members whose resident Agent is already idle/released.
+    const descendants=await ctx.subagents.listDescendants(sessionId as SessionId)
+    for(const child of descendants){
+      if(child.kind==='diagnostic'&&child.reason!=='unsupported')throw new Error(`Native descendant activity ${child.reason}: ${child.id}`)
+      owners.add(child.id)
+    }
+    // Native children can be published while the durable catalog read is awaiting.
+    if(liveActivity())return true
+    for(const owner of owners){
+      for(const job of jobs.list(owner as SessionId)){
+        // The registry also returns unowned jobs; they must not reserve another run.
+        if(job.owner!==owner)continue
+        if(job.status==='running'||job.status==='stopping')return true
+        if(!['completed','failed','killed'].includes(job.status))throw new Error(`Unknown native job status: ${job.status}`)
+      }
+    }
+    return liveActivity()
   }
   async function checkTools(config: RunConfig, agent?: Agent): Promise<void> {
     for (const name of ['agent_teams_create', 'agent_teams_status', 'agent_teams_add_member', 'agent_teams_create_task', 'agent_teams_send_message', 'agent_teams_delete']) {
@@ -278,7 +303,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       if(revoked())return false
       const agent = await attach(task, run)
       // An adopted live worker needs its policy refreshed but not a duplicate assignment.
-      if (hasNativeActivity(task.sessionId)) return false
+      if (await hasNativeActivity(task.sessionId)||revoked()) return false
       const inspection=await ctx.sessionController.inspect(task.sessionId as SessionId)
       const assigned=task.assignmentDelivered||inspection.events.slice(inspection.inheritedEventCount).some(event=>{
         if(event.type!=='user/message')return false
@@ -292,7 +317,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       })
       const text=assigned?workerResumePrompt(task):workerPrompt(task,taskDeliveryConfig(task,run.config))
       const key=assigned?`${task.id}:resume:${task.lastWakeAt??run.updatedAt??task.startedAt}`:`${task.id}:assignment`
-      if(revoked()||hasNativeActivity(task.sessionId))return false
+      if(revoked()||await hasNativeActivity(task.sessionId)||revoked())return false
       const receipt=await ctx.sessionController.prompt({requestId:promptIdentity(key),sessionId:task.sessionId as SessionId,mode:'queue',content:[{type:'text',text:currentWorkerPrompt(task.sessionId,text)}]},new AbortController().signal)
       if(!receipt.accepted)throw new Error('Native worker request was not admitted')
       task.assignmentDelivered=true

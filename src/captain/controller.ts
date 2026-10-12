@@ -401,16 +401,20 @@ export class CaptainController {
   }
 
   private async dispatchResumeRun(run:Run):Promise<void> {
-    // Report-time activity is a reservation, not proof that a blocked worker
-    // still runs. Refresh those reservations even when intake is unavailable.
-    for(const task of run.tasks.filter(t=>t.status==='blocked'&&t.executionActive&&!t.parkingError)) {
+    // Reconcile both directions: older idle checks may have missed owned jobs.
+    // Refresh reservations even when intake is unavailable.
+    for(const task of run.tasks.filter(t=>t.status==='blocked'&&!t.parkingError&&(t.baseSha||t.workspaceId||t.assignmentDelivered||t.executionActive))) {
       if(this.disposed||run.status!=='running')return
       const version=task.transitionVersion
-      try {
-        const executing=await this.runtime.isRunning(task.sessionId)
-        if(this.disposed||run.status!=='running')return
-        if(task.status==='blocked'&&task.transitionVersion===version)task.executionActive=executing
-      }catch{/* Unknown activity continues to reserve its slot. */}
+      let executing=true,confirmed=false
+      try {executing=await this.runtime.isRunning(task.sessionId);confirmed=true}catch{/* Unknown jobs retain capacity. */}
+      if(this.disposed||run.status!=='running')return
+      if(task.status!=='blocked'||task.transitionVersion!==version)continue
+      const idleHold=task.error==='Worker and owned members are idle while waiting; diagnose unmet work or prerequisites before resumption'
+      if(confirmed&&executing&&idleHold&&!task.resumeRequested&&!task.dependencyBlocked){
+        task.transitionVersion=(task.transitionVersion??0)+1;task.status='running';task.executionActive=true;delete task.blockedSince;delete task.error
+        this.phase(task,'waiting','Confirmed owned native activity; corrected prior automatic idle observation without replaying work');await this.save(run)
+      }else if(task.executionActive!==executing){task.executionActive=executing;await this.save(run)}
     }
     for(const task of run.tasks) {
       if(this.disposed||run.status!=='running')return

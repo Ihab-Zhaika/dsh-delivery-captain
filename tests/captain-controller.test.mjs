@@ -954,3 +954,29 @@ for(const action of ['stop','dispose'])test(`${action} cancels an in-flight owne
  try{await new Promise(r=>setImmediate(r));assert.equal(cancelled,1)}finally{release();await recovery;await shutdown}
  assert.equal(f.starts.length,1);assert.equal(task.idleCheckpointAt,undefined)
 }))
+
+test('owned maintenance restores a lost blocked activity reservation before claiming more work',()=>fixture(async f=>{
+ f.setTickets([ticket('1'),ticket('2')]);const run=await f.controller.start('captain',{...f.config,parallelism:1,maxTickets:2});await f.controller.tick();const task=run.tasks[0]
+ await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'OCR accounting pending'});task.executionActive=false
+ await f.controller.recoverOwned();assert.equal(task.executionActive,true);await f.controller.tick();assert.equal(run.tasks.length,1)
+ f.runtime.isRunning=async()=>false;await f.controller.recoverOwned();assert.equal(task.executionActive,false);await f.controller.tick();assert.equal(run.tasks.length,2)
+}))
+
+test('unknown owned job activity restores a conservative blocked reservation',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ await f.controller.report(task.sessionId,{phase:'blocked',blocked:true});task.executionActive=false;f.runtime.isRunning=async()=>{throw new Error('Job registry unreadable')}
+ await f.controller.recoverOwned();assert.equal(task.executionActive,true);assert.equal(f.starts.length,1)
+}))
+
+test('confirmed native activity corrects an automatic idle hold without a worker replay',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ await f.controller.report(task.sessionId,{phase:'waiting'});f.runtime.isRunning=async()=>false;task.lastWakeAt=new Date(Date.now()-61000).toISOString();await f.controller.recoverOwned();assert.equal(task.status,'blocked')
+ f.runtime.isRunning=async()=>true;await f.controller.recoverOwned();assert.equal(task.status,'running');assert.equal(task.phase,'waiting');assert.equal(task.blockedSince,undefined);assert.equal(f.starts.length,1)
+}))
+
+test('uncreated setup failures do not reserve slots as unknown job owners',()=>fixture(async f=>{
+ f.setTickets([ticket('1'),ticket('2')]);const claim=f.provider.claim;f.provider.claim=async(t,...args)=>{if(t.id==='1')throw new Error('Claim failed');return claim(t,...args)}
+ const run=await f.controller.start('captain',{...f.config,parallelism:1,maxTickets:2});await f.controller.tick();const first=run.tasks[0]
+ f.runtime.isRunning=async(id)=>{if(id===first.sessionId)throw new Error('Session does not exist');return true}
+ await f.controller.recoverOwned();assert.notEqual(first.executionActive,true);assert.equal(run.tasks.length,2)
+}))

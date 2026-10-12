@@ -580,3 +580,37 @@ test('native rejection cannot acknowledge an assignment or consume its human ret
  await assert.rejects(rt.start(item,{config}),/not admitted/);assert.equal(item.assignmentDelivered,undefined);assert.ok(item.pendingHumanRetry)
  await assert.rejects(rt.send(item.sessionId,'Concrete solution'),/not admitted/)
 })
+
+test('owned background jobs reserve idle workers and prevent startup replays',async()=>{
+ const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker',assignmentDelivered:true})
+ await rt.restore(item,{config});h.agents.get(item.sessionId).status='idle'
+ h.ctx.subagents.listDescendants=async()=>[{kind:'child',id:'reviewer',parentId:item.sessionId,depth:1,mode:'continuable',activity:'inactive',hasChildren:false}]
+ let state='running';h.ctx.jobs={list:owner=>[{id:'pwsh-331',owner:'reviewer',status:state},{id:'unowned',status:'running'},{id:'foreign',owner:'other',status:'running'}]}
+ for(const status of ['running','stopping']){state=status;assert.equal(await rt.isRunning(item.sessionId),true);assert.equal(await rt.start(item,{config}),false)}
+ assert.equal(h.calls.filter(c=>c[0]==='prompt').length,0)
+ for(const status of ['completed','failed','killed']){state=status;assert.equal(await rt.isRunning(item.sessionId),false)}
+})
+
+test('unreadable job or descendant evidence cannot prove worker idleness',async()=>{
+ const h=host(),rt=runtime.createRuntime(h.ctx);await rt.restore(task({worktree:'/worker'}),{config});h.agents.get('session-1').status='idle'
+ h.ctx.jobs={list:()=>{throw new Error('Job registry unavailable')}};h.ctx.subagents.listDescendants=async()=>[]
+ await assert.rejects(rt.isRunning('session-1'),/Job registry unavailable/)
+ h.ctx.jobs.list=()=>[];h.ctx.subagents.listDescendants=async()=>[{kind:'diagnostic',id:'member',reason:'unavailable',parentId:'session-1',depth:1}]
+ await assert.rejects(rt.isRunning('session-1'),/descendant.*unavailable/i)
+ h.ctx.subagents.listDescendants=async()=>[];h.ctx.jobs.list=()=>[{owner:'session-1',id:'pwsh-x',status:'unknown'}]
+ await assert.rejects(rt.isRunning('session-1'),/job.*status/i)
+})
+
+test('native input arriving during job ownership lookup still reserves activity',async()=>{
+ const h=host(),rt=runtime.createRuntime(h.ctx);await rt.restore(task({worktree:'/worker'}),{config});const root=h.agents.get('session-1');root.status='idle'
+ h.ctx.jobs={list:()=>[]};h.ctx.subagents.listDescendants=async()=>{root.inbox.nextTurn.push({});return[]}
+ assert.equal(await rt.isRunning(root.id),true)
+})
+
+test('a newly resident idle child with a background job is checked after catalog lookup',async()=>{
+ const h=host(),rt=runtime.createRuntime(h.ctx);await rt.restore(task({worktree:'/worker'}),{config});const root=h.agents.get('session-1');root.status='idle'
+ h.ctx.agents.isOwnedBy=(id,owner)=>id==='new-member'&&owner.id===root.id
+ h.ctx.jobs={list:owner=>owner==='new-member'?[{owner,id:'pwsh-new',status:'running'}]:[]}
+ h.ctx.subagents.listDescendants=async()=>{h.agents.set('new-member',{id:'new-member',status:'idle',inbox:{nextTurn:[],nextStep:[]}});return[]}
+ assert.equal(await rt.isRunning(root.id),true)
+})
