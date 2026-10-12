@@ -100,7 +100,7 @@ function host() {
     sessionController: {
       inspect: async id=>({meta:{id},inheritedEventCount:0,events:[...agents.get(id)?.events??[],...agents.get(id)?.title?[{type:'session/title',data:{title:agents.get(id).title,source:{kind:'user'}}}]:[]]}),
       rename: async req=>{calls.push(['rename',req]);agents.get(req.sessionId).title=req.title},
-      create: async req => { calls.push(['create', req]);const cwd=req.cwd??[...workspaces.values()].find(w=>w.id===req.workspaceId)?.path; if (!agents.has(req.sessionId)) agents.set(req.sessionId, { id: req.sessionId, status: 'idle', session: { id: req.sessionId, header: { cwd } }, ctx: { on: (name, fn) => hooks.push([name, fn]) }, cancel: () => calls.push(['cancel']), whenIdle: async () => calls.push(['idle']) }); return { sessionId: req.sessionId } },
+      create: async req => { calls.push(['create', req]);const cwd=req.cwd??[...workspaces.values()].find(w=>w.id===req.workspaceId)?.path; if (!agents.has(req.sessionId)) agents.set(req.sessionId, { id: req.sessionId, status: 'idle', inbox:{nextTurn:[],nextStep:[]},session: { id: req.sessionId, header: { cwd } }, ctx: { on: (name, fn) => hooks.push([name, fn]) }, cancel: () => calls.push(['cancel']), whenIdle: async () => calls.push(['idle']) }); return { sessionId: req.sessionId } },
       resolveAgent: async id => ({ agent: agents.get(id) }),
       prompt: async req => { const agent=agents.get(req.sessionId);if(agent.events?.some(e=>e.type==='user/message'&&e.data.source?.rpcId===req.requestId))return {accepted:true};calls.push(['prompt', req]);agent.events??=[];agent.events.push({type:'user/message',data:{content:req.content,source:{kind:'user',rpcId:req.requestId}}});agent.status = 'running'; return { accepted: true } },
     },
@@ -548,4 +548,35 @@ test('stop uses registered run_code transport when PTC hides direct original too
   }
   const rt = runtime.createRuntime(h.ctx); await rt.restore(item, { config }); await rt.stop(item.sessionId)
   assert.deepEqual(names, ['agent_teams_delete', 'run_code'])
+})
+
+test('pending native inbox input reserves activity and unreadable inboxes never prove idleness',async()=>{
+ const h=host(),rt=runtime.createRuntime(h.ctx);await rt.start(task({worktree:'/worker'}),{config});const root=h.agents.get('session-1');root.status='idle'
+ root.inbox.nextTurn=[{}];assert.equal(await rt.isRunning(root.id),true)
+ root.inbox.nextTurn=[];assert.equal(await rt.isRunning(root.id),false)
+ h.agents.set('member',{id:'member',status:'idle',inbox:{nextTurn:[],nextStep:[{}]}});h.ctx.agents.isOwnedBy=(id,owner)=>id==='member'&&owner.id===root.id
+ assert.equal(await rt.isRunning(root.id),true)
+ Object.defineProperty(root.inbox,'nextTurn',{get(){throw new Error('Inbox unreadable')}})
+ await assert.rejects(rt.isRunning(root.id),/Inbox unreadable/)
+})
+
+test('startup does not replay scope or recovery over native input queued during inspection',async()=>{
+ const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker',assignmentDelivered:true})
+ await rt.restore(item,{config});const root=h.agents.get(item.sessionId),inspect=h.ctx.sessionController.inspect
+ h.ctx.sessionController.inspect=async(...args)=>{const result=await inspect(...args);root.inbox.nextTurn.push({});return result}
+ await rt.start(item,{config});assert.equal(h.calls.filter(call=>call[0]==='prompt').length,0)
+})
+
+test('Pause during startup inspection prevents native admission and retains retry evidence',async()=>{
+ const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker',assignmentDelivered:true,pendingHumanRetry:{at:'now',reason:'Changed budget'}}),run={config,status:'running'}
+ await rt.restore(item,run);const inspect=h.ctx.sessionController.inspect
+ h.ctx.sessionController.inspect=async(...args)=>{const result=await inspect(...args);run.status='paused';return result}
+ assert.equal(await rt.start(item,run),false);assert.equal(h.calls.filter(call=>call[0]==='prompt').length,0);assert.ok(item.pendingHumanRetry)
+})
+
+test('native rejection cannot acknowledge an assignment or consume its human retry',async()=>{
+ const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker',pendingHumanRetry:{at:'now',reason:'Changed budget'}})
+ h.ctx.sessionController.prompt=async()=>({accepted:false})
+ await assert.rejects(rt.start(item,{config}),/not admitted/);assert.equal(item.assignmentDelivered,undefined);assert.ok(item.pendingHumanRetry)
+ await assert.rejects(rt.send(item.sessionId,'Concrete solution'),/not admitted/)
 })

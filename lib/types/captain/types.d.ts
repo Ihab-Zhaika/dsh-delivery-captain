@@ -199,7 +199,7 @@ export interface WorkerRuntime {
     restore?(task: Task, run: Run): Promise<void>;
     preflight(config: RunConfig): Promise<void>;
     prepare(task: Task, config: RunConfig): Promise<void>;
-    start(task: Task, run: Run): Promise<void>;
+    start(task: Task, run: Run): Promise<void | boolean>;
     send(sessionId: string, text: string, deliveryKey?: string, permitted?: () => boolean): Promise<void | boolean>;
     stop(sessionId: string, reason?: 'stop' | 'shutdown'): Promise<void>;
     isRunning(sessionId: string): Promise<boolean>;

@@ -134,6 +134,8 @@ export declare class CaptainController {
     private notifyQuestion;
     /** Deduplicated timer entry. No model polling is required for queue discovery. */
     tick(runIds?: readonly string[]): Promise<void>;
+    /** Already-owned idle recovery is local; the full intake catalog can be slow. */
+    private recoverIdleTask;
     private tickRun;
     private launch;
     private integrate;

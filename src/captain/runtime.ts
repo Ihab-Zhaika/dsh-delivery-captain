@@ -92,6 +92,20 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
     const budget = ocrTokensBudget(worker.task.assignmentConfig ?? worker.config)
     return `## Current OCR policy\nEvery worker, member and repair OCR invocation must use --max-tokens-budget ${budget} per independent OCR review session. This current policy supersedes earlier ad hoc 100K/120K budget instructions. The budget is not shared across workers, members, controller reviews or the delivery run. Do not lower this budget ad hoc unless the human explicitly chooses a lower value. Require complete exact-base/HEAD coverage with no failed, waived or budget-exceeded paths. A higher ceiling is not approval; preserve all verification gates, captain holds and scope.\n\n${text}`
   }
+  function hasNativeActivity(sessionId:string):boolean {
+      const root = ctx.agents.get(sessionId as SessionId)
+      if (!root) return false
+      const pending = [root]; const seen = new Set<Agent>()
+      while (pending.length) {
+        const agent = pending.pop()!
+        if (seen.has(agent)) continue
+        seen.add(agent)
+        if (agent.status === 'running') return true
+        if(agent.inbox.nextTurn.length||agent.inbox.nextStep.length)return true
+        pending.push(...ctx.agents.list().filter(candidate => ctx.agents.isOwnedBy(candidate.id, agent)))
+      }
+      return false
+  }
   async function checkTools(config: RunConfig, agent?: Agent): Promise<void> {
     for (const name of ['agent_teams_create', 'agent_teams_status', 'agent_teams_add_member', 'agent_teams_create_task', 'agent_teams_send_message', 'agent_teams_delete']) {
       if (!ctx.tools.get(name, agent)) throw new Error(`Original AgentTeams tool unavailable: ${name}`)
@@ -147,6 +161,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
     if (permitted && !permitted()) return false
     stopped.delete(sessionId)
     const admitted = await ctx.sessionController.prompt({ requestId: promptIdentity(`${sessionId}:message:${deliveryKey??text}`), sessionId: sessionId as SessionId, mode: 'steer', content: [{ type: 'text', text: content }] }, new AbortController().signal)
+    if(!admitted.accepted&&!permitted)throw new Error('Native request was not admitted')
     return admitted.accepted
   }
   async function registerWorkspace(task: Task, run: Run): Promise<void> {
@@ -259,9 +274,11 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
     },
     async restore(task, run) { await attach(task, run) },
     async start(task: Task, run: Run) {
+      const revoked=()=>run.status==='paused'||run.status==='stopped'
+      if(revoked())return false
       const agent = await attach(task, run)
       // An adopted live worker needs its policy refreshed but not a duplicate assignment.
-      if (agent.status === 'running') return
+      if (hasNativeActivity(task.sessionId)) return false
       const inspection=await ctx.sessionController.inspect(task.sessionId as SessionId)
       const assigned=task.assignmentDelivered||inspection.events.slice(inspection.inheritedEventCount).some(event=>{
         if(event.type!=='user/message')return false
@@ -275,7 +292,9 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       })
       const text=assigned?workerResumePrompt(task):workerPrompt(task,taskDeliveryConfig(task,run.config))
       const key=assigned?`${task.id}:resume:${task.lastWakeAt??run.updatedAt??task.startedAt}`:`${task.id}:assignment`
-      await ctx.sessionController.prompt({requestId:promptIdentity(key),sessionId:task.sessionId as SessionId,mode:'queue',content:[{type:'text',text:currentWorkerPrompt(task.sessionId,text)}]},new AbortController().signal)
+      if(revoked()||hasNativeActivity(task.sessionId))return false
+      const receipt=await ctx.sessionController.prompt({requestId:promptIdentity(key),sessionId:task.sessionId as SessionId,mode:'queue',content:[{type:'text',text:currentWorkerPrompt(task.sessionId,text)}]},new AbortController().signal)
+      if(!receipt.accepted)throw new Error('Native worker request was not admitted')
       task.assignmentDelivered=true
       delete task.pendingHumanRetry
       if(task.error?.startsWith('Shutdown incomplete:')) {
@@ -289,6 +308,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
           }
         }catch{/* Keep unknown or currently unavailable lifecycle evidence visible. */}
       }
+      return true
     },
     send: prompt,
     async stop(sessionId,reason='stop') {
@@ -336,19 +356,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       }
       if(failures.length)throw new AggregateError(failures,`Worker shutdown incomplete: ${failures.map(String).join('; ')}`)
     },
-    async isRunning(sessionId) {
-      const root = ctx.agents.get(sessionId as SessionId)
-      if (!root) return false
-      const pending = [root]; const seen = new Set<Agent>()
-      while (pending.length) {
-        const agent = pending.pop()!
-        if (seen.has(agent)) continue
-        seen.add(agent)
-        if (agent.status === 'running') return true
-        pending.push(...ctx.agents.list().filter(candidate => ctx.agents.isOwnedBy(candidate.id, agent)))
-      }
-      return false
-    },
+    async isRunning(sessionId) { return hasNativeActivity(sessionId) },
     async review(task, config, onPhase) {
       if (reviews.has(task.sessionId)) throw new Error('A review is already running for this worker')
       const controller = new AbortController()

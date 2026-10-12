@@ -891,3 +891,38 @@ test('a superseded policy notification cannot arrive after the current policy',(
  await f.controller.updatePolicy('captain',{ocrMaxTokensBudget:1000000});release();await old
  assert.equal(f.messages.length,1);assert.match(f.messages[0].text,/1000000/);assert.equal(run.config.ocrMaxTokensBudget,1000000);assert.ok(run.policyNotice.deliveredAt)
 }))
+test('owned idle recovery does not wait for a slow intake discovery',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ f.runtime.isRunning=async()=>false;task.lastWakeAt=new Date(Date.now()-61000).toISOString()
+ let entered,release;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+ f.provider.discover=async()=>{entered();await gate;return[ticket('1')]}
+ const tick=f.controller.tick();await started
+ try{assert.equal(f.starts.length,2)}finally{release();await tick}
+}))
+
+test('idle waiting releases a confirmed idle slot for queued owned recovery before discovery',()=>fixture(async f=>{
+ f.setTickets([ticket('1'),ticket('2')]);const run=await f.controller.start('captain',{...f.config,maxTickets:2});await f.controller.tick();const [waiting,retry]=run.tasks
+ await f.controller.report(waiting.sessionId,{phase:'waiting'});await f.controller.report(retry.sessionId,{phase:'blocked',blocked:true,note:'Changed review budget'})
+ run.config.parallelism=1;f.runtime.isRunning=async()=>false;waiting.lastWakeAt=new Date(Date.now()-61000).toISOString()
+ await f.controller.resumeTask('captain',retry.id,'Owner raised review budget',true);assert.equal(retry.resumeRequested,true)
+ let entered,release;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+ f.provider.discover=async()=>{entered();await gate;return[ticket('1'),ticket('2')]}
+ const tick=f.controller.tick();await started
+ try{assert.equal(waiting.status,'blocked');assert.equal(retry.resumeRequested,undefined);assert.equal(f.starts.length,3)}finally{release();await tick}
+}))
+test('native activity arriving during dependency proof prevents an idle recovery checkpoint',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ let pending=false;f.runtime.isRunning=async()=>pending;task.lastWakeAt=new Date(Date.now()-61000).toISOString()
+ f.provider.verifyDependencies=async()=>{pending=true;return undefined}
+ await f.controller.tick();assert.equal(f.starts.length,1);assert.equal(task.idleCheckpointAt,undefined)
+}))
+test('an unadmitted idle startup does not spend the single recovery checkpoint',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ f.runtime.isRunning=async()=>false;task.lastWakeAt=new Date(Date.now()-61000).toISOString();f.runtime.start=async()=>false
+ await f.controller.tick();assert.equal(task.idleCheckpointAt,undefined);assert.equal(task.recoveryAttempts,0)
+}))
+test('startup rejection rolls back an unadmitted idle checkpoint',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ f.runtime.isRunning=async()=>false;task.lastWakeAt=new Date(Date.now()-61000).toISOString();f.runtime.start=async()=>{throw new Error('Native worker request was not admitted')}
+ await f.controller.tick();assert.equal(task.idleCheckpointAt,undefined);assert.equal(task.recoveryAttempts,0)
+}))
