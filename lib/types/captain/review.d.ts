@@ -1,4 +1,5 @@
 import type { CommandRunner, Phase, ReviewResult, RunConfig, Task } from './types.ts';
+export declare function ocrTokensBudget(config: RunConfig): number;
 /** OCR's versioned manifest is authoritative; exit zero alone may mean partial coverage. */
 export declare function parseOcrReport(text: string, head: string, base: string, changedPaths: string[]): string[];
 export declare function reviewTask(task: Task, config: RunConfig, run: CommandRunner, onPhase?: (phase: Phase) => Promise<void>, signal?: AbortSignal): Promise<ReviewResult>;

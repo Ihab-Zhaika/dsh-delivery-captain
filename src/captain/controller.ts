@@ -154,7 +154,7 @@ export class CaptainController {
       if(run.coordinatorRevision!==revision||this.disposed)throw new Error('Run changed while activating resumption')
       run.status = 'running'
       delete run.stoppedAt
-      for (const t of run.tasks.filter(t => t.status === 'cancelled'&&run.config.milestones.includes(t.ticket.milestone)&&(!run.config.ticketIds||run.config.ticketIds.includes(t.ticket.id)))) { t.status = 'blocked'; t.budgetStartedAt=now(); t.phases.push({phase:t.phase,at:now(),note:'Explicit run Resume starts a fresh bounded execution window; previous elapsed/history and assignment gates retained.'});t.resumeRequested = true; delete t.finishedAt; t.recoveryAttempts = 0; delete t.lastWakeAt }
+      for (const t of run.tasks.filter(t => t.status === 'cancelled'&&(run.config.milestones.includes(t.ticket.milestone)||run.config.includeUnmilestoned&&!t.ticket.milestone||run.config.includeRequiredPredecessors&&eligibility(run.tickets,run.config.milestones,[],run.config).some(row=>row.ticketId===t.ticket.id&&row.scope==='predecessor'))&&(!run.config.ticketIds||run.config.ticketIds.includes(t.ticket.id)))) { t.status = 'blocked'; t.budgetStartedAt=now(); t.phases.push({phase:t.phase,at:now(),note:'Explicit run Resume starts a fresh bounded execution window; previous elapsed/history and assignment gates retained.'});t.resumeRequested = true; delete t.finishedAt; t.recoveryAttempts = 0; delete t.lastWakeAt }
     } else if (action === 'stop') {
       this.stoppingRuns.add(run.id)
       try {
@@ -178,6 +178,7 @@ export class CaptainController {
       await this.runtime.coordinatorLoop?.(run,'resume')
     } else throw new Error('Unknown captain control action')
     await this.save(run)
+    if(action==='resume')await this.notifyPolicy(run)
     return run
   }
 
@@ -195,6 +196,7 @@ export class CaptainController {
     for(const task of run.tasks)task.assignmentConfig??=structuredClone(run.config)
     run.stoppedAt??=run.updatedAt
     run.coordinatorRevision=(run.coordinatorRevision??0)+1
+    this.updateReviewBudget(run,config,true);this.recordPolicyNotice(run,config)
     run.config=config;await this.save(run)
     return run
   }
@@ -214,6 +216,39 @@ export class CaptainController {
     run.coordinatorRevision=(run.coordinatorRevision??0)+1
     run.config=updated;await this.save(run)
     return run
+  }
+  async updatePolicy(sessionId:string,raw:unknown,expectedRevision?:number):Promise<Run> {
+    const run=this.captain(sessionId)
+    if(this.disposed||!['running','paused'].includes(run.status)||expectedRevision!==undefined&&run.coordinatorRevision!==expectedRevision)throw new Error('Policy needs the active coordinator; run changed during validation')
+    if(!raw||typeof raw!=='object'||Array.isArray(raw))throw new Error('Invalid intake/review policy')
+    const fields=['includeUnmilestoned','includeRequiredPredecessors','ocrMaxTokensBudget']
+    const values=raw as Record<string,unknown>
+    if(!Object.keys(values).length||Object.keys(values).some(key=>!fields.includes(key)))throw new Error('Only intake scope and OCR budget policy may change here')
+    const updated=validateConfig({...run.config,...values})
+    this.updateReviewBudget(run,updated,'ocrMaxTokensBudget' in values)
+    run.coordinatorRevision=(run.coordinatorRevision??0)+1
+    this.recordPolicyNotice(run,updated);run.config=updated
+    await this.save(run);await this.notifyPolicy(run);return run
+  }
+  private updateReviewBudget(run:Run,config:RunConfig,explicit:boolean):void {
+    for(const task of run.tasks){
+      task.assignmentConfig??=structuredClone(run.config)
+      if(explicit&&task.status!=='merged'&&task.assignmentConfig.ocrMaxTokensBudget!==config.ocrMaxTokensBudget){
+        const previous=task.assignmentConfig.ocrMaxTokensBudget??'CLI/worker setting'
+        task.assignmentConfig={...task.assignmentConfig,ocrMaxTokensBudget:config.ocrMaxTokensBudget}
+        task.phases.push({phase:task.phase,at:now(),note:`Explicit review policy: ${previous} -> ${config.ocrMaxTokensBudget} tokens per independent OCR session. No shared pool; previous reviews/history and all other assignment gates retained.`})
+      }
+    }
+  }
+  private recordPolicyNotice(run:Run,config:RunConfig):void {
+    const fields=['includeUnmilestoned','includeRequiredPredecessors','ocrMaxTokensBudget'] as const
+    if(!fields.some(key=>run.config[key]!==config[key]))return
+    run.policyNotice={revision:run.coordinatorRevision??0,text:`Owner updated intake/review policy: ${JSON.stringify(Object.fromEntries(fields.map(key=>[key,config[key]])))}. Each independent OCR review session/invocation has its OWN ${config.ocrMaxTokensBudget??1_000_000} token ceiling; no shared pool across workers, members, controller or run. This explicit policy supersedes previous ad hoc lower review-budget guidance. Existing assignments receive current policy on their next legitimate message; do not wake workers merely to announce a setting. Use completed original diagnostics and this changed budget to recover budget-blocked reviews within capacity. Required predecessors may be scheduled outside root milestone/query filters only when enabled; explicit trial allowlists remain hard limits. Do not invent milestones or waive complete exact-head review, CI, acceptance, security, ownership or dependency proof. Preserve all teams/worktrees/history, and keep unchanged external blockers parked.`}
+  }
+  private async notifyPolicy(run:Run):Promise<void> {
+    const notice=run.policyNotice
+    if(run.status!=='running'||!notice||notice.deliveredAt||this.disposed)return
+    if(await this.notify(run,notice.text,`policy:${run.id}:${notice.revision}`,()=>run.status==='running'&&run.policyNotice===notice)&&run.policyNotice===notice){notice.deliveredAt=now();await this.save(run)}
   }
   loopState(sessionId:string) {
     const run=this.state(sessionId)
@@ -421,7 +456,7 @@ export class CaptainController {
 
   async followup(sessionId: string, input: FollowupInput): Promise<string> {
     const { run, task } = this.worker(sessionId)
-    if (!input.title.trim() || !input.body.trim() || !run.config.milestones.includes(input.milestone) || !Array.isArray(input.predecessors) || input.predecessors.some(x => typeof x !== 'string')) throw new Error('Follow-up requires title, scope/acceptance body, configured milestone and predecessor IDs')
+    if (!input.title.trim() || !input.body.trim() || !(run.config.milestones.includes(input.milestone)||run.config.includeUnmilestoned&&input.milestone==='') || !Array.isArray(input.predecessors) || input.predecessors.some(x => typeof x !== 'string')) throw new Error('Follow-up requires title, scope/acceptance body, configured milestone (or an enabled unassigned milestone) and predecessor IDs')
     const id = await this.providerFactory(run.config).createFollowup(task, input)
     if (!task.followups.includes(id)) task.followups.push(id)
     await this.save(run); return id
@@ -439,12 +474,12 @@ export class CaptainController {
     await this.save(run)
   }
   async announce(run: Run, text: string): Promise<boolean> { return this.notify(run, text) }
-  private async notify(run: Run, text: string, deliveryKey?: string): Promise<boolean> {
-    if(isStopped(run)||this.disposed)return false
+  private async notify(run: Run, text: string, deliveryKey?: string,permitted?:()=>boolean): Promise<boolean> {
+    if(isStopped(run)||this.disposed||permitted&&!permitted())return false
     try {
       await this.runtime.coordinatorLoop?.(run,'wake')
-      if(isStopped(run)||this.disposed)return false
-      await this.runtime.send(run.captainSessionId, text,deliveryKey); return true
+      if(isStopped(run)||this.disposed||permitted&&!permitted())return false
+      return await this.runtime.send(run.captainSessionId, text,deliveryKey,permitted)!==false
     } catch (error) { run.error = `Captain delivery deferred: ${String(error)}`; await this.save(run); return false }
   }
   private async notifyQuestion(run: Run, q: Question): Promise<void> {
@@ -470,6 +505,7 @@ export class CaptainController {
   private async tickRun(run: Run): Promise<void> {
     const provider = this.providerFactory(run.config)
     this.activeProviders.set(run.id, provider)
+    await this.notifyPolicy(run)
     await this.dispatchResumes(run)
     if(isStopped(run)||this.disposed)return
     if (run.recoveryPending) {
@@ -575,8 +611,9 @@ export class CaptainController {
     while(true) {
       if (run.status !== 'running' || this.disposed || this.activeCount(run) >= run.config.parallelism || run.config.maxTickets > 0 && run.tasks.length >= run.config.maxTickets) break
       // Scope/order and task states can change while the previous launch awaits.
-      const eligible = new Set(eligibility(run.tickets,run.config.milestones,run.tasks).filter(r=>r.eligible).map(r=>r.ticketId))
-      const ticket = run.tickets.filter(t=>eligible.has(t.id)).sort((a,b)=>run.config.milestones.indexOf(a.milestone)-run.config.milestones.indexOf(b.milestone)||a.priority-b.priority||a.createdAt.localeCompare(b.createdAt)||a.id.localeCompare(b.id))[0]
+      const rows=eligibility(run.tickets,run.config.milestones,run.tasks,run.config)
+      const eligible = new Set(rows.filter(r=>r.eligible).map(r=>r.ticketId)),ranks=new Map(rows.map(row=>[row.ticketId,row.milestoneRank])),priorities=new Map(rows.map(row=>[row.ticketId,row.priority]))
+      const ticket = run.tickets.filter(t=>eligible.has(t.id)).sort((a,b)=>(ranks.get(a.id)??run.config.milestones.length)-(ranks.get(b.id)??run.config.milestones.length)||(priorities.get(a.id)??a.priority)-(priorities.get(b.id)??b.priority)||a.createdAt.localeCompare(b.createdAt)||a.id.localeCompare(b.id))[0]
       if(!ticket)break
       const id = randomUUID(), attempt = randomUUID(), startedAt = now()
       const safe = ticket.id.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 40)

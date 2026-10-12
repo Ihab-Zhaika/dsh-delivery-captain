@@ -3,12 +3,13 @@ export type Phase = 'setup' | 'analysis' | 'implementation' | 'testing' | 'revie
 export interface Ticket {
   id: string; title: string; body: string; url: string; milestone: string;
   predecessors: string[]; state: 'open' | 'closed'; merged: boolean;
-  priority: number; createdAt: string; labels: string[]; exclusion?: string; completedDecision?: boolean;
+  priority: number; createdAt: string; labels: string[]; exclusion?: string; selectionExclusion?:string; completedDecision?: boolean;
 }
 export interface RunConfig {
   provider: 'github' | 'azure'; repository: string; workspace: string;
   organization?: string; project?: string; query?: string;
   milestones: string[]; remote: string; targetBranch: string;
+  includeUnmilestoned?:boolean; includeRequiredPredecessors?:boolean; ocrMaxTokensBudget?:number;
   parallelism: number; maxTeamMembers: number; pollSeconds: number; maxTickets: number;
   maxRepairRounds: number; maxTaskMinutes: number;
   verifyCommands: string[]; workerPreset: string;
@@ -51,6 +52,7 @@ export interface Run {
   createdAt: string; updatedAt: string; tasks: Task[]; tickets: Ticket[];
   questions: Question[]; error?: string; lastPollAt?: string;
   recoveryPending?: boolean;
+  policyNotice?:{revision:number;text:string;deliveredAt?:string};
   stoppedAt?:string;
   coordinatorGoalId?:string; coordinatorWaiting?:boolean; coordinatorLoopError?:string; coordinatorRevision?:number;
 }
@@ -83,7 +85,7 @@ export interface WorkerRuntime {
   preflight(config: RunConfig): Promise<void>;
   prepare(task: Task, config: RunConfig): Promise<void>;
   start(task: Task, run: Run): Promise<void>;
-  send(sessionId: string, text: string, deliveryKey?: string): Promise<void>;
+  send(sessionId: string, text: string, deliveryKey?: string,permitted?:()=>boolean): Promise<void|boolean>;
   stop(sessionId: string,reason?: 'stop'|'shutdown'): Promise<void>;
   isRunning(sessionId: string): Promise<boolean>;
   review(task: Task, config: RunConfig, onPhase?: (phase: Phase) => Promise<void>): Promise<ReviewResult>;

@@ -4,9 +4,23 @@ import type { Phase, Run, RunConfig, Task, Ticket, RepositoryContext, Coordinato
 import css from './CaptainPanel.module.css'
 
 export interface CaptainOpenDetail { sessionId: string; workspace?: string }
-interface Eligibility { ticketId: string; eligible: boolean; reason: string; state?: string; predecessors?: string[] }
+interface Eligibility { ticketId: string; eligible: boolean; reason: string; state?: string; predecessors?: string[]; scope?: 'milestone'|'unmilestoned'|'predecessor'; requiredFor?: string[] }
 interface Snapshot { run: Run | null; eligibility?: Eligibility[]; role?: 'idle'|'coordinator'|'worker'; coordinatorSessionId?: string | null; coordinatorLoop?:CoordinatorLoopState|null }
-type Action = 'pause' | 'resume' | 'drain' | 'stop' | 'parallelism' | 'loop' | 'save'
+type Action = 'pause' | 'resume' | 'drain' | 'stop' | 'parallelism' | 'loop' | 'save' | 'policy'
+type IntakePolicy = { includeUnmilestoned: boolean; includeRequiredPredecessors: boolean; ocrMaxTokensBudget: number }
+const MAX_OCR_TOKENS_BUDGET = 10_000_000
+
+function validReviewBudget(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 1 && value <= MAX_OCR_TOKENS_BUDGET
+}
+
+function intakePolicy(config: RunConfig): IntakePolicy {
+  return { includeUnmilestoned: config.includeUnmilestoned ?? false, includeRequiredPredecessors: config.includeRequiredPredecessors ?? false, ocrMaxTokensBudget: config.ocrMaxTokensBudget ?? 1_000_000 }
+}
+function scopeLabel(row: Eligibility | undefined): string {
+  if (row?.scope === 'predecessor') return row.requiredFor?.length ? `Required by ${row.requiredFor.map(id => `#${id}`).join(', ')}` : 'Required predecessor'
+  return row?.scope === 'unmilestoned' ? 'Included without a milestone' : ''
+}
 type ReviewEvidence = NonNullable<Task['reviewHistory']>[number]
 
 /** A stopped run retains its identity and claims; only Resume reactivates it. */
@@ -87,11 +101,11 @@ export function CaptainEligibilityGraph({tickets,rows}:{tickets:Ticket[];rows:El
     <div className={css.graphScroll} role="region" aria-label="Ticket dependency graph" tabIndex={0}>
       <div className={css.graphCanvas} style={{width:graph.width,height:graph.height}}>
         <svg width={graph.width} height={graph.height} aria-hidden="true"><defs><marker id={arrowId} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#607d91" /></marker></defs>{graph.edges.map((edge,index)=>{const a=byId.get(edge.from)!,b=byId.get(edge.to)!;return <path key={index} d={`M ${a.x+205} ${a.y+48} C ${a.x+225} ${a.y+48}, ${b.x-20} ${b.y+48}, ${b.x} ${b.y+48}`} fill="none" stroke="#607d91" strokeWidth="2" markerEnd={`url(#${arrowId})`} />})}</svg>
-        {graph.nodes.map(n=>{const row=decisions.get(n.id);return <button key={n.id} type="button" className={css.graphNode} style={{left:n.x,top:n.y}} data-status={row?.state??'dependency'} aria-pressed={selected===n.id} aria-label={`Ticket ${n.id}: ${row?.state??'missing predecessor'}. ${row?.reason??n.title}`} onClick={()=>setSelected(n.id)}><strong>#{n.id} <span>{row?.state??'missing'}</span></strong><p>{n.title}</p><small>{tickets.find(t=>t.id===n.id)?.milestone}</small></button>})}
+        {graph.nodes.map(n=>{const row=decisions.get(n.id);return <button key={n.id} type="button" className={css.graphNode} style={{left:n.x,top:n.y}} data-status={row?.state??'dependency'} aria-pressed={selected===n.id} aria-label={`Ticket ${n.id}: ${row?.state??'missing predecessor'}. ${row?.reason??n.title}. ${scopeLabel(row)}`} onClick={()=>setSelected(n.id)}><strong>#{n.id} <span>{row?.state??'missing'}</span></strong><p>{n.title}</p><small>{tickets.find(t=>t.id===n.id)?.milestone || 'Unassigned'}{scopeLabel(row) && ` · ${scopeLabel(row)}`}</small></button>})}
       </div>
     </div>
-    {node && <div className={css.graphDetail}><strong>#{node.id} · {node.title}</strong><p>{decision?.reason??'Missing from discovery; delivery cannot proceed without predecessor evidence.'}</p><small>Predecessors: {node.predecessors.join(', ')||'None'}</small></div>}
-    <details><summary>All eligibility reasons ({rows.length})</summary><ul className={css.records}>{rows.map(row=><li key={row.ticketId}><code>{row.ticketId}</code> <span className={css.status} data-status={row.state??'waiting'}>{row.state??(row.eligible?'eligible':'waiting')}</span><p>{row.reason}</p></li>)}</ul></details>
+    {node && <div className={css.graphDetail}><strong>#{node.id} · {node.title}</strong><p>{decision?.reason??'Missing from discovery; delivery cannot proceed without predecessor evidence.'}</p>{scopeLabel(decision) && <p>{scopeLabel(decision)}</p>}<small>Predecessors: {node.predecessors.join(', ')||'None'}</small></div>}
+    <details><summary>All eligibility reasons ({rows.length})</summary><ul className={css.records}>{rows.map(row=><li key={row.ticketId}><code>{row.ticketId}</code> <span className={css.status} data-status={row.state??'waiting'}>{row.state??(row.eligible?'eligible':'waiting')}</span>{scopeLabel(row) && <small>{scopeLabel(row)}</small>}<p>{row.reason}</p></li>)}</ul></details>
   </>
 }
 
@@ -119,7 +133,7 @@ function duration(milliseconds: number): string {
   return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 function defaults(workspace = ''): RunConfig {
-  return { provider: 'github', repository: '', workspace, milestones: [], remote: '', targetBranch: '', parallelism: 2, maxTickets: 0, maxTeamMembers: 4, pollSeconds: 30, maxRepairRounds: 3, maxTaskMinutes: 120, verifyCommands: [], workerPreset: 'standard', requireBrowser: false, requireMemory: false }
+  return { provider: 'github', repository: '', workspace, milestones: [], includeUnmilestoned: true, includeRequiredPredecessors: true, ocrMaxTokensBudget: 1_000_000, remote: '', targetBranch: '', parallelism: 2, maxTickets: 0, maxTeamMembers: 4, pollSeconds: 30, maxRepairRounds: 3, maxTaskMinutes: 120, verifyCommands: [], workerPreset: 'standard', requireBrowser: false, requireMemory: false }
 }
 function lines(value: string): string[] { return value.split(/\r?\n/).map(line => line.trim()).filter(Boolean) }
 export function parseTicketSelection(value:string):string[]|undefined {
@@ -139,7 +153,8 @@ async function request<T>(url: string, signal: AbortSignal, body?: unknown): Pro
 
 export function CaptainPanel({ sessionId, workspace, onClose, openSession, initialSnapshot }: CaptainOpenDetail & { onClose: () => void; openSession: (parentId: string, childId: string) => Promise<unknown>; initialSnapshot?:Snapshot }) {
   const [snapshot, setSnapshot] = useState<Snapshot>(initialSnapshot??{ run: null })
-  const [config, setConfig] = useState<RunConfig>(() => ({...defaults(workspace),...initialSnapshot?.run?.config}))
+  const [config, setConfig] = useState<RunConfig>(() => ({...defaults(workspace),...initialSnapshot?.run?.config,...(initialSnapshot?.run ? intakePolicy(initialSnapshot.run.config) : {})}))
+  const [policy, setPolicy] = useState<IntakePolicy>(() => intakePolicy(initialSnapshot?.run?.config ?? defaults(workspace)))
   const [milestones, setMilestones] = useState('')
   const [commands, setCommands] = useState('')
   const [ticketSelection,setTicketSelection]=useState(initialSnapshot?.run?.config.ticketIds?.join(', ')??'')
@@ -164,15 +179,19 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
   const hydrated = useRef<string | null>(null)
   const hydratedConfig=useRef('')
   const draftDirty=useRef(false)
+  const policyDirty=useRef(false)
+  const policyRun=useRef(initialSnapshot?.run?.id ?? null)
   const commandsEdited = useRef(false)
   const run = snapshot.run
   const worker=snapshot.role==='worker'||!!run&&run.captainSessionId!==sessionId
   const allowed = captainActionAvailability(run?.status, loaded, busy)
   const editable=configurationEditable(run?.status,loaded,busy,worker)
+  const policyEditable=loaded&&!busy&&!worker&&(run?.status==='running'||run?.status==='paused')
   const task = worker?run?.tasks[0]:run?.tasks.find(item => item.id === selected)
   const displayedError=error??pollError??(!worker?contextError:null)
   const markDirty=()=>{draftDirty.current=true;setDirty(true)}
   const set = <K extends keyof RunConfig>(key: K, value: RunConfig[K]) => {markDirty();setConfig(previous => ({ ...previous, [key]: value }))}
+  const setPolicyValue = <K extends keyof IntakePolicy>(key: K, value: IntakePolicy[K]) => {policyDirty.current=true;setPolicy(previous=>({...previous,[key]:value}))}
 
   useEffect(() => {
     if (!loaded || worker || run&&run.status!=='stopped') return
@@ -202,6 +221,9 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
     setPollError(null)
     setSnapshot(value)
     setLoaded(true)
+    if(value.run && (policyRun.current!==value.run.id || !policyDirty.current)) {
+      policyRun.current=value.run.id;policyDirty.current=false;setPolicy(intakePolicy(value.run.config))
+    }
     if (value.run && shouldHydrateConfiguration(hydrated.current,value.run.id,draftDirty.current,hydratedConfig.current,JSON.stringify(value.run.config))) {
       const newRun=hydrated.current!==value.run.id
       hydrated.current = value.run.id
@@ -234,12 +256,18 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
   async function mutate(action?: Action) {
     const signal = controller.current?.signal
     if (!signal || mutation.current) return
+    if(action==='policy'&&(!policyEditable||!validReviewBudget(policy.ocrMaxTokensBudget)))return
+    if((action===undefined||action==='save')&&!validReviewBudget(config.ocrMaxTokensBudget??1_000_000))return
     mutation.current = true; generation.current++; setBusy(true)
     setError(null)
     try {
-      const value=await request<{run:Run}>(action==='save'?'/api/darkingdoom/configure':action ? '/api/darkingdoom/control' : '/api/darkingdoom/start', signal, action&&action!=='save'
+      const value=await request<{run:Run}>(action==='policy'?'/api/darkingdoom/policy':action==='save'?'/api/darkingdoom/configure':action ? '/api/darkingdoom/control' : '/api/darkingdoom/start', signal, action==='policy'?{sessionId,...policy}:action&&action!=='save'
         ? { sessionId, action, ...(action === 'parallelism' ? { parallelism } : {}) }
-        : { sessionId, config: { ...config, ticketIds:parseTicketSelection(ticketSelection), milestones: lines(milestones), verifyCommands: lines(commands) } })
+        : { sessionId, config: { ...config, ...intakePolicy(config), ticketIds:parseTicketSelection(ticketSelection), milestones: lines(milestones), verifyCommands: lines(commands) } })
+      if(action==='policy') {
+        policyDirty.current=false;setPolicy(intakePolicy(value.run.config))
+        setNotice('Policy saved. Intake changes apply to new dispatch; each future OCR review session uses its own token budget.')
+      }
       if(action==='save') {
         draftDirty.current=false;setDirty(false);hydratedConfig.current=JSON.stringify(value.run.config)
         setConfig(value.run.config);setMilestones(value.run.config.milestones.join('\n'));setCommands(value.run.config.verifyCommands.join('\n'));setParallelism(value.run.config.parallelism)
@@ -291,7 +319,11 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
               {config.provider === 'azure' && <><label>Organization URL<input required readOnly value={config.organization ?? ''} /></label><label>Project<input required readOnly value={config.project ?? ''} /></label></>}
               <label>Query <span className={css.optional}>(optional)</span><textarea rows={2} value={config.query ?? ''} onChange={event => set('query', event.target.value)} placeholder={config.provider === 'azure' ? 'WIQL query' : 'Additional issue search filters'} /></label>
               <label>Ticket IDs <span className={css.optional}>(optional)</span><input value={ticketSelection} onChange={event=>{markDirty();setTicketSelection(event.target.value)}} placeholder="All eligible tickets" /><small>Separate IDs with commas. Blank allows all eligible tickets; selected milestone scope and dependency gates still apply.</small></label>
-              <label>Milestones, in priority order<textarea disabled={contextLoading} required rows={3} value={milestones} onChange={event => {markDirty();setMilestones(event.target.value)}} placeholder="Detected delivery milestones" /><small>{repository?.milestoneSource || 'One exact milestone name per line.'}</small></label>
+              <label>Milestones, in priority order<textarea disabled={contextLoading} required={!config.includeUnmilestoned} rows={3} value={milestones} onChange={event => {markDirty();setMilestones(event.target.value)}} placeholder="Detected delivery milestones" /><small>{repository?.milestoneSource || 'One exact milestone name per line. Leave blank to run only tickets without a milestone when enabled.'}</small></label>
+              <label className={css.check}><input type="checkbox" checked={config.includeUnmilestoned ?? false} onChange={event=>set('includeUnmilestoned',event.target.checked)} />Include tickets without a milestone</label>
+              <label className={css.check}><input type="checkbox" checked={config.includeRequiredPredecessors ?? false} onChange={event=>set('includeRequiredPredecessors',event.target.checked)} />Include required predecessors outside the selected milestones</label>
+              <p className={css.muted}>Milestone order sets priority; dependencies still gate dispatch. Required predecessors can run before the selected tickets that need them.</p>
+              <label>Token budget per OCR review session<input required type="number" min={1} step={1} max={MAX_OCR_TOKENS_BUDGET} value={config.ocrMaxTokensBudget ?? 1_000_000} onChange={event=>set('ocrMaxTokensBudget',Number(event.target.value))} /><small>Each review has its own budget; no shared pool across workers or the run.</small></label>
               <div className={css.pair}><label>Remote<input required readOnly value={config.remote} /></label><label>Target branch<input required readOnly value={config.targetBranch} /></label></div>
               <div className={css.pair}><label>Parallel tickets<input required type="number" min={1} max={32} value={config.parallelism} onChange={event => set('parallelism', Number(event.target.value))} /></label><label>Members / team<input required type="number" min={1} max={16} value={config.maxTeamMembers} onChange={event => set('maxTeamMembers', Number(event.target.value))} /></label></div>
               <label>Verification commands<textarea disabled={contextLoading} required rows={3} value={commands} onChange={event => { markDirty();commandsEdited.current = true; setCommands(event.target.value) }} placeholder="Detected repository checks" /><small>{repository?.verificationSource || 'One host command per line, run in each task worktree.'}</small></label>
@@ -305,7 +337,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
               </div></details>
             </fieldset>
             <p className={css.authorization}>Start enables the native coordinator loop in this chat and authorizes full access execution, autonomous repair, review, merge and ticket closure within this configuration. The captain answers worker questions automatically.</p>
-            <button type="submit" className={css.primary} disabled={!(run?.status==='stopped'?editable:allowed.start) || contextLoading || !repository || !config.targetBranch || !lines(milestones).length || lines(milestones).some(name=>!repository.milestoneCatalog.includes(name)) || !lines(commands).length}>{busy ? 'Applying…' : run?.status==='stopped'?'Save configuration':run ? 'Run already created' : 'Start DarKingDoom Plugin'}</button>
+            <button type="submit" className={css.primary} disabled={!(run?.status==='stopped'?editable:allowed.start) || contextLoading || !repository || !config.targetBranch || (!config.includeUnmilestoned&&!lines(milestones).length) || lines(milestones).some(name=>!repository.milestoneCatalog.includes(name)) || !lines(commands).length || !validReviewBudget(config.ocrMaxTokensBudget??1_000_000)}>{busy ? 'Applying…' : run?.status==='stopped'?'Save configuration':run ? 'Run already created' : 'Start DarKingDoom Plugin'}</button>
             {run?.status === 'stopped' && <p className={css.muted}>Save changes, then use Resume in Monitor. History, parked tasks and existing task contracts are preserved; new settings apply to future tickets. Source, repository and target identity stay bound to this run.</p>}
             {!loaded && <p className={css.muted}>Loading saved run before enabling Start…</p>}
           </form>
@@ -329,9 +361,18 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
           </div>
           {dirty&&run?.status==='stopped'&&<p className={css.controlHint}>Save your configuration changes before resuming.</p>}
           <p className={css.controlHint}>Pause holds new dispatch. Drain finishes active tickets. Stop cancels active work. Unresolved blockers park after one hour, preserving work and freeing capacity.</p>
+          {run && <section className={css.card} aria-label="Live intake policy"><div className={css.sectionTitle}><h2>Live intake & review policy</h2><span>{policyEditable?'Running or paused coordinator controls':'Policy changes require a running or paused run'}</span></div>
+            <div className={css.fields}>
+              <label className={css.check}><input aria-label="Live include tickets without a milestone" type="checkbox" disabled={!policyEditable} checked={policy.includeUnmilestoned} onChange={event=>setPolicyValue('includeUnmilestoned',event.target.checked)} />Include tickets without a milestone</label>
+              <label className={css.check}><input aria-label="Live include required predecessors outside the selected milestones" type="checkbox" disabled={!policyEditable} checked={policy.includeRequiredPredecessors} onChange={event=>setPolicyValue('includeRequiredPredecessors',event.target.checked)} />Include required predecessors outside the selected milestones</label>
+              <label>Token budget per OCR review session<input aria-label="Live OCR token budget" required type="number" min={1} step={1} max={MAX_OCR_TOKENS_BUDGET} disabled={!policyEditable} value={policy.ocrMaxTokensBudget} onChange={event=>setPolicyValue('ocrMaxTokensBudget',Number(event.target.value))} /><small>Each review has its own budget; no shared pool across workers or the run.</small></label>
+              <p className={css.muted}>Milestone order sets priority; dependencies still gate dispatch. Intake changes apply to new dispatch. Budget changes apply to future OCR review sessions.</p>
+              <button type="button" disabled={!policyEditable||!validReviewBudget(policy.ocrMaxTokensBudget)} onClick={()=>void mutate('policy')}>Apply policy</button>
+            </div>
+          </section>}
           <section className={css.card}><div className={css.sectionTitle}><h2>Delivery queue</h2><span>{run?.lastPollAt ? `Last discovery ${new Date(run.lastPollAt).toLocaleTimeString()}` : 'Awaiting discovery'}</span></div>
             <div className={css.tableScroll}><table><thead><tr><th>Ticket / task</th><th>Milestone</th><th>Status</th><th>Phase</th><th>Elapsed</th><th>Reviews</th><th>Open</th></tr></thead><tbody>
-              {run?.tasks.map(item => <tr key={item.id} data-selected={selected === item.id}><td><button className={css.taskButton} onClick={() => setSelected(item.id)}><code>{item.ticket.id}</code><strong>{item.ticket.title}</strong><small>{item.id}</small></button></td><td>{item.ticket.milestone}</td><td><span className={css.status} data-status={item.status}>{item.status}</span></td><td>{item.phase}</td><td className={css.numeric}>{duration(elapsedMs(item.startedAt, item.finishedAt, now))}</td><td className={css.numeric}>{item.reviewRounds}</td><td><div className={css.links}>{item.sessionId && <button onClick={() => void navigate(item.sessionId)}>Session ↗</button>}{webUrl(item.prUrl) && <a href={webUrl(item.prUrl)} target="_blank" rel="noreferrer">PR ↗</a>}{webUrl(item.ticket.url) && <a href={webUrl(item.ticket.url)} target="_blank" rel="noreferrer">Ticket ↗</a>}</div></td></tr>)}
+              {run?.tasks.map(item => <tr key={item.id} data-selected={selected === item.id}><td><button className={css.taskButton} onClick={() => setSelected(item.id)}><code>{item.ticket.id}</code><strong>{item.ticket.title}</strong><small>{item.id}</small></button></td><td>{item.ticket.milestone || 'Unassigned'}</td><td><span className={css.status} data-status={item.status}>{item.status}</span></td><td>{item.phase}</td><td className={css.numeric}>{duration(elapsedMs(item.startedAt, item.finishedAt, now))}</td><td className={css.numeric}>{item.reviewRounds}</td><td><div className={css.links}>{item.sessionId && <button onClick={() => void navigate(item.sessionId)}>Session ↗</button>}{webUrl(item.prUrl) && <a href={webUrl(item.prUrl)} target="_blank" rel="noreferrer">PR ↗</a>}{webUrl(item.ticket.url) && <a href={webUrl(item.ticket.url)} target="_blank" rel="noreferrer">Ticket ↗</a>}</div></td></tr>)}
             </tbody></table></div>
             {!run?.tasks.length && <div className={css.empty}><span aria-hidden>⌁</span><h3>{run ? 'Watching the delivery queue' : 'Your next milestone starts here'}</h3><p>{run ? 'Tasks appear after the captain discovers and admits eligible tickets.' : 'Choose a source, order your milestones, then explicitly start the captain.'}</p></div>}
           </section>

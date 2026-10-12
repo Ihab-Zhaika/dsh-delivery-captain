@@ -172,7 +172,7 @@ test('command runner preserves metacharacters as literal arguments', async () =>
   const text = `literal & %PATH% $(bad) \"quote\" ; | > <`
   assert.equal((await runCommand(process.execPath, ['-e', 'process.stdout.write(process.argv[1])', text])).trim(), text)
 })
-test('GitHub query keeps excluded milestone tickets visible as barriers', async () => {
+test('GitHub query keeps unmatched milestone tickets visible with a soft selection exclusion', async () => {
   const f = fake((file, a) => {
     if (a[1]?.startsWith('search/issues?')) return [{ total_count: 1, incomplete_results: false, items: [issue(1)] }]
     if (a[1]?.startsWith('repos/owner/repo/issues?')) return [[issue(1), issue(2)]]
@@ -181,7 +181,8 @@ test('GitHub query keeps excluded milestone tickets visible as barriers', async 
   const rows = await mod.createProvider({ ...config, query: 'label:ready' }, f.run).discover()
   assert.equal(rows.length, 2)
   assert.equal(rows[0].exclusion, undefined)
-  assert.match(rows[1].exclusion, /query/)
+  assert.equal(rows[1].exclusion, undefined)
+  assert.match(rows[1].selectionExclusion, /query/)
 })
 test('GitHub preflight rejects a mismatched push repository', async () => {
   const f = fake((file) => file === 'git' ? 'git@github.com:someone/else.git' : '{}')
@@ -207,7 +208,8 @@ test('Azure configured query preserves unmatched milestone catalog', async () =>
   })
   const rows = await mod.createProvider({ ...azureConfig, query: 'my filter' }, f.run).discover()
   assert.equal(rows.length, 2)
-  assert.match(rows[1].exclusion, /query/)
+  assert.equal(rows[1].exclusion, undefined)
+  assert.match(rows[1].selectionExclusion, /query/)
 })
 test('GitHub adopts existing branch PR, pushes reviewed SHA and restores ticket link', async () => {
   let linked = false
@@ -570,4 +572,141 @@ test('Azure fresh dependency verification refuses unreadable or cross-organizati
   assert.match(await mod.createProvider(azureConfig, missing.run).verifyDependencies(azureTask), /404/)
   const foreign = azureDependencyFixture({ 1: workItem(1, { relations: [{ ...azurePredecessor(2), url: 'https://dev.azure.com/other-org/_apis/wit/workItems/2' }] }) })
   assert.match(await mod.createProvider(azureConfig, foreign.run).verifyDependencies(azureTask), /Cross-organization/)
+})
+
+test('GitHub optionally discovers null and absent milestone roots without seeding other milestones or PRs', async () => {
+  const seeds = [issue(1), issue(2, { milestone: null }), issue(3, { milestone: undefined }), issue(4, { milestone: { title: 'Other' } }), issue(5, { milestone: null, pull_request: {} })]
+  const f = fake((_file, args) => {
+    if (args[1] === 'repos/owner/repo/issues?state=all&per_page=100') return [seeds]
+    if (/dependencies\/blocked_by/.test(args[1])) return [[]]
+  })
+  assert.deepEqual((await mod.createProvider(config, f.run).discover()).map(t => t.id), ['1'])
+  const rows = await mod.createProvider({ ...config, includeUnmilestoned: true }, f.run).discover()
+  assert.deepEqual(rows.map(t => [t.id, t.milestone]), [['1', 'M1'], ['2', ''], ['3', '']])
+  assert.deepEqual((await mod.createProvider({ ...config, milestones: [], includeUnmilestoned: true }, f.run).discover()).map(t => t.id), ['2', '3'])
+})
+
+test('GitHub query retains transitive out-of-selection predecessors and foreign repository hard exclusions', async () => {
+  const foreign = issue(4, { html_url: 'https://github.com/other/repo/issues/4', milestone: null })
+  const f = fake((_file, args) => {
+    if (args[1]?.startsWith('search/issues?')) return [{ total_count: 1, incomplete_results: false, items: [issue(1)] }]
+    if (args[1] === 'repos/owner/repo/issues?state=all&per_page=100') return [[issue(1, { body: 'Depends on #2' })]]
+    if (args[1] === 'repos/owner/repo/issues/2') return issue(2, { milestone: null, body: 'Depends on #3' })
+    if (args[1] === 'repos/owner/repo/issues/3') return issue(3, { milestone: { title: 'Other' } })
+    if (args[1] === 'repos/owner/repo/issues/3/dependencies/blocked_by?per_page=100') return [[foreign]]
+    if (/dependencies\/blocked_by/.test(args[1])) return [[]]
+  })
+  const rows = await mod.createProvider({ ...config, query: 'label:ready', includeUnmilestoned: true }, f.run).discover()
+  assert.deepEqual(rows.map(t => t.id), ['1', '2', '3', 'other/repo#4'])
+  for (const id of ['2', '3']) {
+    assert.equal(rows.find(t => t.id === id).exclusion, undefined)
+    assert.equal(rows.find(t => t.id === id).selectionExclusion, 'Does not match configured query')
+  }
+  assert.equal(rows.find(t => t.id === 'other/repo#4').exclusion, 'Dependency belongs to another repository')
+})
+
+test('Azure optional unmilestoned seeds include project root iterations and normalize absent iterations', async () => {
+  const f = fake((_file, args) => {
+    if (args[1] === 'query') {
+      const wiql = args[args.indexOf('--wiql') + 1]
+      return /'P'\)/.test(wiql) ? [{ id: 1 }, { id: 2 }, { id: 3 }] : [{ id: 1 }]
+    }
+    if (args[2] === 'show') {
+      const id = Number(args[args.indexOf('--id') + 1])
+      const item = workItem(id)
+      item.fields['System.IterationPath'] = id === 1 ? 'M1' : id === 2 ? 'P' : undefined
+      return item
+    }
+  })
+  assert.deepEqual((await mod.createProvider(azureConfig, f.run).discover()).map(t => t.id), ['1'])
+  const rows = await mod.createProvider({ ...azureConfig, includeUnmilestoned: true }, f.run).discover()
+  assert.deepEqual(rows.map(t => [t.id, t.milestone]), [['1', 'M1'], ['2', ''], ['3', '']])
+  assert.ok(rows.every(t => !t.exclusion))
+})
+
+test('Azure preserves an explicitly selected project root as a legacy milestone', async () => {
+  const f = fake((_file, args) => {
+    if (args[1] === 'query') return [{ id: 1 }]
+    if (args[2] === 'show') {
+      const item = workItem(1)
+      item.fields['System.IterationPath'] = 'P'
+      return item
+    }
+  })
+  for (const includeUnmilestoned of [undefined, false, true]) {
+    const rows = await mod.createProvider({ ...azureConfig, milestones: ['P'], includeUnmilestoned }, f.run).discover()
+    assert.equal(rows[0].milestone, 'P')
+    assert.equal(rows[0].exclusion, undefined)
+  }
+})
+
+test('Azure empty selected milestone scope skips intake instead of emitting invalid WIQL', async () => {
+  const f = fake(() => [])
+  assert.deepEqual(await mod.createProvider({ ...azureConfig, milestones: [], includeUnmilestoned: false }, f.run).discover(), [])
+  assert.equal(f.calls.length, 0)
+  await mod.createProvider({ ...azureConfig, milestones: [], includeUnmilestoned: true }, f.run).discover()
+  const wiql = f.calls[0].args[f.calls[0].args.indexOf('--wiql') + 1]
+  assert.match(wiql, /\[System.IterationPath\] IN \('P'\)/)
+})
+
+test('Azure query leaves outside-milestone ancestors selectable by policy and preserves foreign and Removed hard exclusions', async () => {
+  const items = { 1: workItem(1, { relations: [azurePredecessor(2)] }), 2: workItem(2, { relations: [azurePredecessor(3), azurePredecessor(4)] }), 3: workItem(3), 4: workItem(4) }
+  items[3].fields['System.TeamProject'] = 'Other'
+  items[4].fields['System.State'] = 'Removed'
+  const f = fake((_file, args) => {
+    if (args[1] === 'query') return [{ id: 1 }]
+    if (args[2] === 'show') return items[args[args.indexOf('--id') + 1]]
+    if (args.includes('workItemTypeStates')) return { value: [{ name: 'Active', category: 'InProgress' }, { name: 'Removed', category: 'Removed' }] }
+  })
+  const rows = await mod.createProvider({ ...azureConfig, query: 'selected root', includeUnmilestoned: true }, f.run).discover()
+  assert.deepEqual(rows.map(t => t.id), ['1', '2', '3', '4'])
+  assert.equal(rows[1].exclusion, undefined)
+  assert.equal(rows[1].selectionExclusion, 'Does not match configured query')
+  assert.equal(rows[2].exclusion, 'Dependency belongs to another project')
+  assert.equal(rows[3].exclusion, 'Work item workflow category is Removed')
+})
+
+test('GitHub unmilestoned follow-ups omit milestone assignment and retry native dependency linking', async () => {
+  let created
+  let linked = false
+  const f = fake((_file, args) => {
+    if (args[1] === 'repos/owner/repo/issues?state=all&per_page=100') return [created ? [created] : []]
+    if (args[1]?.startsWith('repos/owner/repo/milestones?')) return [[]]
+    if (args[1] === 'repos/owner/repo/issues' && args.includes('POST')) {
+      assert.ok(!args.some(arg => arg.startsWith('milestone=')))
+      created = issue(8, { milestone: null, body: args.find(arg => arg.startsWith('body=')).slice(5) })
+      return created
+    }
+    if (args[1] === 'repos/owner/repo/issues/8/dependencies/blocked_by?per_page=100') return [linked ? [issue(1)] : []]
+    if (args[1] === 'repos/owner/repo/issues/1') return issue(1)
+    if (args[1] === 'repos/owner/repo/issues/8/dependencies/blocked_by') { linked = true; return issue(1) }
+  })
+  const provider = mod.createProvider({ ...config, includeUnmilestoned: true }, f.run)
+  const input = { title: 'Next', body: 'Details', milestone: '', predecessors: [] }
+  assert.equal(await provider.createFollowup({ ...task, ticket: { id: '1' } }, input), '8')
+  assert.equal(await provider.createFollowup({ ...task, ticket: { id: '1' } }, input), '8')
+  assert.equal(f.calls.filter(call => call.args[1] === 'repos/owner/repo/issues' && call.args.includes('POST')).length, 1)
+  assert.equal(f.calls.filter(call => call.args[1]?.endsWith('/blocked_by') && call.args.includes('POST')).length, 1)
+})
+
+test('Azure unmilestoned follow-ups target project root iteration and retain native predecessor links', async () => {
+  const f = fake((_file, args) => {
+    if (args[1] === 'query') return []
+    if (args[2] === 'create') {
+      assert.equal(args[args.indexOf('--iteration') + 1], 'P')
+      return { id: 8 }
+    }
+    if (args[2] === 'show') return { id: 8, relations: [] }
+    if (args[2] === 'relation') return {}
+  })
+  assert.equal(await mod.createProvider({ ...azureConfig, includeUnmilestoned: true }, f.run).createFollowup(azureTask, { title: 'Next', body: 'Details', milestone: '', predecessors: ['2'] }), '8')
+  assert.deepEqual(f.calls.filter(call => call.args[2] === 'relation').map(call => call.args[call.args.indexOf('--target-id') + 1]), ['1', '2'])
+})
+
+test('Both providers reject unmilestoned follow-ups when the intake option is disabled', async () => {
+  for (const providerConfig of [config, azureConfig]) {
+    const f = fake(() => [])
+    await assert.rejects(() => mod.createProvider(providerConfig, f.run).createFollowup({ ...task, ticket: { id: '1' } }, { title: 'Next', body: 'Details', milestone: '', predecessors: [] }), /milestone/i)
+    assert.equal(f.calls.length, 0)
+  }
 })

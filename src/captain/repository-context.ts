@@ -86,7 +86,7 @@ export async function discoverRepository(cwd: string, provider?: RunConfig['prov
     // Names are not valid Azure iteration paths without catalog resolution.
     if(selected.provider==='azure') names = []
   }
-  if (!names.length) warnings.push('No delivery milestones were discovered. Set their exact delivery order before starting.')
+  if (!names.length) warnings.push('No delivery milestones were discovered. Unassigned-ticket intake is enabled; add milestone names if needed for delivery priority.')
 
   let verifyCommands: string[] = [], verificationSource = ''
   const settings = await text(workspace,'.darkingdoom.json')
@@ -114,7 +114,7 @@ export async function discoverRepository(cwd: string, provider?: RunConfig['prov
     }
   }
   if(!verifyCommands.length)warnings.push('No verification commands were discovered. Configure the repository gate before starting.')
-  return { config: { ...selected, workspace, targetBranch, milestones:names, verifyCommands, parallelism:2,maxTickets:0,maxTeamMembers:4,pollSeconds:30,maxRepairRounds:3,maxTaskMinutes:120,workerPreset:'standard',requireMemory:false,requireBrowser:false }, providers:[...new Set(candidates.map(x=>x.provider))], warnings, milestoneSource, verificationSource, milestoneCatalog }
+  return { config: { ...selected, workspace, targetBranch, milestones:names, includeUnmilestoned:true,includeRequiredPredecessors:true,ocrMaxTokensBudget:1_000_000,verifyCommands, parallelism:2,maxTickets:0,maxTeamMembers:4,pollSeconds:30,maxRepairRounds:3,maxTaskMinutes:120,workerPreset:'standard',requireMemory:false,requireBrowser:false }, providers:[...new Set(candidates.map(x=>x.provider))], warnings, milestoneSource, verificationSource, milestoneCatalog }
 }
 
 /** UI preferences can change; repository identity always belongs to the current session. */

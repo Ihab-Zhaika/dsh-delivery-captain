@@ -1,0 +1,11 @@
+# Repository intake and review policy
+
+User authorization: enable required fixes to unblock stalled tickets, support work not tied to milestones, and raise OCR aggregate budget to 1,000,000 tokens.
+
+- Separate root selection from hard provider exclusions. Roots may be selected milestones or explicitly enabled unmilestoned issues (Azure project-root iteration). Required unfinished transitive predecessors may run outside root filters when explicitly enabled. Cross-repository/project, removed items, dependency cycles, unknown proof and foreign claims remain holds. Closed/delivered roots do not pull historical ancestors into intake. Explicit bounded trials preserve their ticket allowlist and lifetime cap.
+- Keep milestone ordering as priority. A prerequisite inherits its earliest requesting root's priority; the graph names which root requires it. New repository defaults enable unmilestoned and prerequisite intake. Legacy saved runs retain their explicit previous scope until policy is applied.
+- Add authenticated coordinator-owned live policy controls for the two scope options and OCR budget. Preserve repository identity, histories and all other assignment gates. Explicit review-budget updates change that field in existing assignment snapshots, with an audit phase note; scheduling selection changes apply to future intake.
+- Pass the OCR budget to actual controller CLI reviews and worker instructions. Complete exact-range manifests, current-head checks, verification and acceptance remain required; a budget ceiling is neither a promised output size nor review approval.
+- User-approved live application enables both intake options and a 1M ceiling per independent OCR review session, without a shared pool on the existing TrucX run. Preserve four slots/five members and milestone order; existing blocked OCR work receives concrete coordinator guidance within capacity, without automatic unchanged external retries or premature dependency unparking.
+
+Validation: meaningful provider, scheduler, controller, review and UI regressions; independent review; full typechecks/build/tests/package checks; supported lifecycle reload with native quiescence evidence and same-run restoration.

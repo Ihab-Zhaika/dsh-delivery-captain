@@ -13,7 +13,7 @@ import { canDeclareDelivery, findTeamByCaptain, readArchivedTeam, readTeam } fro
 import { auditTeamWorkspace } from '../workspace-audit.ts'
 import { runCommand } from './commands.ts'
 import { prepareWorktree, resolveHead } from './worktrees.ts'
-import { isReviewCurrent, reviewTask } from './review.ts'
+import { isReviewCurrent, ocrTokensBudget, reviewTask } from './review.ts'
 import type { CommandRunner, Run, RunConfig, Task, WorkerRuntime } from './types.ts'
 import { originalTeamReceipt } from './team-receipt.ts'
 import { taskDeliveryConfig } from './scheduler.ts'
@@ -64,6 +64,7 @@ MANDATORY: use the original installed agent_teams_create tool with approval="aut
 ${config.requireMemory ? 'Use the installed Hindsight memory integration to recall relevant context and retain useful verified results.' : 'Use available project memory when useful.'}
 ${config.requireBrowser ? 'Use the explicitly requested Tencent BrowserSkill for required interactive verification. If its tools are lazy, load its registered BrowserSkill skill first, then use browser_session and browser_inspect.' : 'Use the configured browser integration if interactive verification is needed.'}
 Report phase changes using darkingdoom_report({phase,note}); phases: analysis, implementation, testing, review, repair, waiting, blocked. Use waiting when original members or jobs are working or a captain question is pending; yield rather than polling. Report blocked only when no independent safe work can continue. Neither waiting nor blocked archives your team. Ask a question once with darkingdoom_question; include a concise reason, evidence and recommendation using readable words. Existing captain holds remain authoritative during recovery. Create independent follow-ups using darkingdoom_followup; never defer current acceptance failures.
+MANDATORY: obtain an independent OCR review of the complete committed range from the current target base to the exact worktree HEAD before reporting ready. Every worker, member and repair OCR invocation must pass --max-tokens-budget ${ocrTokensBudget(config)} with --audience agent --format json --output and truthful business context via --background. This is the aggregate input+output token budget per independent OCR review session; it is not shared across workers, members, controller reviews or the delivery run, and is separate from per-group --max-tokens and timeouts. Do not lower this budget ad hoc unless the human explicitly chooses a lower value. A higher ceiling is not approval or a passing review. Require complete coverage of every changed path for that exact HEAD and base. Partial, failed, waived or budget-exceeded coverage cannot pass; exit zero or manual inspection alone is insufficient. Retain the report and repair actual findings through the original team.
 Run the configured verification commands: ${JSON.stringify(config.verifyCommands)}. Commit all implementation changes on the assigned branch. Never stage AgentTeams runtime state. Only then report darkingdoom_report({phase:"review",ready:true,note:"commit SHA and validation evidence"}). Ready means ready for controller review. The controller alone creates/gates/merges the PR and closes the ticket. Never merge, close, report complete, or claim delivery yourself. If review returns findings, use AgentTeams to repair, commit, and report ready again.`
 }
 
@@ -85,6 +86,12 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
   const stopped = new Set<string>()
   const reviews = new Map<string, AbortController>()
   const controlCalls = new Set<string>()
+  function currentWorkerPrompt(sessionId: string, text: string): string {
+    const worker = workers.get(sessionId)
+    if (!worker) return text
+    const budget = ocrTokensBudget(worker.task.assignmentConfig ?? worker.config)
+    return `## Current OCR policy\nEvery worker, member and repair OCR invocation must use --max-tokens-budget ${budget} per independent OCR review session. This current policy supersedes earlier ad hoc 100K/120K budget instructions. The budget is not shared across workers, members, controller reviews or the delivery run. Do not lower this budget ad hoc unless the human explicitly chooses a lower value. Require complete exact-base/HEAD coverage with no failed, waived or budget-exceeded paths. A higher ceiling is not approval; preserve all verification gates, captain holds and scope.\n\n${text}`
+  }
   async function checkTools(config: RunConfig, agent?: Agent): Promise<void> {
     for (const name of ['agent_teams_create', 'agent_teams_status', 'agent_teams_add_member', 'agent_teams_create_task', 'agent_teams_send_message', 'agent_teams_delete']) {
       if (!ctx.tools.get(name, agent)) throw new Error(`Original AgentTeams tool unavailable: ${name}`)
@@ -127,14 +134,20 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
     })
     configured.add(agent)
   }
-  async function prompt(sessionId: string, text: string, deliveryKey?: string): Promise<void> {
+  async function prompt(sessionId: string, text: string, deliveryKey?: string, permitted?: () => boolean): Promise<boolean> {
     // Only the controller calls this API: an explicit repair/answer reopens admission.
-    stopped.delete(sessionId)
+    if (permitted && !permitted()) return false
     const worker = workers.get(sessionId)
     const agent = await resolveAgent(ctx, sessionId)
+    if (permitted && !permitted()) return false
     if (worker) await configure(agent, worker.task, worker.config)
     else permissions(ctx).set(agent.session, 'danger-full-access')
-    await ctx.sessionController.prompt({ requestId: promptIdentity(`${sessionId}:message:${deliveryKey??text}`), sessionId: sessionId as SessionId, mode: 'steer', content: [{ type: 'text', text }] }, new AbortController().signal)
+    const content = currentWorkerPrompt(sessionId, text)
+    // Pause or a newer policy can arrive during session resolution/configuration.
+    if (permitted && !permitted()) return false
+    stopped.delete(sessionId)
+    const admitted = await ctx.sessionController.prompt({ requestId: promptIdentity(`${sessionId}:message:${deliveryKey??text}`), sessionId: sessionId as SessionId, mode: 'steer', content: [{ type: 'text', text: content }] }, new AbortController().signal)
+    return admitted.accepted
   }
   async function registerWorkspace(task: Task, run: Run): Promise<void> {
     const workspace = await ctx.workspaceRegistry.create(task.worktree, `${basename(run.config.workspace ?? task.worktree)} · #${task.ticket.id}`)
@@ -208,7 +221,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       const numbers = /\bv?(\d+)\.(\d+)\.(\d+)\b/.exec(version)?.slice(1).map(Number)
       if (!numbers || numbers[0]! < 1 || (numbers[0] === 1 && (numbers[1]! < 12 || (numbers[1] === 12 && numbers[2]! < 13)))) throw new Error('OCR v1.12.13 or newer is required for the versioned coverage manifest')
       const help = await runCommandImpl('ocr', ['review', '--help'], { cwd: config.workspace })
-      if (!help.includes('--output') || !help.includes('--format')) throw new Error('OCR must support --format json --output')
+      if (!help.includes('--output') || !help.includes('--format') || !help.includes('--max-tokens-budget')) throw new Error('OCR must support --format json --output --max-tokens-budget')
       await runCommandImpl('git', ['rev-parse', '--show-toplevel'], { cwd: config.workspace })
     },
     prepare: (task, config) => prepareWorktree(task, config, runCommandImpl, options.teamStateDir),
@@ -253,11 +266,16 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       const assigned=task.assignmentDelivered||inspection.events.slice(inspection.inheritedEventCount).some(event=>{
         if(event.type!=='user/message')return false
         const content=event.data.content
-        return content?.some(part=>part.type==='text'&&part.text?.startsWith('You are the DarKingDoom Plugin worker for one ticket.')&&part.text.includes(`Delivery task ${task.id}`))
+        return content?.some(part=>{
+          if(part.type!=='text'||!part.text)return false
+          // Accept both historical assignments and ones carrying the current policy prefix.
+          const text=part.text.startsWith('## Current OCR policy\n')?part.text.slice(part.text.indexOf('\n\n')+2):part.text
+          return text.startsWith('You are the DarKingDoom Plugin worker for one ticket.')&&text.includes(`Delivery task ${task.id}`)
+        })
       })
       const text=assigned?workerResumePrompt(task):workerPrompt(task,taskDeliveryConfig(task,run.config))
       const key=assigned?`${task.id}:resume:${task.lastWakeAt??run.updatedAt??task.startedAt}`:`${task.id}:assignment`
-      await ctx.sessionController.prompt({requestId:promptIdentity(key),sessionId:task.sessionId as SessionId,mode:'queue',content:[{type:'text',text}]},new AbortController().signal)
+      await ctx.sessionController.prompt({requestId:promptIdentity(key),sessionId:task.sessionId as SessionId,mode:'queue',content:[{type:'text',text:currentWorkerPrompt(task.sessionId,text)}]},new AbortController().signal)
       task.assignmentDelivered=true
       delete task.pendingHumanRetry
       if(task.error?.startsWith('Shutdown incomplete:')) {

@@ -5,6 +5,12 @@ import type { CommandRunner, Phase, ReviewResult, RunConfig, Task } from './type
 import { fetchTarget, resolveHead } from './worktrees.ts'
 import { taskDeadline } from './scheduler.ts'
 
+export function ocrTokensBudget(config: RunConfig): number {
+  const budget = config.ocrMaxTokensBudget ?? 1_000_000
+  if (!Number.isSafeInteger(budget) || budget <= 0 || budget > 10_000_000) throw new Error('OCR token budget must be a positive safe integer between 1 and 10000000')
+  return budget
+}
+
 function object(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('Malformed OCR report object')
   return value as Record<string, unknown>
@@ -59,6 +65,7 @@ export async function reviewTask(task: Task, config: RunConfig, run: CommandRunn
     if ((await bounded('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: task.worktree })).trim()) throw new Error('Worktree contains uncommitted changes')
   }
   try {
+    const tokensBudget = ocrTokensBudget(config)
     headSha = await resolveHead(task, bounded)
     await unchanged()
     const target = await fetchTarget(config, bounded, task.worktree)
@@ -77,7 +84,7 @@ export async function reviewTask(task: Task, config: RunConfig, run: CommandRunn
     const output = join(directory, 'review.json')
     await unchanged()
     await onPhase?.('review')
-    await bounded('ocr', ['review', '--audience', 'agent', '--from', target, '--to', headSha, '--format', 'json', '--output', output, '--background', `${task.ticket.title}\n${task.ticket.body}`, '--timeout', String(Math.max(1, Math.ceil(remaining() / 60_000)))], { cwd: task.worktree })
+    await bounded('ocr', ['review', '--audience', 'agent', '--from', target, '--to', headSha, '--format', 'json', '--output', output, '--background', `${task.ticket.title}\n${task.ticket.body}`, '--max-tokens-budget', String(tokensBudget), '--timeout', String(Math.max(1, Math.ceil(remaining() / 60_000)))], { cwd: task.worktree })
     report = await readFile(output, 'utf8')
     findings.push(...parseOcrReport(report, headSha, target, paths))
     await unchanged()

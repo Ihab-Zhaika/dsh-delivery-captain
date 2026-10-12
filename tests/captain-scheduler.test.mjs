@@ -51,3 +51,36 @@ test('human retry budget uses its own bounded epoch without resetting historical
 test('untrusted configuration rejects duplicate milestones and unbounded execution', () => {
   assert.throws(() => validateConfig({ milestones: ['M1', 'M1'] }), /milestone/)
 })
+test('enabled unmilestoned intake admits repository work without a milestone',()=>{
+ const rows=eligibility([ticket('1',''),ticket('2','M2')],['M1'],[],{includeUnmilestoned:true})
+ assert.equal(rows[0].eligible,true);assert.equal(rows[0].scope,'unmilestoned');assert.equal(rows[1].eligible,false)
+})
+
+test('required unfinished predecessor closure can run outside milestone and root query filters',()=>{
+ const rows=eligibility([ticket('426','M1',['401']),ticket('401','Unselected',['400'],{selectionExclusion:'Does not match configured query'}),ticket('400',''),ticket('9','')],['M1'],[],{includeRequiredPredecessors:true})
+ assert.equal(rows.find(r=>r.ticketId==='400').eligible,true);assert.equal(rows.find(r=>r.ticketId==='401').eligible,false)
+ assert.deepEqual(rows.find(r=>r.ticketId==='400').requiredFor,['426']);assert.equal(rows.find(r=>r.ticketId==='400').scope,'predecessor')
+ assert.equal(rows.find(r=>r.ticketId==='9').eligible,false)
+})
+
+test('closed roots and hard provider exclusions never broaden prerequisite intake',()=>{
+ const rows=eligibility([ticket('1','M1',['2'],{state:'closed',merged:true}),ticket('2',''),ticket('3','M1',['4']),ticket('4','',[],{exclusion:'Dependency belongs to another repository'})],['M1'],[],{includeRequiredPredecessors:true})
+ assert.equal(rows[1].eligible,false);assert.equal(rows[3].eligible,false);assert.match(rows[3].reason,/another repository/)
+})
+
+test('explicit ticket trials remain bounded when broader scope options are enabled',()=>{
+ const rows=eligibility([ticket('1','M1',['2']),ticket('2',''),ticket('3','')],['M1'],[],{includeUnmilestoned:true,includeRequiredPredecessors:true,ticketIds:['1']})
+ assert.equal(rows[1].eligible,false);assert.match(rows[1].reason,/ticket selection/);assert.equal(rows[2].eligible,false)
+})
+
+test('new policy fields are validated and milestone-free runs need explicit unmilestoned intake',()=>{
+ const c={provider:'github',repository:'owner/repo',workspace:process.cwd(),milestones:[],verifyCommands:['npm test'],includeUnmilestoned:true,includeRequiredPredecessors:true,ocrMaxTokensBudget:1000000}
+ const config=validateConfig(c);assert.equal(config.ocrMaxTokensBudget,1000000);assert.equal(config.includeRequiredPredecessors,true)
+ assert.throws(()=>validateConfig({...c,includeUnmilestoned:false}),/milestone/)
+ for(const n of [0,-1,1.5,Infinity,10000001])assert.throws(()=>validateConfig({...c,ocrMaxTokensBudget:n}),/ocrMaxTokensBudget/)
+ assert.throws(()=>validateConfig({...c,includeRequiredPredecessors:'yes'}),/includeRequiredPredecessors/)
+})
+test('a selected predecessor retains its earlier milestone and strongest requesting priority',()=>{
+ const rows=eligibility([ticket('20','M2',['10'],{priority:0}),ticket('10','M1',[],{priority:3}),ticket('11','M1',[],{priority:9})],['M1','M2'],[],{includeRequiredPredecessors:true})
+ const parent=rows.find(r=>r.ticketId==='10');assert.equal(parent.milestoneRank,0);assert.equal(parent.priority,0)
+})

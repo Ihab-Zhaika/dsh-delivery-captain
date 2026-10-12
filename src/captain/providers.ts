@@ -131,9 +131,9 @@ class GithubProvider extends Provider<Row> {
       if (pages.some(x => x.incomplete_results || Number(x.total_count) > items.length)) throw new Error('GitHub query results are incomplete; narrow the query')
       selected = new Set(items.map(x => this.identity(x).id))
     }
-    const pending = (await this.pages(this.endpoint('issues?state=all&per_page=100'))).filter(x => !x.pull_request && this.config.milestones.includes(x.milestone?.title))
+    const pending = (await this.pages(this.endpoint('issues?state=all&per_page=100'))).filter(x => !x.pull_request && (this.config.milestones.includes(x.milestone?.title) || (this.config.includeUnmilestoned === true && x.milestone == null)))
     const tickets = await this.dependencyClosure(pending)
-    return tickets.map(ticket => !ticket.exclusion && selected && !selected.has(ticket.id) ? { ...ticket, exclusion: 'Does not match configured query' } : ticket)
+    return tickets.map(ticket => !ticket.exclusion && selected && !selected.has(ticket.id) ? { ...ticket, selectionExclusion: 'Does not match configured query' } : ticket)
   }
   protected async dependencySeed(id: string): Promise<Row[]> {
     const ref = this.splitId(id)
@@ -229,14 +229,19 @@ class GithubProvider extends Provider<Row> {
     await this.api(this.endpoint(`issues/${numberId(task.ticket.id)}`), ['--method', 'PATCH', '-f', 'state=closed', '-f', 'state_reason=completed'])
   }
   async createFollowup(task: Task, input: FollowupInput): Promise<string> {
+    if (!input.milestone && this.config.includeUnmilestoned !== true) throw new Error('Unmilestoned follow-ups are not enabled')
     const tag = marker(task, input)
     const existing = (await this.pages(this.endpoint('issues?state=all&per_page=100'))).filter(x => !x.pull_request && x.body?.includes(`<!-- ${tag} -->`))
     if (existing.length > 1) throw new Error('Duplicate follow-up markers found')
-    const milestones = await this.pages(this.endpoint('milestones?state=all&per_page=100'))
-    const milestone = milestones.find(x => x.title === input.milestone)
-    if (!milestone) throw new Error('Follow-up milestone does not exist')
+    const milestoneArgs: string[] = []
+    if (input.milestone) {
+      const milestones = await this.pages(this.endpoint('milestones?state=all&per_page=100'))
+      const milestone = milestones.find(x => x.title === input.milestone)
+      if (!milestone) throw new Error('Follow-up milestone does not exist')
+      milestoneArgs.push('-F', `milestone=${numberId(milestone.number)}`)
+    }
     const dependencies = unique([task.ticket.id, ...input.predecessors])
-    const issue = existing[0] ?? object(await this.api(this.endpoint('issues'), ['--method', 'POST', '-f', `title=${input.title}`, '-f', `body=${input.body}\n\nDepends on ${dependencies.map(x => '#' + x).join(', ')}\n<!-- ${tag} -->`, '-F', `milestone=${numberId(milestone.number)}`]))
+    const issue = existing[0] ?? object(await this.api(this.endpoint('issues'), ['--method', 'POST', '-f', `title=${input.title}`, '-f', `body=${input.body}\n\nDepends on ${dependencies.map(x => '#' + x).join(', ')}\n<!-- ${tag} -->`, ...milestoneArgs]))
     const id = numberId(issue.number)
     const linked = await this.pages(this.endpoint(`issues/${id}/dependencies/blocked_by?per_page=100`))
     for (const dep of dependencies) {
@@ -288,11 +293,13 @@ class AzureProvider extends Provider<string> {
   }
   async discover(): Promise<Ticket[]> {
     const quote = (s: string) => s.replace(/'/g, "''")
-    const wiql = `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${quote(this.config.project!)}' AND [System.IterationPath] IN (${this.config.milestones.map(x => `'${quote(x)}'`).join(',')}) ORDER BY [System.Id]`
+    const iterations = unique([...this.config.milestones, ...(this.config.includeUnmilestoned === true ? [this.config.project!] : [])])
+    if (!iterations.length) return []
+    const wiql = `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${quote(this.config.project!)}' AND [System.IterationPath] IN (${iterations.map(x => `'${quote(x)}'`).join(',')}) ORDER BY [System.Id]`
     const results = await this.query(wiql)
     const selected = this.config.query?.trim() ? new Set((await this.query(this.config.query)).map(x => numberId(x.id))) : undefined
     const tickets = await this.dependencyClosure(results.map(x => numberId(x.id)))
-    return tickets.map(ticket => !ticket.exclusion && selected && !selected.has(ticket.id) ? { ...ticket, exclusion: 'Does not match configured query' } : ticket)
+    return tickets.map(ticket => !ticket.exclusion && selected && !selected.has(ticket.id) ? { ...ticket, selectionExclusion: 'Does not match configured query' } : ticket)
   }
   protected async dependencySeed(id: string): Promise<string[]> { return [numberId(id)] }
   protected async dependencyClosure(pending: string[]): Promise<Ticket[]> {
@@ -338,9 +345,9 @@ class AzureProvider extends Provider<string> {
         ['Reproduction steps', fields['System.ReproSteps']],
         ['Reproduction steps', fields['Microsoft.VSTS.TCM.ReproSteps']],
       ].filter(([, value]) => typeof value === 'string' && value.trim()).map(([label, value]) => `${label}:\n${value}`).join('\n\n')
-      const milestone = fields['System.IterationPath'] ?? ''
+      const rawIterationPath = fields['System.IterationPath'] ?? ''
+      const milestone = project.toLowerCase() === this.config.project!.toLowerCase() && rawIterationPath === project && !this.config.milestones.includes(rawIterationPath) ? '' : rawIterationPath
       const exclusion = project.toLowerCase() !== this.config.project!.toLowerCase() ? 'Dependency belongs to another project'
-        : !this.config.milestones.includes(milestone) ? 'Dependency is outside configured milestones'
         : category === 'Removed' ? 'Work item workflow category is Removed' : undefined
       const labels: string[] = typeof fields['System.Tags'] === 'string' ? fields['System.Tags'].split(';').map((x: string) => x.trim()) : []
       tickets.set(id, { id, title: required(fields['System.Title'], 'work item title'), body, url: item._links?.html?.href ?? `${this.config.organization}/${encodeURIComponent(project)}/_workitems/edit/${id}`, milestone, predecessors, state: completed ? 'closed' : 'open', merged: completed && merged, completedDecision: completed && labels.includes('kind:decision'), priority: Number(fields['Microsoft.VSTS.Common.Priority']) || 99, createdAt: fields['System.CreatedDate'] ?? '', labels, exclusion })
@@ -440,11 +447,12 @@ class AzureProvider extends Provider<string> {
     await this.az(['boards', 'work-item', 'update', '--id', numberId(task.ticket.id), '--state', required(completed.name, 'completed state')], false)
   }
   async createFollowup(task: Task, input: FollowupInput): Promise<string> {
+    if (!input.milestone && this.config.includeUnmilestoned !== true) throw new Error('Unmilestoned follow-ups are not enabled')
     const tag = marker(task, input)
     const quote = (s: string) => s.replace(/'/g, "''")
     const matches = array((await this.az(['boards', 'query', '--wiql', `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${quote(this.config.project!)}' AND [System.Tags] CONTAINS '${tag}'`])) ?? [])
     if (matches.length > 1) throw new Error('Duplicate follow-up markers found')
-    const item = matches[0] ?? object(await this.az(['boards', 'work-item', 'create', '--type', 'Task', '--title', input.title, '--description', input.body, '--iteration', input.milestone, '--fields', `System.Tags=${tag}`]))
+    const item = matches[0] ?? object(await this.az(['boards', 'work-item', 'create', '--type', 'Task', '--title', input.title, '--description', input.body, '--iteration', input.milestone || this.config.project!, '--fields', `System.Tags=${tag}`]))
     const id = numberId(item.id)
     const full = object(await this.az(['boards', 'work-item', 'show', '--id', id, '--expand', 'relations'], false))
     const existing = array(full.relations ?? []).filter(x => x.rel === 'System.LinkTypes.Dependency-Reverse').map(x => /\/(\d+)$/.exec(x.url)?.[1])

@@ -1,7 +1,8 @@
 import { isAbsolute } from 'node:path'
 import type { RunConfig, Task, Ticket } from './types.ts'
 
-export interface Eligibility { ticketId: string; eligible: boolean; reason: string; state: string; predecessors: string[] }
+export interface Eligibility { ticketId: string; eligible: boolean; reason: string; state: string; predecessors: string[]; scope?:'milestone'|'unmilestoned'|'predecessor'; requiredFor?:string[]; milestoneRank:number; priority:number }
+export type IntakePolicy=Pick<RunConfig,'includeUnmilestoned'|'includeRequiredPredecessors'|'ticketIds'>
 
 type DependencyTask=Pick<Task,'ticket'|'status'|'closedAt'> & Partial<Pick<Task,'error'>>
 function dependencyContext(tickets:Ticket[],tasks:DependencyTask[]) {
@@ -31,21 +32,43 @@ export function dependencyBlocker(ticket:Ticket,tickets:Ticket[],tasks:Dependenc
 }
 
 /** Resolve the complete predecessor closure; related links never enter this graph. */
-export function eligibility(tickets: Ticket[], milestones: string[], tasks: DependencyTask[]): Eligibility[] {
+export function eligibility(tickets: Ticket[], milestones: string[], tasks: DependencyTask[], policy:IntakePolicy={}): Eligibility[] {
   const {satisfied,dependencyIssue}=dependencyContext(tickets,tasks)
   const delivered = new Set(tasks.filter(t => t.status === 'merged' && t.closedAt).map(t => t.ticket.id))
+  const byId=new Map(tickets.map(t=>[t.id,t]))
+  const selected=(t:Ticket)=>milestones.includes(t.milestone)||policy.includeUnmilestoned===true&&!t.milestone
+  const permitted=(t:Ticket)=>!policy.ticketIds||policy.ticketIds.includes(t.id)
+  const rank=(t:Ticket)=>{const index=milestones.indexOf(t.milestone);return index<0?milestones.length:index}
+  const requiredBy=new Map<string,Set<string>>()
+  if(policy.includeRequiredPredecessors) {
+    for(const root of tickets.filter(t=>t.state==='open'&&!satisfied(t)&&!t.exclusion&&permitted(t)&&selected(t)&&(!t.selectionExclusion||tasks.some(task=>task.ticket.id===t.id&&!['merged','failed','cancelled'].includes(task.status))))) {
+      const seen=new Set<string>([root.id])
+      const visit=(ticket:Ticket)=>{for(const id of ticket.predecessors){
+        if(seen.has(id))continue;seen.add(id)
+        const parent=byId.get(id);if(!parent||satisfied(parent)||parent.exclusion||!permitted(parent))continue
+        const roots=requiredBy.get(id)??new Set<string>();roots.add(root.id);requiredBy.set(id,roots);visit(parent)
+      }}
+      visit(root)
+    }
+  }
   return tickets.map(t => {
-    const task=tasks.find(task=>task.ticket.id===t.id)
-    const reason = satisfied(t) ? t.completedDecision && !t.merged && !delivered.has(t.id) ? 'Decision completed (no code merge claimed)' : 'Delivered' : !milestones.includes(t.milestone) ? 'Outside configured milestones'
+    const task=tasks.find(task=>task.ticket.id===t.id),requiredFor=[...requiredBy.get(t.id)??[]].sort()
+    const scope:Eligibility['scope']=requiredFor.length?'predecessor':milestones.includes(t.milestone)?'milestone':policy.includeUnmilestoned&&!t.milestone?'unmilestoned':undefined
+    const milestoneRank=requiredFor.length?Math.min(selected(t)?rank(t):milestones.length,...requiredFor.map(id=>rank(byId.get(id)!))):rank(t)
+    const priority=Math.min(t.priority,...requiredFor.map(id=>byId.get(id)!.priority))
+    const reason = satisfied(t) ? t.completedDecision && !t.merged && !delivered.has(t.id) ? 'Decision completed (no code merge claimed)' : 'Delivered'
       : task ? `Task ${task.status}${task.error ? `: ${task.error}` : '; see task status'}`
-      : t.exclusion ? t.exclusion
+      : !permitted(t)?'Outside configured ticket selection'
+      : t.exclusion?t.exclusion
+      : !scope?'Outside configured intake scope'
+      : t.selectionExclusion&&!requiredFor.length?t.selectionExclusion
       : t.state === 'closed' ? 'Closed without verified merged delivery'
       : dependencyIssue(t, new Set())
       ?? ''
     const state=satisfied(t)?t.completedDecision&&!t.merged&&!delivered.has(t.id)?'decision-complete':'delivered'
-      : !milestones.includes(t.milestone)?'excluded':task?task.status:t.exclusion?'excluded':t.state==='closed'?'unverified-closure'
+      : task?task.status:!permitted(t)||t.exclusion||!scope||t.selectionExclusion&&!requiredFor.length?'excluded':t.state==='closed'?'unverified-closure'
       : reason?'dependency':'eligible'
-    return { ticketId: t.id, eligible: !reason, reason: reason || 'Ready', state, predecessors:t.predecessors }
+    return { ticketId: t.id, eligible: !reason, reason: reason || (requiredFor.length?`Required predecessor for ${requiredFor.map(id=>'#'+id).join(', ')}`:'Ready'), state, predecessors:t.predecessors,scope,requiredFor,milestoneRank,priority }
   })
 }
 
@@ -76,7 +99,7 @@ export function phaseDurations(task: Pick<Task, 'phases' | 'finishedAt'>, now = 
 export function validateConfig(raw: unknown): RunConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Run configuration must be an object')
   const c = raw as Record<string, unknown>
-  if (!Array.isArray(c.milestones) || c.milestones.length === 0 || c.milestones.some(x => typeof x !== 'string' || !x.trim()) || new Set(c.milestones).size !== c.milestones.length) throw new Error('Provide distinct ordered milestone names')
+  if (!Array.isArray(c.milestones) || c.milestones.length === 0 && c.includeUnmilestoned !== true || c.milestones.some(x => typeof x !== 'string' || !x.trim()) || new Set(c.milestones).size !== c.milestones.length) throw new Error('Provide distinct ordered milestone names')
   const str = (key: string, fallback?: string): string => {
     const value = c[key] ?? fallback
     if (typeof value !== 'string' || !value.trim() || value.includes('\0')) throw new Error(`Invalid ${key}`)
@@ -99,7 +122,7 @@ export function validateConfig(raw: unknown): RunConfig {
     return c[key] as boolean | undefined ?? fallback
   }
   const result: RunConfig = { provider: c.provider, repository: str('repository'), workspace, remote, targetBranch,
-    milestones: c.milestones as string[], parallelism: integer('parallelism', 2, 1, 32), maxTeamMembers: integer('maxTeamMembers', 3, 1, 16),
+    milestones: c.milestones as string[], includeUnmilestoned:bool('includeUnmilestoned',false),includeRequiredPredecessors:bool('includeRequiredPredecessors',false),ocrMaxTokensBudget:integer('ocrMaxTokensBudget',1_000_000,1,10_000_000),parallelism: integer('parallelism', 2, 1, 32), maxTeamMembers: integer('maxTeamMembers', 3, 1, 16),
     pollSeconds: integer('pollSeconds', 30, 5, 3600), maxRepairRounds: integer('maxRepairRounds', 3, 0, 20), maxTaskMinutes: integer('maxTaskMinutes', 120, 1, 1440),
     maxTickets: integer('maxTickets', 0, 0, 100000),
     verifyCommands: c.verifyCommands as string[], workerPreset: str('workerPreset', 'standard'), requireBrowser: bool('requireBrowser', false), requireMemory: bool('requireMemory', true),

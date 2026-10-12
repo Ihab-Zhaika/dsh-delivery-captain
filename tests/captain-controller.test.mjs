@@ -837,3 +837,57 @@ test('unknown waiting-worker activity cannot stall independent ready delivery',(
   const isRunning=f.runtime.isRunning;f.runtime.isRunning=async id=>{if(id===waiting.sessionId)throw new Error('Native activity unavailable');return isRunning(id)}
   await f.controller.tick();assert.equal(waiting.status,'running');assert.equal(ready.status,'merged');assert.ok(ready.closedAt)
 }))
+test('live intake policy admits legitimate prerequisites and unmilestoned work with milestone priority',()=>fixture(async f=>{
+ f.setTickets([ticket('426','M2',['401']),ticket('401',''),ticket('2','M1'),ticket('3','')])
+ const run=await f.controller.start('captain',{...f.config,maxTickets:0,parallelism:4});await f.controller.tick();assert.deepEqual(run.tasks.map(t=>t.ticket.id),['2'])
+ await f.controller.updatePolicy('captain',{includeUnmilestoned:true,includeRequiredPredecessors:true,ocrMaxTokensBudget:1000000})
+ await f.controller.tick();assert.deepEqual(run.tasks.map(t=>t.ticket.id),['2','401','3']);assert.equal(run.tasks.some(t=>t.ticket.id==='426'),false)
+}))
+
+test('live review budget policy changes only that field in original assignment contracts',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1,ocrMaxTokensBudget:100000});await f.controller.tick();const task=run.tasks[0],snapshot={...task.assignmentConfig}
+ await f.controller.updatePolicy('captain',{includeUnmilestoned:true,includeRequiredPredecessors:true,ocrMaxTokensBudget:1000000})
+ assert.equal(task.assignmentConfig.ocrMaxTokensBudget,1000000);assert.deepEqual({...task.assignmentConfig,ocrMaxTokensBudget:snapshot.ocrMaxTokensBudget},snapshot)
+ assert.match(task.phases.at(-1).note,/OCR.*session/);assert.equal(f.starts.length,1)
+ await assert.rejects(f.controller.updatePolicy(task.sessionId,{ocrMaxTokensBudget:1000000}),/captain/)
+ await assert.rejects(f.controller.updatePolicy('captain',{verifyCommands:['skip']}),/policy/)
+ await f.controller.control('captain','stop');await assert.rejects(f.controller.updatePolicy('captain',{ocrMaxTokensBudget:1000000}),/active|policy/)
+}))
+
+test('narrowing live intake policy during launch cannot admit an unmilestoned ticket afterward',()=>fixture(async f=>{
+ f.setTickets([ticket('1'),ticket('2','')]);const run=await f.controller.start('captain',{...f.config,includeUnmilestoned:true})
+ let entered,release;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r),start=f.runtime.start
+ f.runtime.start=async(...args)=>{await start(...args);entered();await gate}
+ const tick=f.controller.tick();await started;try{await f.controller.updatePolicy('captain',{includeUnmilestoned:false})}finally{release();await tick}
+ assert.deepEqual(run.tasks.map(t=>t.ticket.id),['1'])
+}))
+test('paused policy changes notify the coordinator once after Resume without waking held workers',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1,ocrMaxTokensBudget:100000});await f.controller.tick();const task=run.tasks[0]
+ await f.controller.control('captain','pause');await f.controller.updatePolicy('captain',{ocrMaxTokensBudget:1000000})
+ assert.equal(f.messages.length,0);assert.ok(run.policyNotice);await f.controller.tick();assert.equal(f.messages.length,0)
+ await f.controller.control('captain','resume');await f.controller.tick();assert.equal(f.messages.filter(m=>m.id==='captain').length,1);assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,0);assert.ok(run.policyNotice.deliveredAt)
+ await f.controller.tick();assert.equal(f.messages.filter(m=>m.id==='captain').length,1)
+}))
+
+test('stopped configuration updates the OCR ceiling without changing other saved assignment gates',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1,ocrMaxTokensBudget:100000});await f.controller.tick();const task=run.tasks[0],before={...task.assignmentConfig}
+ await f.controller.control('captain','stop');await f.controller.configure('captain',{...run.config,ocrMaxTokensBudget:1000000})
+ assert.equal(task.assignmentConfig.ocrMaxTokensBudget,1000000);assert.deepEqual({...task.assignmentConfig,ocrMaxTokensBudget:before.ocrMaxTokensBudget},before);assert.equal(task.status,'cancelled');assert.equal(f.messages.length,0)
+}))
+test('Pause during policy notification keeps it pending without a leader prompt',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,ocrMaxTokensBudget:100000})
+ let entered,release;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+ f.runtime.coordinatorLoop=async(_run,action)=>{if(action==='wake'){entered();await gate}}
+ const policy=f.controller.updatePolicy('captain',{ocrMaxTokensBudget:1000000});await started
+ await f.controller.control('captain','pause');release();await policy
+ assert.equal(f.messages.length,0);assert.equal(run.policyNotice.deliveredAt,undefined);assert.equal(run.status,'paused')
+}))
+
+test('a superseded policy notification cannot arrive after the current policy',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,ocrMaxTokensBudget:100000})
+ let entered,release,wakes=0;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+ f.runtime.coordinatorLoop=async(_run,action)=>{if(action==='wake'&&++wakes===1){entered();await gate}}
+ const old=f.controller.updatePolicy('captain',{ocrMaxTokensBudget:200000});await started
+ await f.controller.updatePolicy('captain',{ocrMaxTokensBudget:1000000});release();await old
+ assert.equal(f.messages.length,1);assert.match(f.messages[0].text,/1000000/);assert.equal(run.config.ocrMaxTokensBudget,1000000);assert.ok(run.policyNotice.deliveredAt)
+}))

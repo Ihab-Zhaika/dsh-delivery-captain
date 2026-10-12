@@ -9,6 +9,8 @@ interface Eligibility {
     reason: string;
     state?: string;
     predecessors?: string[];
+    scope?: 'milestone' | 'unmilestoned' | 'predecessor';
+    requiredFor?: string[];
 }
 interface Snapshot {
     run: Run | null;

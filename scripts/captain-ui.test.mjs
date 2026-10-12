@@ -34,17 +34,32 @@ test('elapsed time freezes at task completion and rejects invalid timestamps', (
   assert.equal(ui.elapsedMs('2026-01-01T01:00:00Z', undefined, Date.parse('2026-01-01T00:00:00Z')), 0)
 })
 
-async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPass=false}={}) {
+async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPass=false,policyPass=false,status='running',runConfig={},failFirst=true,idle=false}={}) {
   const startedAt=new Date().toISOString(),ticket={id:'7',title:'Own ticket',milestone:'M1',url:'',predecessors:[]}
   const task={id:'task',sessionId:'worker',ticket,status:'running',phase:'implementation',startedAt,phases:[],followups:[],reviewRounds:0}
-  const config={provider:'github',repository:'owner/repo',workspace:'C:/repo',remote:'origin',targetBranch:'main',milestones:['M1'],parallelism:2,maxTeamMembers:3,maxTickets:0,pollSeconds:30,maxRepairRounds:3,maxTaskMinutes:120,verifyCommands:['test'],workerPreset:'standard',requireMemory:false,requireBrowser:false}
-  const run={id:'run',captainSessionId:'coordinator',status:'running',config,tasks:[task],tickets:[ticket],questions:[],createdAt:startedAt}
-  const snapshot={run,role:coordinator?'coordinator':'worker',coordinatorSessionId:'coordinator'}
+  const config={provider:'github',repository:'owner/repo',workspace:'C:/repo',remote:'origin',targetBranch:'main',milestones:['M1'],parallelism:2,maxTeamMembers:3,maxTickets:0,pollSeconds:30,maxRepairRounds:3,maxTaskMinutes:120,verifyCommands:['test'],workerPreset:'standard',requireMemory:false,requireBrowser:false,...runConfig}
+  const run={id:'run',captainSessionId:'coordinator',status,config,tasks:[task],tickets:[ticket],questions:[],createdAt:startedAt}
+  const snapshot={run:idle?null:run,role:idle?'idle':coordinator?'coordinator':'worker',coordinatorSessionId:'coordinator'}
   let requests=0,renderer,firstResponse
+  const policyRequests=[]
+  const configurationRequests=[]
   const server=createServer((req,res)=>{
     if(req.url.startsWith('/api/darkingdoom/state')) {
-      if(++requests===1){if(deferFirst){firstResponse=res;return};res.writeHead(404,{'content-type':'text/plain'});res.end('Not Found')}
+      if(++requests===1&&failFirst){if(deferFirst){firstResponse=res;return};res.writeHead(404,{'content-type':'text/plain'});res.end('Not Found')}
       else{res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(snapshot))}
+    }else if(req.url.startsWith('/api/darkingdoom/context')){
+      res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({config,providers:['github'],warnings:[],milestoneSource:'',verificationSource:'',milestoneCatalog:config.milestones}))
+    }else if(req.url==='/api/darkingdoom/start'||req.url==='/api/darkingdoom/configure'){
+      let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+        const value=JSON.parse(body);configurationRequests.push({url:req.url,...value});run.config=value.config;snapshot.run=run;snapshot.role='coordinator'
+        res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({run}))
+      })
+    }else if(req.url==='/api/darkingdoom/policy'){
+      let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+        const policy=JSON.parse(body);policyRequests.push(policy)
+        if(policyPass){const {sessionId,...patch}=policy;Object.assign(config,patch)}
+        res.writeHead(policyPass?200:409,{'content-type':'application/json'});res.end(JSON.stringify(policyPass?{run}:{error:'Policy rejected by lifecycle guard'}))
+      })
     }else{res.writeHead(controlPass?200:409,{'content-type':'application/json'});res.end(JSON.stringify(controlPass?{run}:{error:'Control rejected by lifecycle guard'}))}
   })
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve))
@@ -54,12 +69,97 @@ async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPa
   try {
     await act(async()=>{renderer=TestRenderer.create(createElement(ui.CaptainPanel,{sessionId:coordinator?'coordinator':'worker',onClose(){},openSession:async()=>{},initialSnapshot:snapshot}))})
     await settle()
-    await fn({renderer,settle,text:()=>JSON.stringify(renderer.toJSON()),requests:()=>requests,failFirst:()=>{assert.ok(firstResponse);firstResponse.writeHead(404,{'content-type':'text/plain'});firstResponse.end('Not Found')}})
+    await fn({renderer,settle,text:()=>JSON.stringify(renderer.toJSON()),requests:()=>requests,policyRequests,configurationRequests,failFirst:()=>{assert.ok(firstResponse);firstResponse.writeHead(404,{'content-type':'text/plain'});firstResponse.end('Not Found')}})
   }finally{
     if(renderer)await act(async()=>renderer.unmount())
     globalThis.fetch=originalFetch;server.closeAllConnections();await new Promise(resolve=>server.close(resolve))
   }
 }
+
+test('new runs enable unmilestoned tickets and required predecessors with a million-token review budget',()=>{
+  const html=renderToStaticMarkup(createElement(ui.CaptainPanel,{sessionId:'main',onClose(){},openSession:async()=>{}}))
+  assert.match(html,/checked=""\/>Include tickets without a milestone/)
+  assert.match(html,/checked=""\/>Include required predecessors outside the selected milestones/)
+  assert.match(html,/Token budget per OCR review session<input[^>]*value="1000000"/)
+  assert.match(html,/Each review has its own budget; no shared pool across workers or the run/)
+  assert.match(html,/Milestone order sets priority; dependencies still gate dispatch/)
+})
+
+test('milestone-free new and stopped configurations can submit with unmilestoned intake enabled',async()=>{
+  for(const idle of [true,false])await withPollingPanel(async p=>{
+    const milestoneInput=()=>p.renderer.root.findAllByType('label').find(label=>label.children.includes('Milestones, in priority order')).findByType('textarea')
+    const submit=()=>p.renderer.root.findByProps({type:'submit'})
+    const intake=()=>p.renderer.root.findAllByType('input').find(input=>input.props.type==='checkbox'&&!input.props['aria-label'])
+    assert.equal(milestoneInput().props.required,false)
+    assert.equal(submit().props.disabled,false)
+    await act(async()=>intake().props.onChange({target:{checked:false}}))
+    assert.equal(milestoneInput().props.required,true)
+    assert.equal(submit().props.disabled,true)
+    await act(async()=>intake().props.onChange({target:{checked:true}}))
+    await act(async()=>p.renderer.root.findAllByType('form')[0].props.onSubmit({preventDefault(){}}))
+    await p.settle()
+    assert.equal(p.configurationRequests.length,1)
+    assert.equal(p.configurationRequests[0].url,idle?'/api/darkingdoom/start':'/api/darkingdoom/configure')
+    assert.deepEqual(p.configurationRequests[0].config.milestones,[])
+    assert.equal(p.configurationRequests[0].config.includeUnmilestoned,true)
+  },true,{idle,status:'stopped',failFirst:false,runConfig:{milestones:[],includeUnmilestoned:true}})
+})
+
+test('review budget inputs and live policy submission enforce the ten-million-token cap',()=>withPollingPanel(async p=>{
+  const live=()=>p.renderer.root.findByProps({'aria-label':'Live OCR token budget'})
+  const apply=()=>p.renderer.root.findAllByType('button').find(button=>button.children.includes('Apply policy'))
+  for(const input of p.renderer.root.findAllByType('input').filter(input=>input.props.max>100000))assert.equal(input.props.max,10_000_000)
+  await act(async()=>live().props.onChange({target:{value:'10000001'}}))
+  assert.equal(apply().props.disabled,true)
+  await act(async()=>apply().props.onClick())
+  await p.settle();assert.equal(p.policyRequests.length,0)
+  await act(async()=>live().props.onChange({target:{value:'10000000'}}))
+  assert.equal(apply().props.disabled,false)
+  await act(async()=>apply().props.onClick())
+  await p.settle();assert.equal(p.policyRequests[0].ocrMaxTokensBudget,10_000_000)
+},true,{policyPass:true,failFirst:false}))
+
+test('legacy runs display disabled intake extensions and the default review budget',()=>{
+  const run={id:'run',captainSessionId:'main',status:'running',config:{parallelism:2},tasks:[],tickets:[],questions:[],createdAt:new Date().toISOString()}
+  const html=renderToStaticMarkup(createElement(ui.CaptainPanel,{sessionId:'main',onClose(){},openSession:async()=>{},initialSnapshot:{run,role:'coordinator'}}))
+  assert.doesNotMatch(html,/checked=""\/>Include (tickets without a milestone|required predecessors)/)
+  assert.match(html,/aria-label="Live OCR token budget"[^>]*value="1000000"/)
+})
+
+test('live intake policy preserves a draft across polling and posts all policy values',()=>withPollingPanel(async p=>{
+  const live=label=>p.renderer.root.findByProps({'aria-label':label})
+  await act(async()=>live('Live include tickets without a milestone').props.onChange({target:{checked:true}}))
+  await act(async()=>live('Live include required predecessors outside the selected milestones').props.onChange({target:{checked:true}}))
+  await act(async()=>live('Live OCR token budget').props.onChange({target:{value:'250000'}}))
+  await p.settle(3100)
+  assert.equal(live('Live include tickets without a milestone').props.checked,true)
+  assert.equal(live('Live OCR token budget').props.value,250000)
+  await act(async()=>p.renderer.root.findAllByType('button').find(b=>b.children.includes('Apply policy')).props.onClick())
+  await p.settle()
+  assert.deepEqual(p.policyRequests,[{sessionId:'coordinator',includeUnmilestoned:true,includeRequiredPredecessors:true,ocrMaxTokensBudget:250000}])
+  assert.match(p.text(),/Policy saved/)
+},true,{policyPass:true}))
+
+test('live policy accepts changes while paused and remains disabled while draining',async()=>{
+  for(const status of ['paused','draining'])await withPollingPanel(async p=>{
+    const budget=p.renderer.root.findByProps({'aria-label':'Live OCR token budget'})
+    assert.equal(budget.props.disabled,status==='draining')
+    const button=p.renderer.root.findAllByType('button').find(b=>b.children.includes('Apply policy'))
+    assert.equal(button.props.disabled,status==='draining')
+  },true,{status})
+})
+
+test('poll recovery cannot hide a failed live policy update',()=>withPollingPanel(async p=>{
+  await act(async()=>p.renderer.root.findAllByType('button').find(b=>b.children.includes('Apply policy')).props.onClick())
+  await p.settle();assert.match(p.text(),/POST \/api\/darkingdoom\/policy/);assert.match(p.text(),/Policy rejected by lifecycle guard/)
+  await p.settle(3100);assert.match(p.text(),/Policy rejected by lifecycle guard/)
+},true))
+
+test('required predecessor scope and unassigned milestones appear in the dependency graph',()=>{
+  const tickets=[{id:'1',title:'Selected',milestone:'M1',predecessors:['2']},{id:'2',title:'Required',milestone:'',predecessors:[]}]
+  const html=renderToStaticMarkup(createElement(ui.CaptainEligibilityGraph,{tickets,rows:[{ticketId:'2',eligible:true,reason:'Ready',scope:'predecessor',requiredFor:['1','3']}]}))
+  assert.match(html,/Required by #1, #3/);assert.match(html,/Unassigned/)
+})
 
 test('a worker panel clears a transient refresh 404 after the next successful poll',()=>withPollingPanel(async p=>{
   assert.match(p.text(),/404/);assert.match(p.text(),/Own ticket/)

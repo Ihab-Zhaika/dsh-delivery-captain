@@ -47,6 +47,11 @@ export declare class CaptainController {
             error?: string;
             lastPollAt?: string;
             recoveryPending?: boolean;
+            policyNotice?: {
+                revision: number;
+                text: string;
+                deliveredAt?: string;
+            };
             stoppedAt?: string;
             coordinatorGoalId?: string;
             coordinatorWaiting?: boolean;
@@ -79,6 +84,11 @@ export declare class CaptainController {
             error?: string;
             lastPollAt?: string;
             recoveryPending?: boolean;
+            policyNotice?: {
+                revision: number;
+                text: string;
+                deliveredAt?: string;
+            };
             stoppedAt?: string;
             coordinatorGoalId?: string;
             coordinatorWaiting?: boolean;
@@ -97,6 +107,10 @@ export declare class CaptainController {
     configure(sessionId: string, raw: unknown): Promise<Run>;
     wait(sessionId: string): Promise<void>;
     updateMilestones(sessionId: string, milestones: unknown, expectedRevision?: number): Promise<Run>;
+    updatePolicy(sessionId: string, raw: unknown, expectedRevision?: number): Promise<Run>;
+    private updateReviewBudget;
+    private recordPolicyNotice;
+    private notifyPolicy;
     loopState(sessionId: string): import("./types.ts").CoordinatorLoopState | null;
     report(sessionId: string, report: {
         phase: Phase;

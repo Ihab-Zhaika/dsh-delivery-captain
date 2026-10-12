@@ -13,6 +13,7 @@ export interface Ticket {
     createdAt: string;
     labels: string[];
     exclusion?: string;
+    selectionExclusion?: string;
     completedDecision?: boolean;
 }
 export interface RunConfig {
@@ -25,6 +26,9 @@ export interface RunConfig {
     milestones: string[];
     remote: string;
     targetBranch: string;
+    includeUnmilestoned?: boolean;
+    includeRequiredPredecessors?: boolean;
+    ocrMaxTokensBudget?: number;
     parallelism: number;
     maxTeamMembers: number;
     pollSeconds: number;
@@ -128,6 +132,11 @@ export interface Run {
     error?: string;
     lastPollAt?: string;
     recoveryPending?: boolean;
+    policyNotice?: {
+        revision: number;
+        text: string;
+        deliveredAt?: string;
+    };
     stoppedAt?: string;
     coordinatorGoalId?: string;
     coordinatorWaiting?: boolean;
@@ -191,7 +200,7 @@ export interface WorkerRuntime {
     preflight(config: RunConfig): Promise<void>;
     prepare(task: Task, config: RunConfig): Promise<void>;
     start(task: Task, run: Run): Promise<void>;
-    send(sessionId: string, text: string, deliveryKey?: string): Promise<void>;
+    send(sessionId: string, text: string, deliveryKey?: string, permitted?: () => boolean): Promise<void | boolean>;
     stop(sessionId: string, reason?: 'stop' | 'shutdown'): Promise<void>;
     isRunning(sessionId: string): Promise<boolean>;
     review(task: Task, config: RunConfig, onPhase?: (phase: Phase) => Promise<void>): Promise<ReviewResult>;

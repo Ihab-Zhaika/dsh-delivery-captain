@@ -20,6 +20,31 @@ async function repo(t) {
   return root
 }
 test('runtime factory exists', () => assert.equal(typeof runtime.createRuntime, 'function'))
+test('worker requires independent full-range OCR with the same explicit total budget as controller review', () => {
+  for (const [budget, expected] of [[undefined, '1000000'], [2_000_000, '2000000']]) {
+    const prompt = runtime.workerPrompt(task({ worktree: '/worker', baseSha: 'base' }), { ...config, ...(budget === undefined ? {} : { ocrMaxTokensBudget: budget }) })
+    assert.match(prompt, new RegExp(`--max-tokens-budget ${expected}\\b`))
+    assert.match(prompt, /independent.*OCR/i)
+    assert.match(prompt, /complete.*changed.*path/i)
+    assert.match(prompt, /exact.*HEAD/i)
+    assert.match(prompt, /partial.*failed.*waived.*budget/i)
+    assert.match(prompt, /Do not lower.*unless the human explicitly/i)
+    assert.match(prompt, /higher ceiling is not approval/i)
+    assert.match(prompt, /per independent OCR review session/i)
+    assert.match(prompt, /not shared.*workers.*members.*controller/i)
+  }
+})
+test('preflight requires explicit OCR total-budget flag support', async () => {
+  for (const supported of [false, true]) {
+    const h = host(), rt = runtime.createRuntime(h.ctx, { runner: async (file, args) => {
+      if (file === 'ocr' && args[0] === '--version') return 'open-code-review v1.12.13'
+      if (file === 'ocr') return `--output --format${supported ? ' --max-tokens-budget' : ''}`
+      return ''
+    } })
+    if (supported) await rt.preflight(config)
+    else await assert.rejects(rt.preflight(config), /max-tokens-budget/)
+  }
+})
 test('prepare fetches target, creates isolated branch and idempotently adopts exact worktree', async t => {
   const root = await repo(t); const item = task({ worktree: join(root, 'work') }); const cfg = { ...config, workspace: root }
   await worktrees.prepareWorktree(item, cfg, runner)
@@ -110,6 +135,79 @@ test('worker is ordinary root, permissions precede prompt, genuine activity and 
   await rt.send('session-1', 'Repair after review'); assert.equal(h.calls.at(-1)[0], 'prompt')
 })
 
+test('authorized worker messages and continuation read the live per-session OCR policy without extra wakes', async () => {
+  const h = host(), rt = runtime.createRuntime(h.ctx), oldConfig = { ...config, ocrMaxTokensBudget: 100_000 }
+  const item = task({ worktree: '/worker', assignmentConfig: { ...oldConfig }, waitingDecision: 'Preserve verification hold' })
+  const prompts = () => h.calls.filter(call => call[0] === 'prompt')
+  await rt.start(item, { config: oldConfig })
+  assert.equal(prompts().length, 1)
+  item.assignmentConfig = { ...item.assignmentConfig, ocrMaxTokensBudget: 1_000_000 }
+  assert.equal(prompts().length, 1)
+  await rt.start(item, { config: oldConfig }) // Already running: no additional request.
+  assert.equal(prompts().length, 1)
+  for (const [index, message] of ['Repair findings', 'Captain answer: continue safe work', 'Coordinator guidance: collect reviewer evidence'].entries()) {
+    await rt.send(item.sessionId, message, `authorized-${index}`)
+    const text = prompts().at(-1)[1].content[0].text
+    assert.match(text, /^## Current OCR policy/)
+    assert.match(text, /--max-tokens-budget 1000000\b/)
+    assert.match(text, /per independent OCR review session/i)
+    assert.match(text, /Do not lower.*unless the human explicitly/i)
+    assert.match(text, /supersedes.*100K.*120K/i)
+    assert.ok(text.endsWith(message))
+    assert.doesNotMatch(text, /## Ticket scope/)
+    assert.equal(prompts().length, index + 2)
+    await rt.send(item.sessionId, message, `authorized-${index}`)
+    assert.equal(prompts().length, index + 2)
+  }
+  item.assignmentConfig = { ...item.assignmentConfig, ocrMaxTokensBudget: 2_000_000 }
+  h.agents.get(item.sessionId).status = 'idle'; item.lastWakeAt = 'authorized-continuation'
+  await rt.start(item, { config: oldConfig })
+  assert.equal(prompts().length, 5)
+  const text = prompts().at(-1)[1].content[0].text
+  assert.match(text, /^## Current OCR policy/)
+  assert.match(text, /--max-tokens-budget 2000000\b/)
+  assert.match(text, /darkingdoom.resume/)
+  assert.doesNotMatch(text, /## Ticket scope/)
+  assert.equal(item.waitingDecision, 'Preserve verification hold')
+  await rt.start(item, { config: oldConfig })
+  assert.equal(prompts().length, 5)
+})
+
+test('runtime rejects a paused or superseded policy message after delayed session resolution', async () => {
+  for (const change of ['pause', 'newer policy']) {
+    const h = host(), rt = runtime.createRuntime(h.ctx), item = task({ worktree: '/worker', assignmentConfig: { ...config, ocrMaxTokensBudget: 1_000_000 } })
+    await rt.start(item, { config })
+    const before = h.calls.length
+    let release, entered
+    const resolving = new Promise(resolve => { entered = resolve })
+    h.ctx.sessionController.resolveAgent = async id => { entered(); await new Promise(resolve => { release = resolve }); return { agent: h.agents.get(id) } }
+    const state = { status: 'running', policyRevision: 1 }
+    const admitted = rt.send(item.sessionId, 'Current policy notice', 'ocr-policy:1', () => state.status === 'running' && state.policyRevision === 1)
+    await resolving
+    if (change === 'pause') state.status = 'paused'
+    else { state.policyRevision = 2; item.assignmentConfig = { ...item.assignmentConfig, ocrMaxTokensBudget: 2_000_000 } }
+    release()
+    assert.equal(await admitted, false)
+    assert.equal(h.calls.length, before, 'Invalidated delivery must not change permissions or submit a native prompt')
+  }
+})
+
+test('runtime checks authorization before resolution and again after worker configuration', async () => {
+  const h = host(), rt = runtime.createRuntime(h.ctx), item = task({ worktree: '/worker' })
+  await rt.start(item, { config })
+  let resolves = 0, permitted = false
+  h.ctx.sessionController.resolveAgent = async id => { resolves++; return { agent: h.agents.get(id) } }
+  const before = h.calls.length
+  assert.equal(await rt.send(item.sessionId, 'Paused notice', 'paused-notice', () => permitted), false)
+  assert.equal(resolves, 0)
+  assert.equal(h.calls.length, before)
+  permitted = true
+  h.ctx.tools.schemas = () => { permitted = false; return [] }
+  assert.equal(await rt.send(item.sessionId, 'Stale configured notice', 'configured-notice', () => permitted), false)
+  assert.equal(resolves, 1)
+  assert.equal(h.calls.filter(call => call[0] === 'prompt').length, 1)
+})
+
 test('task workspace registration is idempotent and preserves existing sessions and customized titles',async()=>{
   const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker'})
   await rt.registerWorkspace(item,{config:{...config,workspace:'/TrucX'}})
@@ -137,7 +235,7 @@ test('workspace registration failures cannot start an ungrouped worker',async()=
 test('captain notifications recover an ordinary session through the controller', async () => {
   const h = host(); const rt = runtime.createRuntime(h.ctx)
   await h.ctx.sessionController.create({ sessionId: 'captain', cwd: '/captain' })
-  await rt.send('captain', 'Question from worker')
+  assert.equal(await rt.send('captain', 'Question from worker'), true)
   assert.equal(h.calls.at(-1)[1].content[0].text, 'Question from worker')
 })
 
@@ -359,7 +457,7 @@ test('cached passed review stays valid only for clean exact head and current tar
   assert.equal(await rt.isReviewCurrent(item, cfg, { ...evidence, headSha: git(root, 'rev-parse', 'HEAD') }), false)
 })
 test('required browser integration is Tencent BrowserSkill, including lazy skill registration', async () => {
-  const h = host(); const rt = runtime.createRuntime(h.ctx, { runner: async (_file, args) => args[0] === '--version' ? '1.12.13' : '--output --format' })
+  const h = host(); const rt = runtime.createRuntime(h.ctx, { runner: async (_file, args) => args[0] === '--version' ? '1.12.13' : '--output --format --max-tokens-budget' })
   h.ctx.tools.get = name => name.startsWith('agent_teams_') || name === 'skill' ? {} : undefined
   await assert.rejects(rt.preflight({ ...config, requireBrowser: true }), /BrowserSkill/)
   h.ctx.skills = { list: async () => [{ name: 'ego-browser', invocation: { modelInvocable: true } }, { name: 'browser-skill', invocation: { modelInvocable: true } }], get: async name => ({ content: name === 'browser-skill' ? 'Tencent BrowserSkill browser_session browser_inspect' : 'Ego browser instructions' }) }
