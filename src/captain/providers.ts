@@ -106,8 +106,8 @@ class GithubProvider extends Provider<Row> {
   private identity(item: Row): { id: string; repo: string; number: string } {
     const number = numberId(item.number)
     const url = required(item.html_url, 'issue URL')
-    const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/(\d+)$/.exec(url)
-    if (!match || match[2] !== number) throw new Error(`Unsupported GitHub issue URL or identity: ${url}`)
+    const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/(issues|pull)\/(\d+)$/.exec(url)
+    if (!match || match[3] !== number || (match[2] === 'pull') !== !!item.pull_request) throw new Error(`Unsupported GitHub issue URL or identity: ${url}`)
     return { id: match[1]!.toLowerCase() === this.config.repository.toLowerCase() ? number : `${match[1]}#${number}`, repo: match[1]!, number }
   }
   private splitId(id: string): { repo: string; number: string } { const [repo, number] = id.includes('#') ? id.split('#') : [this.config.repository, id]; if (!/^[\w.-]+\/[\w.-]+$/.test(repo!)) throw new Error('Invalid repository'); return { repo: repo!, number: numberId(number) } }
@@ -147,6 +147,14 @@ class GithubProvider extends Provider<Row> {
       const item = pending[index]!
       const { id, repo, number } = this.identity(item)
       if (tickets.has(id)) continue
+      if(item.pull_request) {
+        const pr=object(await this.api(this.endpoint(`pulls/${number}`,repo)))
+        if(numberId(pr.number)!==number||pr.html_url!==item.html_url||pr.base?.repo?.full_name?.toLowerCase()!==repo.toLowerCase())throw new Error('GitHub PR dependency identity mismatch')
+        if(!['open','closed'].includes(pr.state)||typeof pr.merged!=='boolean')throw new Error('Invalid GitHub PR dependency state')
+        const merged=pr.state==='closed'&&pr.merged===true&&typeof pr.merge_commit_sha==='string'&&/^[a-f0-9]{40,64}$/i.test(pr.merge_commit_sha)&&pr.base?.ref===this.config.targetBranch
+        tickets.set(id,{id,title:required(item.title,'PR dependency title'),body:typeof item.body==='string'?item.body:'',url:item.html_url,milestone:item.milestone?.title??'',predecessors:[],state:pr.state,merged,priority:99,createdAt:item.created_at??'',labels:[],exclusion:'Pull request dependencies are not executable tickets'})
+        continue
+      }
       // A failed native endpoint cannot prove that the textual fallback is complete.
       const native = await this.pages(this.endpoint(`issues/${number}/dependencies/blocked_by?per_page=100`, repo))
       const body = typeof item.body === 'string' ? item.body : ''
@@ -172,13 +180,14 @@ class GithubProvider extends Provider<Row> {
         if (tickets.has(dependency) || pending.some(x => this.identity(x).id === dependency)) continue
         const ref = this.splitId(dependency)
         const predecessor = object(await this.api(this.endpoint(`issues/${ref.number}`, ref.repo)))
-        if (this.identity(predecessor).id !== dependency || predecessor.pull_request) throw new Error('GitHub predecessor identity mismatch')
+        if (this.identity(predecessor).id !== dependency) throw new Error('GitHub predecessor identity mismatch')
         pending.push(predecessor)
       }
     }
     return [...tickets.values()]
   }
   async claim(ticket: Ticket, runId: string): Promise<void> {
+    if(ticket.exclusion==='Pull request dependencies are not executable tickets'||/\/pull\/\d+$/.test(ticket.url??''))throw new Error('Pull request dependencies are not executable tickets')
     const ref = this.splitId(ticket.id)
     const comments = await this.pages(this.endpoint(`issues/${ref.number}/comments?per_page=100`, ref.repo))
     const tag = `<!-- darkingdoom-claim:${runId} -->`

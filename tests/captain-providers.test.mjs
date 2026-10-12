@@ -710,3 +710,42 @@ test('Both providers reject unmilestoned follow-ups when the intake option is di
     assert.equal(f.calls.length, 0)
   }
 })
+test('GitHub accepts verified merged PR prerequisites without dispatching or traversing them as issues',async()=>{
+ const pull=issue(298,{html_url:'https://github.com/owner/repo/pull/298',state:'closed',milestone:null,pull_request:{url:'https://api.github.com/repos/owner/repo/pulls/298'}})
+ const f=fake((_file,a)=>{
+  if(a[1]==='repos/owner/repo/issues?state=all&per_page=100')return [[issue(1,{body:'Depends on #298'}),pull]]
+  if(a[1]==='repos/owner/repo/issues/1')return issue(1,{body:'Depends on #298'})
+  if(a[1]==='repos/owner/repo/issues/298')return pull
+  if(a[1]==='repos/owner/repo/pulls/298')return {number:298,html_url:pull.html_url,state:'closed',merged:true,merge_commit_sha:'a'.repeat(40),base:{ref:'main',repo:{full_name:'owner/repo'}}}
+  if(a[1]==='repos/owner/repo/issues/1/dependencies/blocked_by?per_page=100')return [[]]
+ })
+ const provider=mod.createProvider({...config,includeUnmilestoned:true},f.run),rows=await provider.discover(),parent=rows.find(t=>t.id==='298')
+ assert.equal(parent.merged,true);assert.match(parent.exclusion,/not executable/);assert.equal(await provider.verifyDependencies({ticket:{id:'1'}}),undefined)
+ await assert.rejects(provider.claim(parent,'run'),/not executable/)
+ assert.equal(f.calls.some(c=>c.args[1]?.includes('/issues/298/dependencies/')),false)
+})
+
+test('unmerged wrong-target and missing-commit PR prerequisites never unlock delivery',async()=>{
+ for(const patch of [{state:'open',merged:false},{state:'closed',merged:false},{base:{ref:'other',repo:{full_name:'owner/repo'}}},{merge_commit_sha:null}]){
+  const pull=issue(298,{html_url:'https://github.com/owner/repo/pull/298',pull_request:{}})
+  const f=fake((_file,a)=>{
+   if(a[1]==='repos/owner/repo/issues/1')return issue(1,{body:'Depends on #298'})
+   if(a[1]==='repos/owner/repo/issues/298')return pull
+   if(a[1]==='repos/owner/repo/pulls/298')return {number:298,html_url:pull.html_url,state:'closed',merged:true,merge_commit_sha:'a'.repeat(40),base:{ref:'main',repo:{full_name:'owner/repo'}},...patch}
+   if(a[1]==='repos/owner/repo/issues/1/dependencies/blocked_by?per_page=100')return [[]]
+  })
+  assert.match(await mod.createProvider(config,f.run).verifyDependencies({ticket:{id:'1'}}),/Waiting for predecessor 298/)
+ }
+})
+
+test('PR dependency metadata must match its numeric URL and repository identity',async()=>{
+ for(const patch of [{number:999},{html_url:'https://github.com/owner/repo/pull/999'},{base:{ref:'main',repo:{full_name:'other/repo'}}}]){
+  const f=fake((_file,a)=>{
+   if(a[1]==='repos/owner/repo/issues/1')return issue(1,{body:'Depends on #298'})
+   if(a[1]==='repos/owner/repo/issues/298')return issue(298,{html_url:'https://github.com/owner/repo/pull/298',pull_request:{}})
+   if(a[1]==='repos/owner/repo/pulls/298')return {number:298,html_url:'https://github.com/owner/repo/pull/298',state:'closed',merged:true,merge_commit_sha:'a'.repeat(40),base:{ref:'main',repo:{full_name:'owner/repo'}},...patch}
+   if(a[1]==='repos/owner/repo/issues/1/dependencies/blocked_by?per_page=100')return [[]]
+  })
+  assert.match(await mod.createProvider(config,f.run).verifyDependencies({ticket:{id:'1'}}),/identity/)
+ }
+})
