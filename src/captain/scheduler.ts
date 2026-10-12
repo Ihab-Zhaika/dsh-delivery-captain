@@ -3,8 +3,8 @@ import type { RunConfig, Task, Ticket } from './types.ts'
 
 export interface Eligibility { ticketId: string; eligible: boolean; reason: string; state: string; predecessors: string[] }
 
-/** Resolve the complete predecessor closure; related links never enter this graph. */
-export function eligibility(tickets: Ticket[], milestones: string[], tasks: (Pick<Task, 'ticket' | 'status' | 'closedAt'> & Partial<Pick<Task,'error'>>)[]): Eligibility[] {
+type DependencyTask=Pick<Task,'ticket'|'status'|'closedAt'> & Partial<Pick<Task,'error'>>
+function dependencyContext(tickets:Ticket[],tasks:DependencyTask[]) {
   const byId = new Map(tickets.map(t => [t.id, t]))
   if (byId.size !== tickets.length) throw new Error('Duplicate ticket identities in discovery')
   const delivered = new Set(tasks.filter(t => t.status === 'merged' && t.closedAt).map(t => t.ticket.id))
@@ -22,6 +22,18 @@ export function eligibility(tickets: Ticket[], milestones: string[], tasks: (Pic
     }
     return undefined
   }
+  return {satisfied,dependencyIssue}
+}
+
+/** Fresh remote proofs can use this without applying intake filters or existing-task exclusion. */
+export function dependencyBlocker(ticket:Ticket,tickets:Ticket[],tasks:DependencyTask[]=[]):string|undefined {
+  return dependencyContext(tickets,tasks).dependencyIssue(ticket,new Set())
+}
+
+/** Resolve the complete predecessor closure; related links never enter this graph. */
+export function eligibility(tickets: Ticket[], milestones: string[], tasks: DependencyTask[]): Eligibility[] {
+  const {satisfied,dependencyIssue}=dependencyContext(tickets,tasks)
+  const delivered = new Set(tasks.filter(t => t.status === 'merged' && t.closedAt).map(t => t.ticket.id))
   return tickets.map(t => {
     const task=tasks.find(task=>task.ticket.id===t.id)
     const reason = satisfied(t) ? t.completedDecision && !t.merged && !delivered.has(t.id) ? 'Decision completed (no code merge claimed)' : 'Delivered' : !milestones.includes(t.milestone) ? 'Outside configured milestones'

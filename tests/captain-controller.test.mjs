@@ -186,7 +186,8 @@ test('offline dispatch refreshes stale blocked activity before enforcing capacit
   const run=await f.controller.start('captain',{...f.config,maxTickets:1,parallelism:1});await f.controller.tick()
   const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Old activity'})
   await f.controller.control('captain','stop');await f.controller.control('captain','resume')
-  assert.equal(task.executionActive,true);f.provider.discover=async()=>{throw new Error('Offline')}
+  task.executionActive=true // A legacy saved run can still contain report-time activity after Stop.
+  f.provider.discover=async()=>{throw new Error('Offline')}
   const starts=f.starts.length;await f.controller.tick()
   assert.equal(f.starts.length,starts+1);assert.equal(task.status,'running')
 }))
@@ -628,6 +629,73 @@ test('free slots take independent later-milestone work while preserving mileston
   await f.controller.tick();assert.equal(run.tasks.length,2)
 }))
 
+test('fresh dependency proof prevents a stale eligible ticket from claiming or starting a workspace',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);let claims=0,prepares=0
+  f.provider.claim=async()=>claims++;f.runtime.prepare=async()=>prepares++
+  f.provider.verifyDependencies=async()=> 'Waiting for predecessor 2 to be merged and closed'
+  const run=await f.controller.start('captain',f.config);await f.controller.tick()
+  assert.equal(claims,0);assert.equal(prepares,0);assert.equal(f.starts.length,0)
+  assert.equal(run.tasks[0].status,'blocked');assert.match(run.tasks[0].error,/predecessor 2/)
+}))
+
+test('a dependency added during review prevents PR creation without spending a code repair round',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);let blocked=false,prs=0
+  f.provider.verifyDependencies=async()=>blocked?'Waiting for predecessor 2':undefined
+  f.provider.ensurePullRequest=async()=>{prs++;throw new Error('Must not create PR')}
+  const run=await f.controller.start('captain',f.config);await f.controller.tick();const task=run.tasks[0]
+  f.runtime.review=async()=>{blocked=true;return{passed:true,headSha:'head',findings:[],report:'pass'}}
+  await f.controller.report(task.sessionId,{phase:'review',ready:true});await f.controller.tick()
+  assert.equal(prs,0);assert.equal(task.status,'blocked');assert.equal(task.reviewRounds,0);assert.match(task.error,/predecessor 2/)
+}))
+
+test('fresh dependency failure just before merge blocks even a passing exact-head review',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);let blocked=false
+  f.provider.verifyDependencies=async()=>blocked?'Waiting for predecessor 2':undefined
+  const inspect=f.provider.inspectPullRequest;f.provider.inspectPullRequest=async(...args)=>{const result=await inspect(...args);blocked=true;return result}
+  const run=await f.controller.start('captain',f.config);await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'review',ready:true});await f.controller.tick()
+  assert.equal(f.merges.length,0);assert.equal(task.status,'blocked');assert.equal(task.reviewRounds,0)
+}))
+
+test('dependency verification outages hold ready work without archiving its team or requesting code repair',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',f.config);await f.controller.tick();const task=run.tasks[0]
+  const reasons=[];f.runtime.stop=async(_id,reason)=>reasons.push(reason)
+  f.provider.verifyDependencies=async()=>{throw new Error('Dependency API unavailable')}
+  await f.controller.report(task.sessionId,{phase:'review',ready:true});await f.controller.tick()
+  assert.equal(task.status,'blocked');assert.equal(task.reviewRounds,0);assert.deepEqual(reasons,['shutdown'])
+  assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,0);assert.match(task.error,/Dependency API unavailable/)
+}))
+
+test('known dependent workers cannot resume until targeted proof clears their predecessor',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Missing parent'});task.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick()
+  run.tickets=[ticket('1','M1',['2']),ticket('2')];let checks=0,blocked=true
+  f.provider.verifyDependencies=async()=>{checks++;return blocked?'Waiting for predecessor 2':undefined}
+  const starts=f.starts.length;await f.controller.resumeTask('captain',task.id,'solved',true)
+  assert.equal(f.starts.length,starts);assert.equal(task.status,'blocked');assert.equal(checks,1)
+  blocked=false;await f.controller.resumeTask('captain',task.id,'Parent delivered',true)
+  assert.equal(f.starts.length,starts+1);assert.equal(task.dependencyBlocked,undefined)
+}))
+
+test('failed dependency quiescence cannot release its slot merely because the agent reports idle',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1,parallelism:1});await f.controller.tick();const task=run.tasks[0]
+  f.provider.verifyDependencies=async()=> 'Waiting for predecessor 2'
+  const stop=f.runtime.stop;f.runtime.stop=async()=>{throw new Error('Inbox drain not established')};f.runtime.isRunning=async()=>false
+  try {
+    await f.controller.report(task.sessionId,{phase:'review',ready:true});await f.controller.tick();await f.controller.tick()
+    assert.equal(task.executionActive,true);assert.match(task.parkingError,/drain/)
+    await assert.rejects(f.controller.resumeTask('captain',task.id,'solved',true),/quiesced/)
+  }finally{f.runtime.stop=stop}
+}))
+
+test('a newly declared unmet predecessor holds an already-running worker before idle recovery',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  f.setTickets([ticket('1','M1',['2']),ticket('2')]);f.provider.verifyDependencies=async()=> 'Waiting for predecessor 2'
+  f.runtime.isRunning=async()=>false;task.lastWakeAt=new Date(Date.now()-61000).toISOString()
+  const starts=f.starts.length;await f.controller.tick()
+  assert.equal(task.status,'blocked');assert.equal(f.starts.length,starts);assert.equal(task.dependencyBlocked,true)
+}))
+
 test('live milestone scope updates preserve workers and immutable task contracts',()=>fixture(async f=>{
   f.setTickets([ticket('1'),ticket('2','M2')])
   const run=await f.controller.start('captain',{...f.config,milestones:['M1']});await f.controller.tick()
@@ -687,4 +755,46 @@ test('one shutdown failure does not leave other workers running or release owner
     try { await f.controller.control('captain','stop') } catch {}
     assert.ok(stopped.includes(run.tasks[1].sessionId));assert.match(run.error,/shutdown/i)
   } finally { f.runtime.stop=async()=>{} }
+}))
+test('dependency-held guidance and answers require fresh proof before waking a worker',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Parent missing'});task.executionActive=false;task.dependencyBlocked=true
+  let checks=0;f.provider.verifyDependencies=async()=>{checks++;return 'Waiting for predecessor 2'}
+  await assert.rejects(f.controller.message('captain',task.id,'Continue implementation'),/dependenc/i)
+  const q=await f.controller.question(task.sessionId,'Can I implement?')
+  await f.controller.answer('captain',q.id,'Continue implementation')
+  assert.equal(checks,2);assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,0);assert.equal(task.status,'blocked');assert.ok(q.recordedAt);assert.equal(q.deliveredAt,undefined)
+}))
+
+test('pending dependency quiescence rejects resume and preserves late reports without losing cleanup failures',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  f.provider.verifyDependencies=async()=> 'Waiting for predecessor 2'
+  let entered,release;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r),originalStop=f.runtime.stop
+  f.runtime.stop=async()=>{entered();await gate;throw new Error('Native inbox drain failed')};f.runtime.isRunning=async()=>false
+  await f.controller.report(task.sessionId,{phase:'review',ready:true});const tick=f.controller.tick();await started
+  try {
+    const resume=f.controller.resumeTask('captain',task.id,'solved',true);resume.catch(()=>{})
+    let timeout;try {await assert.rejects(Promise.race([resume,new Promise((_,reject)=>{timeout=setTimeout(()=>reject(new Error('Resume overlapped pending cleanup')),100)})]),/quiesced/)}finally{clearTimeout(timeout)}
+    await f.controller.report(task.sessionId,{phase:'review',ready:true,note:'Late ready report'})
+    assert.equal(task.status,'blocked');assert.equal(task.executionActive,true)
+  }finally{release();await tick;f.runtime.stop=originalStop}
+  assert.match(task.parkingError,/Native inbox drain failed/);assert.equal(task.executionActive,true);assert.equal(f.starts.length,1)
+}))
+test('legacy pending answers without an action cannot wake dependency-held workers',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Parent missing'});task.executionActive=false;task.dependencyBlocked=true
+  const q=await f.controller.question(task.sessionId,'Legacy decision?');q.answer='Continue';q.answeredAt=new Date().toISOString()
+  let checks=0;f.provider.verifyDependencies=async()=>{checks++;return 'Waiting for predecessor 2'}
+  await f.controller.tick();assert.equal(checks,1);assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,0);assert.equal(task.status,'blocked');assert.ok(q.recordedAt)
+}))
+test('a dependency hold persistence failure cannot enter the code repair wake lane',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  f.provider.verifyDependencies=async()=> 'Waiting for predecessor 2'
+  const stop=f.runtime.stop,save=f.controller.store.save.bind(f.controller.store);let failSave=false
+  f.runtime.stop=async()=>{failSave=true;throw new Error('Child cleanup failed')}
+  f.controller.store.save=async r=>{if(failSave){failSave=false;throw new Error('Transient persistence failure')};await save(r)}
+  try {
+    await f.controller.report(task.sessionId,{phase:'review',ready:true});await f.controller.tick()
+    assert.equal(task.status,'blocked');assert.equal(task.reviewRounds,0);assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,0);assert.match(task.parkingError,/cleanup failed/)
+  }finally{f.runtime.stop=stop;f.controller.store.save=save}
 }))

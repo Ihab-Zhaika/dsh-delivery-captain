@@ -105,6 +105,7 @@ export interface Task {
     parkedAt?: string;
     parkReason?: string;
     parkingError?: string;
+    dependencyBlocked?: boolean;
     blockerFingerprint?: string;
     blockerNotifiedAt?: string;
     lastBlockerNotifyAttemptAt?: string;
@@ -163,6 +164,7 @@ export interface TicketProvider {
     preflight(): Promise<void>;
     discover(): Promise<Ticket[]>;
     claim(ticket: Ticket, runId: string): Promise<void>;
+    verifyDependencies?(task: Task): Promise<string | undefined>;
     ensurePullRequest(task: Task): Promise<PullRequest>;
     inspectPullRequest(task: Task): Promise<PullRequest>;
     merge(task: Task, expectedHead: string): Promise<PullRequest>;

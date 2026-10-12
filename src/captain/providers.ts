@@ -3,6 +3,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runCommand } from './commands.js'
+import { dependencyBlocker } from './scheduler.js'
 import type { CommandRunner, FollowupInput, PullRequest, RunConfig, Task, Ticket, TicketProvider } from './types.js'
 
 // Adapters validate the fields used for scheduling; opaque API fields remain local.
@@ -13,11 +14,32 @@ function required(value: unknown, name: string): string { if (typeof value !== '
 function numberId(value: unknown): string { const id = String(value); if (!/^[1-9]\d*$/.test(id)) throw new Error('Invalid ticket/PR id'); return id }
 function unique(items: string[]): string[] { return [...new Set(items)] }
 function textDependencies(body: string): string[] {
-  return unique(body.split(/\r?\n/).flatMap(line => {
-    const declaration = line.replace(/\*\*/g, '').replace(/^\s*[-*]\s+/, '').match(/^\s*(?:depends on|blocked by|predecessors)\b(?:\s*\([^)]*\))?\s*:?\s*(.*)$/i)
+  let fence: string | undefined
+  let intro = true, contentSeen = false
+  return unique(body.split(/\r?\n/).flatMap(raw => {
+    const delimiter = /^\s{0,3}(`{3,}|~{3,})/.exec(raw)?.[1]
+    if (fence) {
+      if (delimiter && delimiter[0] === fence[0] && delimiter.length >= fence.length && raw.trim() === delimiter) fence = undefined
+      return []
+    }
+    if (delimiter) { fence = delimiter; intro = false; return [] }
+    if (!raw.trim()) { if (contentSeen) intro = false; return [] }
+    if (/^\s{0,3}#{1,6}\s/.test(raw)) return []
+    contentSeen = true
+    const line = raw.replace(/\*\*/g, '').replace(/^\s*[-*]\s+/, '').trim()
+    const declaration = line.match(/^(?:depends on|blocked by|predecessors)\b(?:\s*\([^)]*\))?\s*:?\s*(.*)$/i)
+    // Follow-up is a dependency only when declared as such, including an issue's
+    // severity/milestone introduction. Historical/independent discussion is not.
+    const followup = line.match(/^follow[- ]up\s+(?:to|from|on)\b\s*:?\s*(.*)$/i)
+      ?? (intro && /^(?:Severity\s*:\s*P\d+\.\s*(?:M\d+\s+)?|M\d+\s+)/i.test(line)
+        ? line.match(/^[^!?]*?\bfollow[- ]up\s+(?:to|from|on)\b\s*:?\s*(.*)$/i) : null)
+    if (!declaration && /\b(?:historical|independent)\b|\b(?:no|not a)\s+(?:prerequisite|dependency|follow[- ]up)\b|\b(?:does not|do not|doesn't|don't)\s+(?:depend|require)\b/i.test(line)) return []
+    // A trailing independent-ticket explanation is prose, while a semicolon
+    // followed by another bare reference still belongs to the declared list.
+    const referenceText = (declaration ?? followup)?.[1]?.split(/\.\s+|\s+(?:related|see also)\s*:|;\s*(?=#\d+\s+(?:is|was|remains)\s+(?:otherwise\s+)?independent\b)/i)[0]
     // Mirrored tickets contain AB#123 alongside their GitHub #456 reference.
     // Azure IDs are not local GitHub issue numbers.
-    return declaration ? [...declaration[1]!.matchAll(/(?<![\w/.-])#(\d+)\b/g)].map(match=>match[1]!) : []
+    return referenceText ? [...referenceText.matchAll(/(?<![\w/.-])#(\d+)\b/g)].map(match=>match[1]!) : []
   }))
 }
 function marker(task: Task, input: FollowupInput): string { return `darkingdoom-followup:${createHash('sha256').update(JSON.stringify([task.ticket.id, input.title, input.milestone, [...input.predecessors].sort()])).digest('hex').slice(0, 24)}` }
@@ -27,7 +49,7 @@ function assertClaims(comments: string[], runId: string): void {
   }
 }
 
-abstract class Provider implements TicketProvider {
+abstract class Provider<Seed> implements TicketProvider {
   constructor(protected config: RunConfig, protected runner: CommandRunner) {}
   protected async json(file: string, args: string[]): Promise<any> { return JSON.parse(await this.runner(file, args, { cwd: this.config.workspace })) }
   protected async remotes(): Promise<string[]> {
@@ -44,6 +66,20 @@ abstract class Provider implements TicketProvider {
   }
   abstract preflight(): Promise<void>
   abstract discover(): Promise<Ticket[]>
+  protected abstract dependencyClosure(seed: Seed[], fresh?: boolean): Promise<Ticket[]>
+  protected abstract dependencySeed(id: string): Promise<Seed[]>
+  async verifyDependencies(task: Task): Promise<string | undefined> {
+    try {
+      const tickets = await this.dependencyClosure(await this.dependencySeed(task.ticket.id), true)
+      const child = tickets.find(ticket => ticket.id === task.ticket.id)
+      if (!child) throw new Error('Provider missing child ticket or returned a different identity')
+      if (child.exclusion?.includes('another repository') || child.exclusion?.includes('another project')) return child.exclusion
+      // Only fresh remote closure counts here; managed task history is not proof.
+      return dependencyBlocker(child, tickets, [])
+    } catch (error) {
+      return `Dependency verification failed: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
   abstract claim(ticket: Ticket, runId: string): Promise<void>
   abstract ensurePullRequest(task: Task): Promise<PullRequest>
   abstract inspectPullRequest(task: Task): Promise<PullRequest>
@@ -63,15 +99,15 @@ abstract class Provider implements TicketProvider {
   }
 }
 
-class GithubProvider extends Provider {
+class GithubProvider extends Provider<Row> {
   private endpoint(path: string, repo = this.config.repository): string { return `repos/${repo}${path ? `/${path}` : ''}` }
   private api(path: string, args: string[] = []): Promise<any> { return this.json('gh', ['api', path, ...args]) }
   private async pages(path: string): Promise<Row[]> { const pages = await this.api(path, ['--paginate', '--slurp']); if (!Array.isArray(pages)) throw new Error('Invalid paginated GitHub response'); return pages.flatMap(array) }
   private identity(item: Row): { id: string; repo: string; number: string } {
     const number = numberId(item.number)
     const url = required(item.html_url, 'issue URL')
-    const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/\d+$/.exec(url)
-    if (!match) throw new Error(`Unsupported GitHub issue URL: ${url}`)
+    const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/(\d+)$/.exec(url)
+    if (!match || match[2] !== number) throw new Error(`Unsupported GitHub issue URL or identity: ${url}`)
     return { id: match[1]!.toLowerCase() === this.config.repository.toLowerCase() ? number : `${match[1]}#${number}`, repo: match[1]!, number }
   }
   private splitId(id: string): { repo: string; number: string } { const [repo, number] = id.includes('#') ? id.split('#') : [this.config.repository, id]; if (!/^[\w.-]+\/[\w.-]+$/.test(repo!)) throw new Error('Invalid repository'); return { repo: repo!, number: numberId(number) } }
@@ -96,6 +132,16 @@ class GithubProvider extends Provider {
       selected = new Set(items.map(x => this.identity(x).id))
     }
     const pending = (await this.pages(this.endpoint('issues?state=all&per_page=100'))).filter(x => !x.pull_request && this.config.milestones.includes(x.milestone?.title))
+    const tickets = await this.dependencyClosure(pending)
+    return tickets.map(ticket => !ticket.exclusion && selected && !selected.has(ticket.id) ? { ...ticket, exclusion: 'Does not match configured query' } : ticket)
+  }
+  protected async dependencySeed(id: string): Promise<Row[]> {
+    const ref = this.splitId(id)
+    const item = object(await this.api(this.endpoint(`issues/${ref.number}`, ref.repo)))
+    if (this.identity(item).id !== id || item.pull_request) throw new Error('GitHub child ticket identity mismatch')
+    return [item]
+  }
+  protected async dependencyClosure(pending: Row[], fresh = false): Promise<Ticket[]> {
     const tickets = new Map<string, Ticket>()
     for (let index = 0; index < pending.length; index++) {
       const item = pending[index]!
@@ -121,14 +167,16 @@ class GithubProvider extends Provider {
       const labels: string[] = array(item.labels ?? []).map(x => required(x.name, 'label name'))
       const priorityLabel = labels.find(x => /^p[0-9]$/i.test(x))
       tickets.set(id, { id, title: required(item.title, 'issue title'), body, url: item.html_url, milestone: item.milestone?.title ?? '', predecessors, state: item.state, merged, completedDecision: item.state==='closed'&&item.state_reason==='completed'&&labels.includes('kind:decision'), priority: priorityLabel ? Number(priorityLabel.slice(1)) : 99, createdAt: item.created_at ?? '', labels, exclusion: repo.toLowerCase() !== this.config.repository.toLowerCase() ? 'Dependency belongs to another repository' : undefined })
-      pending.push(...native)
+      if (!fresh) pending.push(...native)
       for (const dependency of predecessors) {
         if (tickets.has(dependency) || pending.some(x => this.identity(x).id === dependency)) continue
         const ref = this.splitId(dependency)
-        pending.push(object(await this.api(this.endpoint(`issues/${ref.number}`, ref.repo))))
+        const predecessor = object(await this.api(this.endpoint(`issues/${ref.number}`, ref.repo)))
+        if (this.identity(predecessor).id !== dependency || predecessor.pull_request) throw new Error('GitHub predecessor identity mismatch')
+        pending.push(predecessor)
       }
     }
-    return [...tickets.values()].map(ticket => !ticket.exclusion && selected && !selected.has(ticket.id) ? { ...ticket, exclusion: 'Does not match configured query' } : ticket)
+    return [...tickets.values()]
   }
   async claim(ticket: Ticket, runId: string): Promise<void> {
     const ref = this.splitId(ticket.id)
@@ -201,7 +249,7 @@ class GithubProvider extends Provider {
   }
 }
 
-class AzureProvider extends Provider {
+class AzureProvider extends Provider<string> {
   private flags(): string[] { return ['--org', required(this.config.organization, 'Azure organization'), '--project', required(this.config.project, 'Azure project'), '--output', 'json'] }
   private az(args: string[], project = true): Promise<any> { return this.json('az', [...args, ...(project ? this.flags() : ['--org', required(this.config.organization, 'Azure organization'), '--output', 'json'])]) }
   private async invoke(area: string, resource: string, route: string[], method = 'GET', body?: unknown, query: string[] = []): Promise<any> {
@@ -243,13 +291,18 @@ class AzureProvider extends Provider {
     const wiql = `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${quote(this.config.project!)}' AND [System.IterationPath] IN (${this.config.milestones.map(x => `'${quote(x)}'`).join(',')}) ORDER BY [System.Id]`
     const results = await this.query(wiql)
     const selected = this.config.query?.trim() ? new Set((await this.query(this.config.query)).map(x => numberId(x.id))) : undefined
-    const pending = results.map(x => numberId(x.id))
+    const tickets = await this.dependencyClosure(results.map(x => numberId(x.id)))
+    return tickets.map(ticket => !ticket.exclusion && selected && !selected.has(ticket.id) ? { ...ticket, exclusion: 'Does not match configured query' } : ticket)
+  }
+  protected async dependencySeed(id: string): Promise<string[]> { return [numberId(id)] }
+  protected async dependencyClosure(pending: string[]): Promise<Ticket[]> {
     const tickets = new Map<string, Ticket>()
     const workflowStates = new Map<string, Row[]>()
     for (let index = 0; index < pending.length; index++) {
       const id = pending[index]!
       if (tickets.has(id)) continue
       const item = object(await this.az(['boards', 'work-item', 'show', '--id', id, '--expand', 'relations'], false))
+      if (numberId(item.id) !== id) throw new Error('Azure work item identity mismatch')
       const fields = object(item.fields)
       const project = required(fields['System.TeamProject'], 'work item project')
       const type = required(fields['System.WorkItemType'], 'work item type')
@@ -289,10 +342,11 @@ class AzureProvider extends Provider {
       const exclusion = project.toLowerCase() !== this.config.project!.toLowerCase() ? 'Dependency belongs to another project'
         : !this.config.milestones.includes(milestone) ? 'Dependency is outside configured milestones'
         : category === 'Removed' ? 'Work item workflow category is Removed' : undefined
-      tickets.set(id, { id, title: required(fields['System.Title'], 'work item title'), body, url: item._links?.html?.href ?? `${this.config.organization}/${encodeURIComponent(project)}/_workitems/edit/${id}`, milestone, predecessors, state: completed ? 'closed' : 'open', merged: completed && merged, priority: Number(fields['Microsoft.VSTS.Common.Priority']) || 99, createdAt: fields['System.CreatedDate'] ?? '', labels: typeof fields['System.Tags'] === 'string' ? fields['System.Tags'].split(';').map((x: string) => x.trim()) : [], exclusion })
+      const labels: string[] = typeof fields['System.Tags'] === 'string' ? fields['System.Tags'].split(';').map((x: string) => x.trim()) : []
+      tickets.set(id, { id, title: required(fields['System.Title'], 'work item title'), body, url: item._links?.html?.href ?? `${this.config.organization}/${encodeURIComponent(project)}/_workitems/edit/${id}`, milestone, predecessors, state: completed ? 'closed' : 'open', merged: completed && merged, completedDecision: completed && labels.includes('kind:decision'), priority: Number(fields['Microsoft.VSTS.Common.Priority']) || 99, createdAt: fields['System.CreatedDate'] ?? '', labels, exclusion })
       pending.push(...predecessors)
     }
-    return [...tickets.values()].map(ticket => !ticket.exclusion && selected && !selected.has(ticket.id) ? { ...ticket, exclusion: 'Does not match configured query' } : ticket)
+    return [...tickets.values()]
   }
   async claim(ticket: Ticket, runId: string): Promise<void> {
     const comments: string[] = []

@@ -397,3 +397,177 @@ test('provider cancellation interrupts discovery and rejects subsequent commands
   await assert.rejects(() => provider.discover(), /abort|cancel/i)
   assert.equal(calls, 1)
 })
+
+test('GitHub recognizes the leading follow-up declarations from issues 426 and 427', async () => {
+  for (const [body, predecessor] of [
+    ['Severity: P2. M2 session-boundary follow-up from the HTTP hardening group (#401).', '401'],
+    ['Follow-up to #423, explicitly deferred by the coordinating owner delegation on 2026-10-08.', '423'],
+    ['Severity: P2. Session-boundary follow-up from the hardening group (#401).', '401'],
+    ['**Follow-up to:** #423\n\nRelated: #999', '423'],
+  ]) {
+    const f = fake((_file, args) => {
+      if (args[1] === 'repos/owner/repo/issues?state=all&per_page=100') return [[issue(426, { body })]]
+      if (args[1] === `repos/owner/repo/issues/${predecessor}`) return issue(Number(predecessor), { milestone: null })
+      if (args[1]?.includes('/dependencies/')) return [[]]
+    })
+    const rows = await mod.createProvider(config, f.run).discover()
+    assert.deepEqual(rows.find(x => x.id === '426').predecessors, [predecessor])
+  }
+})
+
+test('GitHub rejects issue metadata with inconsistent URL and number identity', async () => {
+  const f = fake((_file, args) => args[1]?.includes('/dependencies/') ? [[]] : [[issue(426, { html_url: 'https://github.com/owner/repo/issues/999' })]])
+  await assert.rejects(() => mod.createProvider(config, f.run).discover(), /identity|URL/)
+})
+
+test('GitHub follow-up parsing ignores historical, negated, independent, code and foreign references', async () => {
+  for (const body of [
+    'Related: #401\nHistorical follow-up to #423.',
+    'A historical summary.\n\nSeverity: P2. M2 session-boundary follow-up from the group (#401).',
+    'Not a follow-up to #423; this is independent.',
+    'Follow-up to #423, but independent and does not depend on its implementation.',
+    'Follow-up to #423 is historical only; no prerequisite.',
+    '```text\nDepends on #401\nFollow-up to #423\n```',
+    '~~~text\nBlocked by: #401\n~~~',
+    'Follow-up to AB#423, other/repo#401, other/repo-#999.',
+    'The related design mentions a follow-up to #423.',
+  ]) {
+    const f = fake((_file, args) => {
+      if (args[1] === 'repos/owner/repo/issues?state=all&per_page=100') return [[issue(426, { body })]]
+      const requested = /^repos\/owner\/repo\/issues\/(\d+)$/.exec(args[1])
+      if (requested) return issue(Number(requested[1]), { milestone: null })
+      if (args[1]?.includes('/dependencies/')) return [[]]
+    })
+    const rows = await mod.createProvider(config, f.run).discover()
+    assert.deepEqual(rows[0].predecessors, [], body)
+    assert.equal(rows.length, 1, body)
+  }
+})
+
+test('GitHub preserves authoritative predecessors while ignoring a trailing independent explanation', async () => {
+  for (const body of [
+    'Predecessors: #401 (historical implementation is still unmerged)',
+    'Depends on #401; #427 is otherwise independent',
+    'Blocked by #401 (requires its historical implementation)',
+    'Predecessors: #401; #402',
+  ]) {
+    const f = fake((_file, args) => {
+      if (args[1] === 'repos/owner/repo/issues?state=all&per_page=100') return [[issue(426, { body })]]
+      const requested = /^repos\/owner\/repo\/issues\/(\d+)$/.exec(args[1])
+      if (requested) return issue(Number(requested[1]), { milestone: null })
+      if (args[1]?.includes('/dependencies/')) return [[]]
+    })
+    const rows = await mod.createProvider(config, f.run).discover()
+    assert.deepEqual(rows[0].predecessors, body.endsWith('; #402') ? ['401', '402'] : ['401'], body)
+  }
+})
+
+function githubDependencyFixture(items, dependencies = {}, closing = []) {
+  return fake((_file, args) => {
+    const path = args[1]
+    const direct = /^repos\/owner\/repo\/issues\/(\d+)$/.exec(path)
+    if (direct) return items[direct[1]] ?? Promise.reject(new Error('HTTP 404 missing issue'))
+    const native = /issues\/(\d+)\/dependencies\/blocked_by/.exec(path)
+    if (native) return [dependencies[native[1]] ?? []]
+    if (path === 'graphql') return [{ data: { repository: { issue: { closedByPullRequestsReferences: { nodes: closing, pageInfo: { hasNextPage: false } } } } } }]
+  })
+}
+const closingProof = { merged: true, mergeCommit: { oid: 'merged-parent' }, baseRefName: 'main', repository: { nameWithOwner: 'owner/repo' } }
+const githubTask = id => ({ ...task, ticket: { id: String(id) } })
+
+test('GitHub verifies fresh native predecessors outside milestone/query selection', async () => {
+  const f = githubDependencyFixture({ 426: issue(426), 401: issue(401, { milestone: null }) }, { 426: [issue(401, { state: 'closed' })] })
+  const provider = mod.createProvider({ ...config, query: 'label:ready' }, f.run)
+  assert.match(await provider.verifyDependencies(githubTask(426)), /401/)
+  assert.ok(f.calls.some(x => x.args[1] === 'repos/owner/repo/issues/401'))
+  assert.ok(!f.calls.some(x => /issues\?|search\/issues/.test(x.args[1])))
+})
+
+test('GitHub fresh dependency proof accepts merged closure and completed decisions but refuses manual closure', async () => {
+  for (const [parent, refs, allowed] of [
+    [issue(423, { state: 'closed', milestone: null }), [closingProof], true],
+    [issue(423, { state: 'closed', state_reason: 'completed', labels: [{ name: 'kind:decision' }], milestone: null }), [], true],
+    [issue(423, { state: 'closed', milestone: null }), [], false],
+    [issue(423, { state: 'closed', milestone: null }), [{ ...closingProof, baseRefName: 'other' }], false],
+  ]) {
+    const f = githubDependencyFixture({ 427: issue(427, { body: 'Follow-up to #423.' }), 423: parent }, {}, refs)
+    const result = await mod.createProvider(config, f.run).verifyDependencies(githubTask(427))
+    if (allowed) assert.equal(result, undefined)
+    else assert.match(result, /423/)
+  }
+})
+
+test('GitHub fresh dependency verification resolves transitive prerequisites and fails closed on unavailable metadata', async () => {
+  const f = githubDependencyFixture({ 427: issue(427, { body: 'Follow-up to #423.' }), 423: issue(423, { milestone: null, body: 'Depends on #401' }), 401: issue(401, { milestone: null }) })
+  assert.match(await mod.createProvider(config, f.run).verifyDependencies(githubTask(427)), /401|423/)
+  assert.ok(f.calls.some(x => x.args[1] === 'repos/owner/repo/issues/401'))
+  for (const child of [undefined, issue(427, { state: 'unknown' }), issue(999)]) {
+    const broken = githubDependencyFixture(child ? { 427: child } : {})
+    assert.match(await mod.createProvider(config, broken.run).verifyDependencies(githubTask(427)), /missing|unknown|identity|verify|verification/i)
+  }
+  const unavailable = fake(() => Promise.reject(new Error('HTTP 403')))
+  assert.match(await mod.createProvider(config, unavailable.run).verifyDependencies(githubTask(1)), /403/)
+})
+
+test('GitHub dependency verification refetches changed predecessors on every call and requires native endpoint success', async () => {
+  const items = { 427: issue(427), 423: issue(423, { state: 'closed', milestone: null }) }
+  const f = githubDependencyFixture(items, { 427: [issue(423)] }, [closingProof])
+  const provider = mod.createProvider(config, f.run)
+  assert.equal(await provider.verifyDependencies(githubTask(427)), undefined)
+  items[423] = issue(423, { milestone: null })
+  assert.match(await provider.verifyDependencies(githubTask(427)), /423/)
+  const unavailable = fake((_file, args) => args[1] === 'repos/owner/repo/issues/1' ? issue(1) : Promise.reject(new Error('HTTP 403 dependency endpoint')))
+  assert.match(await mod.createProvider(config, unavailable.run).verifyDependencies(githubTask(1)), /403/)
+})
+
+const workItem = (id, extra = {}) => ({ id, fields: { 'System.Title': `T${id}`, 'System.State': 'Active', 'System.IterationPath': id === 1 ? 'M1' : 'Outside', 'System.WorkItemType': 'Task', 'System.TeamProject': 'P' }, relations: [], ...extra })
+const azurePredecessor = id => ({ rel: 'System.LinkTypes.Dependency-Reverse', url: `https://dev.azure.com/org/_apis/wit/workItems/${id}` })
+const azureClosingLink = { rel: 'ArtifactLink', attributes: { name: 'Pull Request' }, url: 'vstfs:///Git/PullRequestId/project-id%2Frepo-id%2F9' }
+function azureDependencyFixture(items, pr = { status: 'completed', lastMergeCommit: { commitId: 'merged-parent' }, targetRefName: 'refs/heads/main', repository: { id: 'repo-id', project: { id: 'project-id' } } }) {
+  return fake((_file, args) => {
+    if (args[0] === 'boards' && args[2] === 'show') return items[args[args.indexOf('--id') + 1]] ?? Promise.reject(new Error('HTTP 404 missing work item'))
+    if (args[0] === 'repos' && args[2] === 'show') return pr
+  })
+}
+
+test('Azure verifies fresh transitive predecessors without milestone/query scans', async () => {
+  const f = azureDependencyFixture({ 1: workItem(1, { relations: [azurePredecessor(2)] }), 2: workItem(2, { relations: [azurePredecessor(3)] }), 3: workItem(3) })
+  assert.match(await mod.createProvider({ ...azureConfig, query: 'selected child only' }, f.run).verifyDependencies(azureTask), /2|3/)
+  assert.ok(f.calls.some(x => x.args.includes('--id') && x.args[x.args.indexOf('--id') + 1] === '3'))
+  assert.ok(!f.calls.some(x => x.args.includes('query') || x.args.includes('wiql')))
+})
+
+test('Azure fresh dependency proof requires completed workflow and actual merged artifact, or completed decision', async () => {
+  for (const [state, tags, links, pr, allowed] of [
+    ['Closed', '', [azureClosingLink], undefined, true],
+    ['Closed', 'kind:decision', [], undefined, true],
+    ['Closed', '', [], undefined, false],
+    ['Active', '', [azureClosingLink], undefined, false],
+    ['Closed', '', [azureClosingLink], { status: 'completed', lastMergeCommit: { commitId: 'merged-parent' }, targetRefName: 'refs/heads/other', repository: { id: 'repo-id', project: { id: 'project-id' } } }, false],
+  ]) {
+    const parent = workItem(2)
+    parent.fields['System.State'] = state
+    parent.fields['System.Tags'] = tags
+    parent.relations = links
+    const f = azureDependencyFixture({ 1: workItem(1, { relations: [azurePredecessor(2)] }), 2: parent }, pr)
+    const result = await mod.createProvider(azureConfig, f.run).verifyDependencies(azureTask)
+    if (allowed) assert.equal(result, undefined)
+    else assert.match(result, /2/)
+  }
+})
+
+test('Azure fresh dependency verification fails closed on missing child, unknown state, and identity mismatch', async () => {
+  const unknown = workItem(1)
+  unknown.fields['System.State'] = 'Unmapped'
+  for (const child of [undefined, unknown, workItem(999)]) {
+    const f = azureDependencyFixture(child ? { 1: child } : {})
+    assert.match(await mod.createProvider(azureConfig, f.run).verifyDependencies(azureTask), /missing|category|identity|verify|verification/i)
+  }
+})
+
+test('Azure fresh dependency verification refuses unreadable or cross-organization predecessors', async () => {
+  const missing = azureDependencyFixture({ 1: workItem(1, { relations: [azurePredecessor(2)] }) })
+  assert.match(await mod.createProvider(azureConfig, missing.run).verifyDependencies(azureTask), /404/)
+  const foreign = azureDependencyFixture({ 1: workItem(1, { relations: [{ ...azurePredecessor(2), url: 'https://dev.azure.com/other-org/_apis/wit/workItems/2' }] }) })
+  assert.match(await mod.createProvider(azureConfig, foreign.run).verifyDependencies(azureTask), /Cross-organization/)
+})

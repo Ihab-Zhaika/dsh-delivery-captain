@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import type { FollowupInput, Phase, Question, Run, RunConfig, Task, TicketProvider, WorkerRuntime } from './types.ts'
-import { eligibility, validateConfig, taskDeliveryConfig, taskDeadline } from './scheduler.ts'
+import { eligibility, validateConfig, taskDeliveryConfig, taskDeadline, dependencyBlocker } from './scheduler.ts'
 import { RunStore } from './store.ts'
 
 const TERMINAL = new Set<Task['status']>(['merged', 'failed', 'cancelled'])
@@ -24,6 +24,7 @@ export class CaptainController {
   private readonly runTicks = new Map<string, Promise<void>>()
   private readonly resumeDispatches = new Map<string, Promise<void>>()
   private readonly resumingTasks = new Set<string>()
+  private readonly dependencyQuiescences = new Map<string, Promise<void>>()
   private disposed = false
   constructor(store: RunStore, runtime: WorkerRuntime, providerFactory: (config: RunConfig) => TicketProvider) {
     this.store = store; this.runtime = runtime; this.providerFactory = providerFactory
@@ -223,6 +224,9 @@ export class CaptainController {
     const { run, task } = this.worker(sessionId)
     if (!PHASES.includes(report.phase) || report.phase === 'complete' || report.phase === 'parked') throw new Error('Only the controller can complete or park a task')
     if (report.ready && report.blocked) throw new Error('A task cannot be ready and blocked together')
+    if(task.dependencyBlocked) {
+      task.phases.push({phase:task.phase,at:now(),note:`Report retained during dependency hold; requested ${report.phase}${report.ready?' ready':''}: ${report.note??''}`});await this.save(run);return task
+    }
     task.transitionVersion=(task.transitionVersion??0)+1
     delete task.resumeRequested
     delete task.idleCheckpointAt
@@ -267,15 +271,17 @@ export class CaptainController {
     if (!task || TERMINAL.has(task.status) || isStopped(run)) return
     if(task.status==='ready')return
     if(task.status==='parked') { q.recordedAt=now(); task.waitingDecision=q.answer; await this.save(run); return }
+    if(q.action!=='wait'&&await this.heldDependencyWake(run,task)){q.recordedAt=now();task.waitingDecision=q.answer;await this.save(run);return}
     const diagnosticVersion=task.transitionVersion
     if(task.status==='blocked')await this.runtime.assertCaptainDiagnostics?.(run)
-    if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready','parked'].includes(task.status)||task.transitionVersion!==diagnosticVersion)return
+    if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready','parked'].includes(task.status)||task.transitionVersion!==diagnosticVersion||this.dependencyQuiescences.has(task.id)||task.dependencyBlocked&&task.parkingError)return
     if(q.action==='wait'&&task.status==='blocked'){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;task.waitingDecision=q.answer;q.recordedAt=now();await this.save(run);return}
     if (task.status === 'blocked' && !task.executionActive && this.activeCount(run) >= run.config.parallelism) return
     delete task.resumeRequested
     const previousStatus=task.status
     const version=task.transitionVersion=(task.transitionVersion??0)+1
     task.status = 'running'; await this.save(run)
+    if(this.dependencyQuiescences.has(task.id)||task.dependencyBlocked&&task.parkingError)return
     await this.runtime.send(task.sessionId, `Captain answer to ${q.id}: ${q.answer}${q.action==='wait'?'\nDecision: wait. Preserve the existing team and execution holds; do not retry unchanged work. Report waiting/blocked and yield when no independent safe work remains.':''}`,`answer:${q.id}:${createHash('sha256').update(JSON.stringify([q.answer,q.action])).digest('hex')}`)
     if (isStopped(run) || this.disposed) { await this.runtime.stop(task.sessionId); return }
     if(!TERMINAL.has(task.status)&&task.transitionVersion===version){
@@ -300,15 +306,17 @@ export class CaptainController {
       if(action==='wait'&&task.status==='blocked'&&task.resumeRequested){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;await this.save(run)}
       return
     }
+    if(action==='resume'&&await this.heldDependencyWake(run,task))throw new Error('Guidance not delivered: dependency prerequisites are unmet, unverified, or worker quiescence is incomplete')
     const diagnosticVersion=task.transitionVersion
     if(task.status==='blocked')await this.runtime.assertCaptainDiagnostics?.(run)
-    if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready','parked'].includes(task.status)||task.transitionVersion!==diagnosticVersion)throw new Error('Task changed while validating diagnostic evidence')
+    if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready','parked'].includes(task.status)||task.transitionVersion!==diagnosticVersion||this.dependencyQuiescences.has(task.id)||task.dependencyBlocked&&task.parkingError)throw new Error('Task changed while validating diagnostic evidence')
     if(action==='wait'&&task.status==='blocked'){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;task.waitingDecision=text;task.lastGuidanceHash=hash;await this.save(run);return}
     if (task.status === 'blocked' && !task.executionActive && this.activeCount(run) >= run.config.parallelism) throw new Error('No execution slot available; answer will need to wait')
     delete task.resumeRequested
     const previousStatus=task.status
     const version=task.transitionVersion=(task.transitionVersion??0)+1
     task.status = 'running'; await this.save(run)
+    if(this.dependencyQuiescences.has(task.id)||task.dependencyBlocked&&task.parkingError)throw new Error('Guidance not delivered: dependency quiescence is pending')
     await this.runtime.send(task.sessionId, `Captain guidance: ${text}${action==='wait'?'\nDecision: wait. Preserve the current team and holds; do not retry unchanged work.':''}`,`guidance:${task.id}:${hash}`)
     if (isStopped(run) || this.disposed) { await this.runtime.stop(task.sessionId); return }
     task.lastGuidanceHash=hash;task.lastWakeAt=now()
@@ -330,7 +338,7 @@ export class CaptainController {
     const previousStatus=task.status
     if(task.status!=='parked'&&await this.runtime.isRunning(task.sessionId))throw new Error('Worker is already executing; retry was not duplicated')
     if(!human)await this.runtime.assertCaptainDiagnostics?.(run)
-    if(isStopped(run)||this.disposed||run.status!=='running'||task.status!==previousStatus||task.transitionVersion!==version)throw new Error('Task changed during resumption validation')
+    if(isStopped(run)||this.disposed||run.status!=='running'||task.status!==previousStatus||task.transitionVersion!==version||task.parkingError||this.dependencyQuiescences.has(task.id))throw new Error('Task changed during resumption validation or has not quiesced')
     task.transitionVersion=(task.transitionVersion??0)+1
     if(human){task.pendingHumanRetry={at:now(),reason:evidence.trim(),previousBlocker:task.error??task.phases.at(-1)?.note};task.budgetStartedAt=now();task.phases.push({phase:task.phase,at:now(),note:'Explicit human task Resume authorizes one normal retry and starts a fresh bounded execution window; original elapsed/history and gate policies retained.'})}
     if(teamMemberLimit!==undefined) {
@@ -355,7 +363,7 @@ export class CaptainController {
   private async dispatchResumeRun(run:Run):Promise<void> {
     // Report-time activity is a reservation, not proof that a blocked worker
     // still runs. Refresh those reservations even when intake is unavailable.
-    for(const task of run.tasks.filter(t=>t.status==='blocked'&&t.executionActive)) {
+    for(const task of run.tasks.filter(t=>t.status==='blocked'&&t.executionActive&&!t.parkingError)) {
       if(this.disposed||run.status!=='running')return
       const version=task.transitionVersion
       try {
@@ -368,7 +376,11 @@ export class CaptainController {
       if(this.disposed||run.status!=='running')return
       // An uncertain reviewed PR must be reconciled before any writer is woken.
       // Incomplete initial setup still follows claim/fetch admission below.
-      if(task.status!=='blocked'||!task.resumeRequested||!task.baseSha||task.prUrl&&task.headSha&&task.reviewHistory?.some(r=>r.passed&&r.headSha===task.headSha))continue
+      if(task.status!=='blocked'||!task.resumeRequested||!task.baseSha||task.parkingError||task.prUrl&&task.headSha&&task.reviewHistory?.some(r=>r.passed&&r.headSha===task.headSha))continue
+      const current=run.tickets.find(t=>t.id===task.ticket.id)??task.ticket
+      if(task.dependencyBlocked||dependencyBlocker(current,run.tickets,run.tasks)) {
+        if(await this.dependenciesBlocked(run,task,this.providerFactory(taskDeliveryConfig(task,run.config))))continue
+      }
       const version=task.transitionVersion
       const executing=await this.runtime.isRunning(task.sessionId)
       if(this.disposed||run.status!=='running')return
@@ -507,12 +519,15 @@ export class CaptainController {
         await this.runtime.stop(task.sessionId); task.status = 'failed'; task.error = 'Task time budget exhausted'; task.finishedAt = now(); this.phase(task, 'blocked', task.error); await this.save(run); continue
       }
       if (task.status === 'ready') { await this.integrate(run, task, provider); continue }
+      if(task.status==='running'&&(task.dependencyBlocked||dependencyBlocker(run.tickets.find(t=>t.id===task.ticket.id)??task.ticket,run.tickets,run.tasks))) {
+        if(await this.dependenciesBlocked(run,task,provider))continue
+      }
       if (task.status === 'blocked') {
         const version=task.transitionVersion
         const executing=await this.runtime.isRunning(task.sessionId)
         if(isStopped(run)||this.disposed)return
         if(task.transitionVersion!==version)continue
-        task.executionActive=executing
+        if(!task.parkingError)task.executionActive=executing
         if (run.status === 'running' && task.resumeRequested && this.activeCount(run) < run.config.parallelism) {
           delete task.resumeRequested; task.status = 'starting'; await this.save(run)
           await this.launch(run, task, provider); continue
@@ -563,6 +578,7 @@ export class CaptainController {
 
   private async launch(run: Run, task: Task, provider: TicketProvider): Promise<void> {
     try {
+      if(await this.dependenciesBlocked(run,task,provider))return
       await provider.claim(task.ticket, run.id)
       if (isStopped(run) || this.disposed) return
       await this.runtime.prepare(task, taskDeliveryConfig(task,run.config)); await this.save(run)
@@ -577,6 +593,7 @@ export class CaptainController {
 
   private async integrate(run: Run, task: Task, provider: TicketProvider): Promise<void> {
     try {
+      if(await this.dependenciesBlocked(run,task,provider))return
       await this.runtime.stop(task.sessionId)
       if (isStopped(run) || this.disposed) return
       const previous = task.reviewHistory?.at(-1)
@@ -588,6 +605,7 @@ export class CaptainController {
       await this.save(run)
       if (isStopped(run) || this.disposed) return
       if (!review.passed) { await this.repair(run, task, review.findings.join('\n') || review.report || 'Verification/review failed'); return }
+      if(await this.dependenciesBlocked(run,task,provider))return
       task.headSha = review.headSha; this.phase(task, 'integration'); await this.save(run)
       let pr = await provider.ensurePullRequest(task); task.prUrl = pr.url; await this.save(run)
       if (!pr.merged) pr = await provider.inspectPullRequest(task)
@@ -598,6 +616,7 @@ export class CaptainController {
         if (await this.runtime.head(task) !== review.headSha) { await this.repair(run, task, 'Branch changed after verification; review the latest commit'); return }
         if (this.runtime.isReviewCurrent && !await this.runtime.isReviewCurrent(task, verification, review)) { await this.repair(run, task, 'Reviewed head or target branch changed before merge; synchronize and verify again'); return }
         if (isStopped(run) || this.disposed) return
+        if(await this.dependenciesBlocked(run,task,provider))return
         pr = await provider.merge(task, review.headSha)
       }
       if (!pr.merged) { this.phase(task, 'waiting', pr.blockedReason ?? 'Merge queued'); await this.save(run); return }
@@ -610,7 +629,39 @@ export class CaptainController {
       if (!isStopped(run)) await this.repair(run, task, String(error))
     }
   }
+  private async heldDependencyWake(run:Run,task:Task):Promise<boolean> {
+    if(task.parkingError||this.dependencyQuiescences.has(task.id))return true
+    const current=run.tickets.find(t=>t.id===task.ticket.id)??task.ticket
+    if(!task.dependencyBlocked&&!dependencyBlocker(current,run.tickets,run.tasks))return false
+    return this.dependenciesBlocked(run,task,this.providerFactory(taskDeliveryConfig(task,run.config)))
+  }
+  private async dependenciesBlocked(run:Run,task:Task,provider:TicketProvider):Promise<boolean> {
+    if(task.parkingError||this.dependencyQuiescences.has(task.id))return true
+    const revision=task.transitionVersion
+    let reason:string|undefined
+    try {reason=provider.verifyDependencies?await provider.verifyDependencies(task):dependencyBlocker(run.tickets.find(t=>t.id===task.ticket.id)??task.ticket,run.tickets,run.tasks)}
+    catch(error){reason=`Cannot verify current dependencies: ${String(error)}`}
+    if(isStopped(run)||this.disposed||task.transitionVersion!==revision||this.dependencyQuiescences.has(task.id))return true
+    if(!reason){if(task.dependencyBlocked){delete task.dependencyBlocked;if(task.error?.startsWith('Dependency gate:')){task.phases.push({phase:task.phase,at:now(),note:`Historical ${task.error}; fresh dependency verification now permits work.`});delete task.error}};return false}
+    task.transitionVersion=(task.transitionVersion??0)+1
+    task.status='blocked';task.dependencyBlocked=true;task.blockedSince??=now();task.error=`Dependency gate: ${reason}`;task.executionActive=true;delete task.resumeRequested
+    // Durable reservation precedes every await. Cleanup ownership is independent
+    // of report/guidance revisions and must settle before Stop can release leases.
+    task.parkingError='Dependency pause pending writer quiescence'
+    this.phase(task,'blocked',task.error)
+    const pending=(async()=>{
+      try {await this.save(run);await this.runtime.stop(task.sessionId,'shutdown');task.executionActive=false;delete task.parkingError}
+      catch(error){task.parkingError=String(error);task.executionActive=true;task.error=`Dependency gate: ${reason}; worker quiescence failed: ${String(error)}`}
+      await this.save(run)
+    })()
+    this.dependencyQuiescences.set(task.id,pending)
+    try{await pending}finally{this.dependencyQuiescences.delete(task.id)}
+    if(!isStopped(run)&&!this.disposed)await this.notifyBlocker(run,task)
+    return true
+  }
+
   private async repair(run: Run, task: Task, reason: string): Promise<void> {
+    if(task.dependencyBlocked||task.parkingError||this.dependencyQuiescences.has(task.id)){await this.save(run);return}
     task.error = reason
     const repairLimit=taskDeliveryConfig(task,run.config).maxRepairRounds
     if (task.reviewRounds >= repairLimit) {
@@ -640,9 +691,10 @@ export class CaptainController {
     const errors: string[] = []
     await Promise.all(run.tasks.filter(t => !TERMINAL.has(t.status)).map(async task => {
       try {
+        await this.dependencyQuiescences.get(task.id)
         await this.runtime.stop(task.sessionId,reason)
+        task.executionActive=false;delete task.parkingError
         if (cancel && task.status!=='parked') { task.status = 'cancelled'; this.phase(task, 'blocked', 'Stopped by user'); task.finishedAt = now() }
-        if(task.status==='parked'){task.executionActive=false;delete task.parkingError}
       } catch (error) { const message = `${task.ticket.id}: ${String(error)}`; task.error = `Shutdown incomplete: ${message}`; errors.push(message) }
     }))
     if (errors.length) run.error = `Shutdown incomplete; repository ownership retained: ${errors.join('; ')}`

@@ -15,6 +15,7 @@ export declare class CaptainController {
     private readonly runTicks;
     private readonly resumeDispatches;
     private readonly resumingTasks;
+    private readonly dependencyQuiescences;
     private disposed;
     constructor(store: RunStore, runtime: WorkerRuntime, providerFactory: (config: RunConfig) => TicketProvider);
     /** Rehydrate only explicitly started runs. Startup does not opt ordinary sessions in. */
@@ -122,6 +123,8 @@ export declare class CaptainController {
     private tickRun;
     private launch;
     private integrate;
+    private heldDependencyWake;
+    private dependenciesBlocked;
     private repair;
     dispose(): Promise<void>;
     private drainWorkers;
