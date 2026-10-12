@@ -1,11 +1,11 @@
 /** Native sidebar content. Mounting never enables automation or captures chat focus. */
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import type { Phase, Run, RunConfig, Task, RepositoryContext } from '../captain/types.ts'
+import { useCallback, useEffect, useRef, useState, useId, type FormEvent } from 'react'
+import type { Phase, Run, RunConfig, Task, Ticket, RepositoryContext } from '../captain/types.ts'
 import css from './CaptainPanel.module.css'
 
 export interface CaptainOpenDetail { sessionId: string; workspace?: string }
-interface Eligibility { ticketId: string; eligible: boolean; reason: string }
-interface Snapshot { run: Run | null; eligibility?: Eligibility[] }
+interface Eligibility { ticketId: string; eligible: boolean; reason: string; state?: string; predecessors?: string[] }
+interface Snapshot { run: Run | null; eligibility?: Eligibility[]; role?: 'idle'|'coordinator'|'worker'; coordinatorSessionId?: string | null }
 type Action = 'pause' | 'resume' | 'drain' | 'stop' | 'parallelism'
 type ReviewEvidence = NonNullable<Task['reviewHistory']>[number]
 
@@ -39,8 +39,9 @@ function ReviewEvidenceRow({ task, review, index }: { task: Task; review: Review
     return () => URL.revokeObjectURL(url)
   }, [payload])
   const filename = `delivery-review-${task.ticket.id.replace(/[^a-zA-Z0-9_-]/g, '-')}-${index + 1}.json`
+  const historical=index<(task.reviewHistory?.length??0)-1
   return <article className={css.reviewRecord}>
-    <div className={css.reviewHeading}><strong>Review {index + 1}</strong><span className={css.status} data-status={review.passed ? 'ready' : 'failed'}>{review.passed ? 'Passed at review' : 'Failed'}</span><span>{review.findings.length} {review.findings.length === 1 ? 'finding' : 'findings'}</span><a href={download} download={filename} aria-disabled={!download}>Download JSON ↓</a></div>
+    <div className={css.reviewHeading}><strong>Review {index + 1}</strong><span className={css.status} data-status={review.passed ? 'ready' : historical?'waiting':'failed'}>{review.passed ? 'Passed at review' : historical?'Historical failure':'Failed'}</span><span>{review.failureKind==='team-evidence'?'Team evidence unavailable':review.failureKind==='infrastructure'?'Verification could not complete':`${review.findings.length} ${review.findings.length === 1 ? 'finding' : 'findings'}`}</span><a href={download} download={filename} aria-disabled={!download}>Download JSON ↓</a></div>
     <div className={css.reviewMetadata}><time dateTime={review.at}>{new Date(review.at).toLocaleString()}</time><span>Reviewed commit <code>{review.headSha || 'Unavailable'}</code></span></div>
     {review.findings.length > 0 && <ul className={css.findings}>{review.findings.map((finding, findingIndex) => <li key={findingIndex}>{finding}</li>)}</ul>}
     <details><summary>Report excerpt</summary><pre>{review.report ? review.report.slice(0, 4000) : 'No report text was returned.'}</pre>{review.report.length > 4000 && <p className={css.muted}>Showing the first 4,000 characters. Download JSON for the complete report.</p>}</details>
@@ -48,9 +49,44 @@ function ReviewEvidenceRow({ task, review, index }: { task: Task; review: Review
 }
 
 export function CaptainReviewEvidence({ task }: { task: Task }) {
+  const latest=task.reviewHistory?.at(-1)
   return <div className={css.reviewEvidence}><h3>Review evidence</h3><p className={css.muted}>Results describe the recorded commit at review time. Later branch changes require a new review.</p>
+    {latest && <p className={css.authorization}>{latest.passed?task.status==='merged'&&latest.headSha===task.headSha?'Current gate passed; reviewed commit was delivered.':'Last recorded review passed; current head must still match before merge.':`Latest gate failed: ${latest.failureKind==='team-evidence'?'original team evidence must be repaired':latest.failureKind==='infrastructure'?'verification infrastructure must be repaired':'findings must be resolved'}. Historical entries remain below.`}</p>}
     {task.reviewHistory?.length ? task.reviewHistory.map((review, index) => <ReviewEvidenceRow key={`${review.at}-${index}`} task={task} review={review} index={index} />) : <p className={css.placeholder}>No independent review has been recorded yet.</p>}
   </div>
+}
+
+/** Bounded DAG layout; cycles stay visible rather than recursing forever. */
+export function eligibilityGraph(tickets: Pick<Ticket,'id'|'title'|'predecessors'>[]) {
+  const byId=new Map(tickets.map(t=>[t.id,{...t,missing:false}]))
+  for(const ticket of tickets)for(const id of ticket.predecessors)if(!byId.has(id))byId.set(id,{id,title:'Missing predecessor',predecessors:[],missing:true})
+  const levels=new Map<string,number>(),remaining=new Set(byId.keys())
+  for(let pass=0;pass<byId.size&&remaining.size;pass++)for(const id of [...remaining]) {
+    const node=byId.get(id)!
+    if(node.predecessors.every(p=>levels.has(p))){levels.set(id,node.predecessors.length?1+Math.max(...node.predecessors.map(p=>levels.get(p)!)):0);remaining.delete(id)}
+  }
+  for(const id of remaining)levels.set(id,0)
+  const counts=new Map<number,number>()
+  const nodes=[...byId.values()].map(node=>{const column=levels.get(node.id)??0,row=counts.get(column)??0;counts.set(column,row+1);return{...node,x:20+column*240,y:20+row*130}})
+  const edges=tickets.flatMap(t=>t.predecessors.map(from=>({from,to:t.id})))
+  return {nodes,edges,width:Math.max(280,...nodes.map(n=>n.x+230)),height:Math.max(160,...nodes.map(n=>n.y+120))}
+}
+
+export function CaptainEligibilityGraph({tickets,rows}:{tickets:Ticket[];rows:Eligibility[]}) {
+  const [selected,setSelected]=useState<string>()
+  const arrowId=`darkingdoom-arrow-${useId().replace(/:/g,'')}`
+  const graph=eligibilityGraph(tickets),byId=new Map(graph.nodes.map(n=>[n.id,n])),decisions=new Map(rows.map(r=>[r.ticketId,r]))
+  const node=byId.get(selected??''),decision=decisions.get(selected??'')
+  return <><p className={css.muted}>Arrows point from prerequisites to dependent tickets. Parking frees capacity; it does not satisfy a predecessor or advance a milestone.</p>
+    <div className={css.graphScroll} role="region" aria-label="Ticket dependency graph" tabIndex={0}>
+      <div className={css.graphCanvas} style={{width:graph.width,height:graph.height}}>
+        <svg width={graph.width} height={graph.height} aria-hidden="true"><defs><marker id={arrowId} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#607d91" /></marker></defs>{graph.edges.map((edge,index)=>{const a=byId.get(edge.from)!,b=byId.get(edge.to)!;return <path key={index} d={`M ${a.x+205} ${a.y+48} C ${a.x+225} ${a.y+48}, ${b.x-20} ${b.y+48}, ${b.x} ${b.y+48}`} fill="none" stroke="#607d91" strokeWidth="2" markerEnd={`url(#${arrowId})`} />})}</svg>
+        {graph.nodes.map(n=>{const row=decisions.get(n.id);return <button key={n.id} type="button" className={css.graphNode} style={{left:n.x,top:n.y}} data-status={row?.state??'dependency'} aria-pressed={selected===n.id} aria-label={`Ticket ${n.id}: ${row?.state??'missing predecessor'}. ${row?.reason??n.title}`} onClick={()=>setSelected(n.id)}><strong>#{n.id} <span>{row?.state??'missing'}</span></strong><p>{n.title}</p><small>{tickets.find(t=>t.id===n.id)?.milestone}</small></button>})}
+      </div>
+    </div>
+    {node && <div className={css.graphDetail}><strong>#{node.id} · {node.title}</strong><p>{decision?.reason??'Missing from discovery; delivery cannot proceed without predecessor evidence.'}</p><small>Predecessors: {node.predecessors.join(', ')||'None'}</small></div>}
+    <details><summary>All eligibility reasons ({rows.length})</summary><ul className={css.records}>{rows.map(row=><li key={row.ticketId}><code>{row.ticketId}</code> <span className={css.status} data-status={row.state??'waiting'}>{row.state??(row.eligible?'eligible':'waiting')}</span><p>{row.reason}</p></li>)}</ul></details>
+  </>
 }
 
 export function elapsedMs(start: string, end: string | undefined, now: number): number {
@@ -91,8 +127,8 @@ async function request<T>(url: string, signal: AbortSignal, body?: unknown): Pro
   return value as T
 }
 
-export function CaptainPanel({ sessionId, workspace, onClose, openSession }: CaptainOpenDetail & { onClose: () => void; openSession: (parentId: string, childId: string) => Promise<unknown> }) {
-  const [snapshot, setSnapshot] = useState<Snapshot>({ run: null })
+export function CaptainPanel({ sessionId, workspace, onClose, openSession, initialSnapshot }: CaptainOpenDetail & { onClose: () => void; openSession: (parentId: string, childId: string) => Promise<unknown>; initialSnapshot?:Snapshot }) {
+  const [snapshot, setSnapshot] = useState<Snapshot>(initialSnapshot??{ run: null })
   const [config, setConfig] = useState<RunConfig>(() => defaults(workspace))
   const [milestones, setMilestones] = useState('')
   const [commands, setCommands] = useState('')
@@ -106,14 +142,16 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
   const [now, setNow] = useState(Date.now())
   const [selected, setSelected] = useState<string | null>(null)
   const [parallelism, setParallelism] = useState(2)
+  const [resumeEvidence,setResumeEvidence]=useState('')
   const controller = useRef<AbortController | null>(null)
   const generation = useRef(0)
   const mutation = useRef(false)
   const hydrated = useRef<string | null>(null)
   const commandsEdited = useRef(false)
   const run = snapshot.run
+  const worker=snapshot.role==='worker'||!!run&&run.captainSessionId!==sessionId
   const allowed = captainActionAvailability(run?.status, loaded, busy)
-  const task = run?.tasks.find(item => item.id === selected)
+  const task = worker?run?.tasks[0]:run?.tasks.find(item => item.id === selected)
   const set = <K extends keyof RunConfig>(key: K, value: RunConfig[K]) => setConfig(previous => ({ ...previous, [key]: value }))
 
   useEffect(() => {
@@ -179,9 +217,16 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
   async function navigate(childId: string) {
     try { await openSession(sessionId, childId) } catch (cause) { setError(`Could not open worker session: ${String(cause)}`) }
   }
+  async function resumeParked(item:Task) {
+    const signal=controller.current?.signal
+    if(!signal||busy||worker)return
+    setBusy(true);mutation.current=true
+    try {await request('/api/darkingdoom/resume-task',signal,{sessionId,taskId:item.id,evidence:resumeEvidence});setResumeEvidence('');await refresh(signal)}
+    catch(cause){setError(String(cause))}finally{mutation.current=false;setBusy(false)}
+  }
   const merged = run?.tasks.filter(item => item.status === 'merged').length ?? 0
-  const working = run?.tasks.filter(item => ['starting','running','ready'].includes(item.status)||item.status==='blocked'&&item.executionActive).length ?? 0
-  const blockers = run?.tasks.filter(item => item.error || item.status === 'blocked' || item.status === 'failed') ?? []
+  const working = run?.tasks.filter(item => ['starting','running','ready'].includes(item.status)||['blocked','parked'].includes(item.status)&&item.executionActive).length ?? 0
+  const blockers = run?.tasks.filter(item => item.error || item.status === 'blocked' || item.status === 'parked' || item.status === 'failed') ?? []
   const totalTaskTime = run?.tasks.reduce((sum, item) => sum + elapsedMs(item.startedAt, item.finishedAt, now), 0) ?? 0
   const eligibility = snapshot.eligibility ?? run?.tickets.map(ticket => {
     const existing = run.tasks.find(item => item.ticket.id === ticket.id)
@@ -191,11 +236,12 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
   return <section className={css.panel} role="region" aria-labelledby="darkingdoom-title" data-darkingdoom>
       <header className={css.header}><div className={css.heading}><span className={css.mark} aria-hidden>⌁</span><div><span className={css.eyebrow}>AUTONOMOUS DELIVERY</span><h1 id="darkingdoom-title">DarKingDoom Plugin</h1></div><span className={css.status} data-status={run?.status ?? 'idle'}>{run?.status ?? 'Not started'}</span></div><button type="button" onClick={onClose} aria-label="Close DarKingDoom Plugin">✕</button></header>
       <div className={css.owner}>Session <code>{sessionId}</code><span>Opening this panel never starts a run.</span></div>
+      {worker && <div className={css.origin}><span>Initiated by coordination session</span><button type="button" onClick={()=>void navigate(run!.captainSessionId)}>{run!.captainSessionId} ↗</button><small>This worker view is read-only. Run controls belong to the coordinator.</small></div>}
       {error && <div className={css.error} role="alert"><span>{error}</span><button type="button" onClick={() => setError(null)}>Dismiss</button></div>}
       {run?.error && <div className={css.error} role="alert">Captain: {run.error}</div>}
-      <nav className={css.views} aria-label="Plugin view"><button type="button" aria-pressed={view==='configuration'} onClick={()=>setView('configuration')}>Configuration</button><button type="button" aria-pressed={view==='monitor'} onClick={()=>setView('monitor')}>Monitor</button></nav>
+      {!worker && <nav className={css.views} aria-label="Plugin view"><button type="button" aria-pressed={view==='configuration'} onClick={()=>setView('configuration')}>Configuration</button><button type="button" aria-pressed={view==='monitor'} onClick={()=>setView('monitor')}>Monitor</button></nav>}
       <div className={css.body}>
-        <aside hidden={view!=='configuration'} className={css.configuration}><div className={css.sectionTitle}><h2>Run configuration</h2><span>{run ? 'Saved run configuration' : contextLoading ? 'Loading repository configuration…' : 'From the current session repository'}</span></div>
+        {!worker && <aside hidden={view!=='configuration'} className={css.configuration}><div className={css.sectionTitle}><h2>Run configuration</h2><span>{run ? 'Saved run configuration' : contextLoading ? 'Loading repository configuration…' : 'From the current session repository'}</span></div>
           {!run && repository?.warnings.map((warning,index) => <p className={css.muted} key={index}>{warning}</p>)}
           <form onSubmit={start}>
             <fieldset disabled={!!run || busy || !loaded} className={css.fields}>
@@ -222,11 +268,13 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
             {run?.status === 'stopped' && <p className={css.muted}>Use Resume to continue this saved run with its existing tasks and claims.</p>}
             {!loaded && <p className={css.muted}>Loading saved run before enabling Start…</p>}
           </form>
-        </aside>
-        <main hidden={view!=='monitor'} className={css.monitor}>
+        </aside>}
+        <main hidden={!worker&&view!=='monitor'} className={css.monitor}>
+          {worker && task && <section className={css.card}><div className={css.sectionTitle}><h2>#{task.ticket.id} · {task.ticket.title}</h2><span className={css.status} data-status={task.status}>{task.status}</span></div><div className={css.metrics}><div><span>Total task elapsed</span><strong>{duration(elapsedMs(task.startedAt,task.finishedAt,now))}</strong><small>Includes blocked and parked waiting</small></div><div><span>Current phase</span><strong>{task.phase}</strong><small>{task.finishedAt?'Finished':'Ongoing'}</small></div></div>{task.parkReason&&task.status==='parked'&&<p className={css.authorization}>Parked: {task.parkReason}. Waiting for a changed prerequisite or human help.</p>}</section>}
+          {!worker && <>
           <div className={css.metrics}>
             <div><span>Wall time</span><strong>{run ? duration(elapsedMs(run.createdAt, run.status === 'stopped' ? run.updatedAt : undefined, now)) : '—'}</strong><small>Includes waiting & pauses</small></div>
-            <div><span>Active tasks / parallel limit</span><strong>{working}<em> / {run?.config.parallelism ?? config.parallelism}</em></strong><small>{merged} merged · {run?.tasks.filter(item=>item.status==='blocked').length??0} blocked</small></div>
+            <div><span>Active tasks / parallel limit</span><strong>{working}<em> / {run?.config.parallelism ?? config.parallelism}</em></strong><small>{merged} merged · {run?.tasks.filter(item=>item.status==='blocked').length??0} blocked · {run?.tasks.filter(item=>item.status==='parked').length??0} parked</small></div>
             <div><span>Task elapsed, summed</span><strong>{run ? duration(totalTaskTime) : '—'}</strong><small>Overlaps; includes waiting</small></div>
             <div><span>Active agent effort</span><strong className={css.unmeasured}>Not measured</strong><small>No runtime effort telemetry</small></div>
           </div>
@@ -238,22 +286,25 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
             <label>Parallelism<input aria-label="Live parallelism" type="number" min={1} max={32} value={parallelism} disabled={!allowed.parallelism} onChange={event => setParallelism(Number(event.target.value))} /></label>
             <button disabled={!allowed.parallelism || !Number.isInteger(parallelism) || parallelism < 1 || parallelism > 32} onClick={() => void mutate('parallelism')}>Apply</button>
           </div>
-          <p className={css.controlHint}>Pause holds new dispatch. Drain finishes active tickets. Stop cancels active work.</p>
+          <p className={css.controlHint}>Pause holds new dispatch. Drain finishes active tickets. Stop cancels active work. Unresolved blockers park after one hour, preserving work and freeing capacity.</p>
           <section className={css.card}><div className={css.sectionTitle}><h2>Delivery queue</h2><span>{run?.lastPollAt ? `Last discovery ${new Date(run.lastPollAt).toLocaleTimeString()}` : 'Awaiting discovery'}</span></div>
             <div className={css.tableScroll}><table><thead><tr><th>Ticket / task</th><th>Milestone</th><th>Status</th><th>Phase</th><th>Elapsed</th><th>Reviews</th><th>Open</th></tr></thead><tbody>
               {run?.tasks.map(item => <tr key={item.id} data-selected={selected === item.id}><td><button className={css.taskButton} onClick={() => setSelected(item.id)}><code>{item.ticket.id}</code><strong>{item.ticket.title}</strong><small>{item.id}</small></button></td><td>{item.ticket.milestone}</td><td><span className={css.status} data-status={item.status}>{item.status}</span></td><td>{item.phase}</td><td className={css.numeric}>{duration(elapsedMs(item.startedAt, item.finishedAt, now))}</td><td className={css.numeric}>{item.reviewRounds}</td><td><div className={css.links}>{item.sessionId && <button onClick={() => void navigate(item.sessionId)}>Session ↗</button>}{webUrl(item.prUrl) && <a href={webUrl(item.prUrl)} target="_blank" rel="noreferrer">PR ↗</a>}{webUrl(item.ticket.url) && <a href={webUrl(item.ticket.url)} target="_blank" rel="noreferrer">Ticket ↗</a>}</div></td></tr>)}
             </tbody></table></div>
             {!run?.tasks.length && <div className={css.empty}><span aria-hidden>⌁</span><h3>{run ? 'Watching the delivery queue' : 'Your next milestone starts here'}</h3><p>{run ? 'Tasks appear after the captain discovers and admits eligible tickets.' : 'Choose a source, order your milestones, then explicitly start the captain.'}</p></div>}
           </section>
-          {task && <section className={css.card}><div className={css.sectionTitle}><h2>{task.ticket.id} · Phase timeline</h2><button onClick={() => setSelected(null)} aria-label="Close task details">✕</button></div>
+          </>}
+          {task && <section className={css.card}><div className={css.sectionTitle}><h2>{task.ticket.id} · Phase timeline</h2>{!worker&&<button onClick={() => setSelected(null)} aria-label="Close task details">✕</button>}</div>
             <div className={css.phaseTotals}>{phaseDurations(task, now).map(row => <span key={row.phase}>{row.phase}<strong>{duration(row.milliseconds)}</strong></span>)}</div>
             <ol className={css.timeline}>{task.phases.map((event, index) => <li key={`${event.at}-${index}`}><time>{new Date(event.at).toLocaleTimeString()}</time><strong>{event.phase}</strong>{event.note && <p>{event.note}</p>}</li>)}</ol>
             <div className={css.taskMetadata}><span>Branch <code>{task.branch}</code></span><span>Worktree <code>{task.worktree}</code></span>{task.mergedSha && <span>Merged <code>{task.mergedSha}</code></span>}</div>
             {task.workspaceError && <p role="alert">{task.workspaceError}</p>}
             <CaptainReviewEvidence task={task} />
+            {task.parkingError&&<p role="alert">Parking could not quiesce execution: {task.parkingError}. Capacity remains reserved.</p>}
+            {!worker&&task.status==='parked'&&<form className={css.fields} onSubmit={event=>{event.preventDefault();void resumeParked(task)}}><label>Changed prerequisite or reason to resume<textarea required value={resumeEvidence} onChange={e=>setResumeEvidence(e.target.value)} /></label><button disabled={busy||run?.status!=='running'||!!task.executionActive||!!task.parkingError||!resumeEvidence.trim()}>Resume this parked task</button></form>}
           </section>}
           <div className={css.lowerGrid}>
-            <section className={css.card}><div className={css.sectionTitle}><h2>Eligibility</h2><span>{eligibility.length} tickets</span></div><ul className={css.records}>{eligibility.map(row => <li key={row.ticketId}><code>{row.ticketId}</code><span className={css.status} data-status={row.eligible ? 'ready' : 'waiting'}>{row.eligible ? 'Eligible' : 'Held'}</span><p>{row.reason}</p></li>)}</ul>{!eligibility.length && <p className={css.placeholder}>Discovery decisions will appear here.</p>}</section>
+            {!worker&&<section className={css.card}><div className={css.sectionTitle}><h2>Eligibility & dependencies</h2><span>{eligibility.length} tickets</span></div><CaptainEligibilityGraph tickets={run?.tickets??[]} rows={eligibility} />{!eligibility.length && <p className={css.placeholder}>Discovery decisions will appear here.</p>}</section>}
             <section className={css.card}><div className={css.sectionTitle}><h2>Blockers & decisions</h2><span>Orchestrator managed</span></div><ul className={css.records}>{blockers.map(item => <li key={item.id}><strong>{item.ticket.id} · {item.status}</strong><p>{item.error ?? 'Waiting for the captain to resolve this blocker.'}</p></li>)}{run?.questions.map(question => <li key={question.id}><small>{question.taskId} · {new Date(question.createdAt).toLocaleTimeString()}</small><strong>{question.question}</strong><p className={question.answer ? css.answer : css.muted}>{question.answer ?? 'Orchestrator is preparing an automatic answer…'}</p>{question.answer && <small>{question.recordedAt ? 'Waiting decision recorded; worker not woken' : question.deliveredAt ? 'Delivered to worker' : 'Answer queued for delivery'}</small>}</li>)}</ul>{!blockers.length && !run?.questions.length && <p className={css.placeholder}>No blockers or worker questions recorded.</p>}</section>
           </div>
           <footer className={css.footer}><span className={css.liveDot} />Refreshes every 3 seconds while open<span>{run ? `Run ${run.id}` : 'Automation is disabled'}</span></footer>

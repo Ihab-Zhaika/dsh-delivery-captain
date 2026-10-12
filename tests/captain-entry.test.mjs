@@ -31,12 +31,13 @@ test('installed captain stays inert, rejects ordinary tool use and authenticates
     const command = commands.get('darkingdoom')
     assert.equal((await command.handler({rawInput:'status',agent:{id:'ordinary'}})).text,'null')
     assert.equal((await command.handler({rawInput:'start {}',agent:{id:'ordinary'}})).kind,'error')
-    assert.deepEqual(inspected,['ordinary'])
+    // Status may inspect native lineage/workspace without activating an agent.
+    assert.ok(inspected.length>0);assert.ok(inspected.every(id=>id==='ordinary'))
     let contextStatus, contextBody
     await routes.get('/api/darkingdoom/context').handler({method:'GET',url:'/api/darkingdoom/context?sessionId=other&workspace=C:/unrelated'},{writeHead(v){contextStatus=v},end(v){contextBody=JSON.parse(v)}})
     assert.equal(contextStatus,400)
     assert.match(contextBody.error,/No current repository/)
-    assert.deepEqual(inspected,['ordinary','other'])
+    assert.equal(inspected.at(-1),'other');assert.ok(inspected.slice(0,-1).every(id=>id==='ordinary'))
     for(const code of [401,403,undefined]) {
       rejection=code;let status,body
       await routes.get('/api/darkingdoom/state').handler({method:'GET',url:'/api/darkingdoom/state?sessionId=ordinary'},{writeHead(v){status=v},end(v){body=JSON.parse(v)}})

@@ -17,6 +17,118 @@ async function fixture(fn) {
   const controller=new CaptainController(new RunStore(join(dir,'state')),runtime,()=>provider)
   try {await fn({controller,runtime,provider,dir,starts,messages,merges,config:config(dir),setTickets:v=>tickets=v,setPassing:v=>passing=v,setChecks:v=>remoteChecks=v})} finally {await controller.dispose();await rm(dir,{recursive:true,force:true})}
 }
+
+test('worker view contains only its task, origin and questions; controls stay coordinator-owned',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',f.config);await f.controller.tick()
+  const task=run.tasks[0]
+  const worker=f.controller.view(task.sessionId)
+  assert.equal(worker.role,'worker');assert.equal(worker.coordinatorSessionId,'captain')
+  assert.deepEqual(worker.run.tasks.map(t=>t.id),[task.id]);assert.deepEqual(worker.run.tickets.map(t=>t.id),[task.ticket.id])
+  assert.equal(f.controller.view('captain').role,'coordinator');assert.equal(f.controller.view('other').run,null)
+  await assert.rejects(f.controller.control(task.sessionId,'stop'),/captain/)
+}))
+
+test('blocking over one hour parks without archiving, frees capacity, and does not unlock dependencies',()=>fixture(async f=>{
+  f.setTickets([ticket('1'),ticket('2'),ticket('4','M1',['1']),ticket('3','M2')])
+  const run=await f.controller.start('captain',{...f.config,parallelism:1,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0],stops=[]
+  f.runtime.stop=async(id,reason)=>{stops.push(reason);f.runtime.isRunning=async()=>false}
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'External evidence unavailable'})
+  task.blockedSince=new Date(Date.now()-3601000).toISOString()
+  await f.controller.tick()
+  assert.equal(task.status,'parked');assert.equal(task.executionActive,false);assert.equal(task.finishedAt,undefined)
+  assert.deepEqual(stops,['shutdown']);assert.deepEqual(run.tasks.map(t=>t.ticket.id),['1','2'])
+  const before=f.messages.length;await f.controller.tick();assert.equal(f.messages.length,before)
+  await assert.rejects(f.controller.report(task.sessionId,{phase:'analysis'}),/worker/)
+  await f.controller.message('captain',task.id,'Still waiting','wait');assert.equal(task.status,'parked')
+  await assert.rejects(f.controller.message('captain',task.id,'Generic retry','resume'),/parked/i)
+}))
+
+test('repeated blocked reports do not reset the contiguous block clock and human resume retains identity',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Missing prerequisite'})
+  task.blockedSince=new Date(Date.now()-3601000).toISOString();const since=task.blockedSince
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Still missing prerequisite'})
+  assert.equal(task.blockedSince,since);await f.controller.tick();assert.equal(task.status,'parked')
+  task.startedAt=new Date(Date.now()-86400000).toISOString()
+  task.phases=[{phase:'parked',at:task.startedAt}]
+  const id=task.sessionId
+  await f.controller.resumeTask('captain',task.id,'Human supplied the missing prerequisite',true)
+  await f.controller.tick();assert.equal(task.sessionId,id);assert.equal(task.status,'running');assert.equal(task.blockedSince,undefined)
+}))
+
+test('blocked clocks migrate from phase evidence and only genuine progress clears them',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Waiting'})
+  delete task.blockedSince;task.phases.at(-1).at=new Date(Date.now()-3601000).toISOString()
+  await f.controller.tick();assert.equal(task.status,'parked')
+}))
+
+test('parking revokes guidance awaiting diagnostics and prevents a late worker wake',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Missing prerequisite'})
+  let release,entered;const enteredGate=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+  f.runtime.assertCaptainDiagnostics=async()=>{entered();await gate}
+  const late=f.controller.message('captain',task.id,'Changed evidence','resume');await enteredGate
+  task.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick()
+  const before=f.messages.filter(m=>m.id===task.sessionId).length;release()
+  await assert.rejects(late,/changed|parked/i)
+  assert.equal(task.status,'parked');assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,before)
+}))
+
+test('native team descendants inherit a read-only origin view without activating a new coordinator',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',f.config);await f.controller.tick()
+  f.runtime.parentSession=async id=>id==='member'?run.tasks[0].sessionId:null
+  const view=await f.controller.sessionView('member')
+  assert.equal(view.role,'worker');assert.equal(view.coordinatorSessionId,'captain');assert.equal(view.run.tasks.length,1)
+  assert.equal(f.controller.state('member'),null)
+}))
+
+test('another chat created in an assigned task workspace has origin visibility without coordinator powers',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',f.config);await f.controller.tick()
+  f.runtime.workspacePath=async id=>id==='followup-chat'?run.tasks[0].worktree:f.config.workspace
+  const view=await f.controller.sessionView('followup-chat')
+  assert.equal(view.role,'worker');assert.equal(view.run.tasks[0].id,run.tasks[0].id)
+  assert.equal((await f.controller.sessionView('ordinary-main-repo-chat')).run,null)
+  await assert.rejects(f.controller.control('followup-chat','stop'),/captain/)
+}))
+
+test('parking never prevents reconciliation of an already merged exact reviewed PR',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Merge acknowledgement unavailable'})
+  task.blockedSince=new Date(Date.now()-3601000).toISOString();task.prUrl='https://example.com/pr';task.headSha='head';task.reviewHistory=[{passed:true,headSha:'head',at:new Date().toISOString(),findings:[],report:'pass'}]
+  f.provider.inspectPullRequest=async()=>({id:'1',url:task.prUrl,headSha:'head',merged:true,mergeSha:'merged',checksPassed:true})
+  await f.controller.tick();assert.equal(task.status,'merged');assert.ok(task.closedAt)
+}))
+
+test('parked tasks survive Stop/Resume and failed quiescence reserves capacity',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,parallelism:1,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'External prerequisite'})
+  task.blockedSince=new Date(Date.now()-3601000).toISOString()
+  const stop=f.runtime.stop;f.runtime.stop=async()=>{throw new Error('Cannot quiesce')}
+  await f.controller.tick();assert.equal(task.status,'parked');assert.equal(task.executionActive,true);assert.equal(run.tasks.length,1)
+  await assert.rejects(f.controller.resumeTask('captain',task.id,'Human retry',true),/quiesce/)
+  f.runtime.stop=stop;await f.controller.tick();assert.equal(task.executionActive,false);assert.equal(run.tasks.length,2)
+  await f.controller.control('captain','stop');await f.controller.control('captain','resume')
+  assert.equal(task.status,'parked');assert.equal(task.resumeRequested,undefined)
+}))
+
+test('slow review in one repository cannot stall another coordinator or its stop',()=>fixture(async f=>{
+  const a=await f.controller.start('a',{...f.config,parallelism:1,maxTickets:1});await f.controller.tick()
+  await f.controller.report(a.tasks[0].sessionId,{phase:'review',ready:true})
+  let release,entered;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+  f.runtime.review=async()=>{entered();await gate;return{passed:true,headSha:'head',report:'pass',findings:[]}}
+  const slow=f.controller.tick();await started
+  try {
+    const b=await f.controller.start('b',{...f.config,repository:'other/repo',parallelism:1,maxTickets:1})
+    const next=f.controller.tick()
+    await new Promise(r=>setTimeout(r,50));assert.equal(b.tasks.length,1)
+    await Promise.race([f.controller.control('b','stop'),new Promise((_,reject)=>setTimeout(()=>reject(new Error('Other run blocked stop')),500))])
+    release();await Promise.all([slow,next])
+  } finally {release();await slow}
+}))
 test('explicit start schedules bounded independent tickets; overlapping ticks cannot duplicate',()=>fixture(async f=>{
   assert.equal(f.controller.state('captain'),null)
   await f.controller.start('captain',f.config)

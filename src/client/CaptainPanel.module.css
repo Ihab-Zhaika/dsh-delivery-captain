@@ -22,6 +22,21 @@
 .owner { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 8px 16px; font-size: 11px; color: var(--cap-muted); border-bottom: 1px solid var(--cap-border); }
 .owner > code { min-width: 0; }
 .owner > span { width: 100%; }
+.origin { display:flex; flex-direction:column; gap:6px; padding:12px 16px; border-bottom:1px solid var(--cap-border); background:#18312f; }
+.origin button { text-align:left; overflow-wrap:anywhere; color:#8eddf6; }
+.origin small { color:var(--cap-muted); }
+.graphScroll { max-height:460px; overflow:auto; border:1px solid var(--cap-border); border-radius:8px; margin:12px 0; background:#0c1420; }
+.graphCanvas { position:relative; }
+.graphCanvas > svg { position:absolute; inset:0; pointer-events:none; }
+.panel .graphNode { position:absolute; width:205px; height:102px; text-align:left; display:flex; flex-direction:column; gap:5px; border-left:3px solid #607d91; padding:8px 10px; }
+.graphNode strong { display:flex; justify-content:space-between; gap:6px; }
+.graphNode span,.graphNode small { font-size:10px; color:#a6b8cc; }
+.graphNode p { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; font-size:11px; line-height:1.4; }
+.panel .graphNode[aria-pressed='true'] { outline:2px solid #83d7ff; }
+.panel .graphNode:is([data-status='eligible'],[data-status='delivered'],[data-status='decision-complete']) { border-left-color:#80d5bb; }
+.panel .graphNode:is([data-status='parked'],[data-status='blocked'],[data-status='dependency']) { border-left-color:#dbac61; }
+.graphDetail { padding:12px; background:#1d2b32; border-radius:6px; margin-bottom:12px; overflow-wrap:anywhere; }
+.status[data-status='parked'] { color:#eac485; background:#493b26; border-color:#76603d; }
 .views { display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--cap-border); }
 .views button { flex: 1; }
 .views button[aria-pressed='true'] { background: #24443f; border-color: #619c8e; color: #a5efd9; }

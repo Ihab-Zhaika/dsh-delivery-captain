@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { CommandRunner, Phase, ReviewResult, RunConfig, Task } from './types.ts'
 import { fetchTarget, resolveHead } from './worktrees.ts'
+import { taskDeadline } from './scheduler.ts'
 
 function object(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('Malformed OCR report object')
@@ -50,7 +51,7 @@ export async function reviewTask(task: Task, config: RunConfig, run: CommandRunn
   const directory = await mkdtemp(join(tmpdir(), 'darkingdoom-review-'))
   const timeoutMs = Math.max(1, config.maxTaskMinutes) * 60_000
   const started = Date.parse(task.startedAt)
-  const deadline = Number.isFinite(started) ? started + timeoutMs : Date.now()
+  const deadline = Number.isFinite(started) ? taskDeadline({...task,phases:task.phases??[]},config.maxTaskMinutes) : Date.now()
   const remaining = () => { signal?.throwIfAborted(); const ms = deadline - Date.now(); if (ms <= 0) throw new Error('Review timed out'); return ms }
   const bounded: CommandRunner = (file, args, options) => run(file, args, { ...options, signal, timeoutMs: Math.min(options?.timeoutMs ?? Infinity, remaining()) })
   const unchanged = async () => {
@@ -82,17 +83,17 @@ export async function reviewTask(task: Task, config: RunConfig, run: CommandRunn
     await unchanged()
     if (await fetchTarget(config, bounded, task.worktree) !== target) throw new Error('Target branch moved during review; integrate current target and repeat checks')
     await unchanged()
-    return { passed: findings.length === 0, headSha, baseSha, report, findings }
+    return { passed: findings.length === 0, headSha, baseSha, report, findings, ...(findings.length?{failureKind:'findings' as const}:{}) }
   } catch (error) {
     findings.push(error instanceof Error ? error.message : String(error))
-    return { passed: false, headSha, baseSha, report: report || findings.join('\n'), findings }
+    return { passed: false, headSha, baseSha, report: report || findings.join('\n'), findings, failureKind:'infrastructure' }
   } finally { await rm(directory, { recursive: true, force: true }) }
 }
 
 /** Cheap cache validation; a cached pass is evidence for one exact clean range only. */
 export async function isReviewCurrent(task: Task, config: RunConfig, review: ReviewResult, run: CommandRunner, signal?: AbortSignal): Promise<boolean> {
   if (!review.passed || review.findings.length || !review.baseSha || !/^[a-f0-9]{40,64}$/.test(review.baseSha) || !/^[a-f0-9]{40,64}$/.test(review.headSha)) return false
-  const deadline = Date.parse(task.startedAt) + Math.max(1, config.maxTaskMinutes) * 60_000
+  const deadline = taskDeadline({...task,phases:task.phases??[]},Math.max(1,config.maxTaskMinutes))
   const bounded: CommandRunner = (file, args, options) => {
     signal?.throwIfAborted()
     const remaining = deadline - Date.now()

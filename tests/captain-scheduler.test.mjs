@@ -31,6 +31,13 @@ test('cycles, missing references, and future milestone predecessors explain bloc
 test('claimed and failed tickets cannot be dispatched twice', () => {
   assert.equal(eligibility([ticket('1')], ['M1'], [{ ticket: ticket('1'), status: 'failed' }])[0].eligible, false)
 })
+
+test('eligibility distinguishes delivered, parked, dependencies and milestone barriers',()=>{
+  const rows=eligibility([ticket('1'),ticket('2','M1',['1']),ticket('3','M2'),ticket('4','M1',[],{state:'closed',merged:true}),ticket('5','M1',[],{exclusion:'Outside selection'})],['M1','M2'],[{ticket:ticket('1'),status:'parked',error:'Device missing'}])
+  assert.equal(rows[0].state,'parked');assert.match(rows[0].reason,/Device missing/)
+  assert.equal(rows[1].state,'dependency');assert.deepEqual(rows[1].predecessors,['1'])
+  assert.equal(rows[2].state,'milestone');assert.equal(rows[3].state,'delivered');assert.equal(rows[4].state,'excluded')
+})
 test('phase durations partition wall time and count repeated repairs', () => {
   const task = { startedAt: '2026-01-01T00:00:00Z', finishedAt: '2026-01-01T00:00:40Z', phases: [{ phase: 'implementation', at: '2026-01-01T00:00:00Z' }, { phase: 'review', at: '2026-01-01T00:00:10Z' }, { phase: 'repair', at: '2026-01-01T00:00:20Z' }, { phase: 'review', at: '2026-01-01T00:00:30Z' }] }
   assert.deepEqual(phaseDurations(task), { implementation: 10000, review: 20000, repair: 10000 })

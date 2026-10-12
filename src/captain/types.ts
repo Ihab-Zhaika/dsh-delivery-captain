@@ -1,5 +1,5 @@
 /** Browser-safe delivery contracts. External data must be validated at adapters. */
-export type Phase = 'setup' | 'analysis' | 'implementation' | 'testing' | 'review' | 'repair' | 'integration' | 'waiting' | 'blocked' | 'complete'
+export type Phase = 'setup' | 'analysis' | 'implementation' | 'testing' | 'review' | 'repair' | 'integration' | 'waiting' | 'blocked' | 'parked' | 'complete'
 export interface Ticket {
   id: string; title: string; body: string; url: string; milestone: string;
   predecessors: string[]; state: 'open' | 'closed'; merged: boolean;
@@ -29,7 +29,7 @@ export interface Question { id: string; taskId: string; question: string; create
 export interface Task {
   id: string; ticket: Ticket; attempt: string; sessionId: string;
   branch: string; worktree: string; baseSha: string; headSha?: string; workspaceId?: string; workspaceError?: string;
-  status: 'starting' | 'running' | 'blocked' | 'ready' | 'merged' | 'failed' | 'cancelled';
+  status: 'starting' | 'running' | 'blocked' | 'parked' | 'ready' | 'merged' | 'failed' | 'cancelled';
   phase: Phase; phases: PhaseEvent[]; startedAt: string; finishedAt?: string;
   reviewRounds: number; error?: string; prUrl?: string; mergedSha?: string;
   lastWakeAt?: string; followups: string[];
@@ -37,6 +37,7 @@ export interface Task {
   assignmentDelivered?: boolean; executionActive?: boolean; idleCheckpointAt?: string;
   transitionVersion?: number;
   waitingDecision?: string;
+  blockedSince?: string; parkedAt?: string; parkReason?: string; parkingError?: string;
   blockerFingerprint?: string; blockerNotifiedAt?: string; lastBlockerNotifyAttemptAt?: string; lastGuidanceHash?: string;
   reviewHistory?: Array<ReviewResult & { at: string }>;
 }
@@ -60,8 +61,10 @@ export interface TicketProvider {
   close(task: Task): Promise<void>;
   createFollowup(task: Task, input: FollowupInput): Promise<string>;
 }
-export interface ReviewResult { passed: boolean; headSha: string; baseSha?: string; report: string; findings: string[] }
+export interface ReviewResult { passed: boolean; headSha: string; baseSha?: string; report: string; findings: string[]; failureKind?: 'team-evidence' | 'infrastructure' | 'findings' }
 export interface WorkerRuntime {
+  parentSession?(sessionId:string):Promise<string|null>;
+  workspacePath?(sessionId:string):Promise<string|null>;
   evidence?(run: Run): Promise<unknown>;
   assertCaptainDiagnostics?(run: Run): Promise<void>;
   registerWorkspace?(task: Task, run: Run): Promise<void>;

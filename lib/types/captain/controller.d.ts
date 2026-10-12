@@ -11,11 +11,67 @@ export declare class CaptainController {
     private readonly startingSessions;
     private readonly activeProviders;
     private ticking?;
+    private readonly runTicks;
     private disposed;
     constructor(store: RunStore, runtime: WorkerRuntime, providerFactory: (config: RunConfig) => TicketProvider);
     /** Rehydrate only explicitly started runs. Startup does not opt ordinary sessions in. */
     restore(): Promise<void>;
     state(sessionId: string): Run | null;
+    /** Session projection is separate from internal ownership lookup. */
+    view(sessionId: string): {
+        role: "idle";
+        run: null;
+        coordinatorSessionId: null;
+    } | {
+        role: "coordinator";
+        run: Run;
+        coordinatorSessionId: string;
+    } | {
+        role: "worker";
+        coordinatorSessionId: string;
+        run: {
+            tasks: Task[];
+            tickets: import("./types.ts").Ticket[];
+            questions: Question[];
+            version: 1;
+            id: string;
+            captainSessionId: string;
+            config: RunConfig;
+            status: "running" | "paused" | "draining" | "stopped";
+            createdAt: string;
+            updatedAt: string;
+            error?: string;
+            lastPollAt?: string;
+            recoveryPending?: boolean;
+        };
+    };
+    sessionView(sessionId: string): Promise<{
+        role: "idle";
+        run: null;
+        coordinatorSessionId: null;
+    } | {
+        role: "coordinator";
+        run: Run;
+        coordinatorSessionId: string;
+    } | {
+        role: "worker";
+        coordinatorSessionId: string;
+        run: {
+            tasks: Task[];
+            tickets: import("./types.ts").Ticket[];
+            questions: Question[];
+            version: 1;
+            id: string;
+            captainSessionId: string;
+            config: RunConfig;
+            status: "running" | "paused" | "draining" | "stopped";
+            createdAt: string;
+            updatedAt: string;
+            error?: string;
+            lastPollAt?: string;
+            recoveryPending?: boolean;
+        };
+    }>;
     all(): Run[];
     private save;
     private captain;
@@ -33,6 +89,7 @@ export declare class CaptainController {
     answer(sessionId: string, questionId: string, answer: string, action?: 'resume' | 'wait'): Promise<Question>;
     private deliverAnswer;
     message(sessionId: string, taskId: string, text: string, action?: 'resume' | 'wait'): Promise<void>;
+    resumeTask(sessionId: string, taskId: string, evidence: string, human?: boolean): Promise<Task>;
     followup(sessionId: string, input: FollowupInput): Promise<string>;
     private activeCount;
     private notifyBlocker;
@@ -40,8 +97,7 @@ export declare class CaptainController {
     private notify;
     private notifyQuestion;
     /** Deduplicated timer entry. No model polling is required for queue discovery. */
-    tick(): Promise<void>;
-    private tickAll;
+    tick(runIds?: readonly string[]): Promise<void>;
     private tickRun;
     private launch;
     private integrate;

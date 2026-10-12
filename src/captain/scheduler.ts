@@ -1,10 +1,10 @@
 import { isAbsolute } from 'node:path'
 import type { RunConfig, Task, Ticket } from './types.ts'
 
-export interface Eligibility { ticketId: string; eligible: boolean; reason: string }
+export interface Eligibility { ticketId: string; eligible: boolean; reason: string; state: string; predecessors: string[] }
 
 /** Resolve the complete predecessor closure; related links never enter this graph. */
-export function eligibility(tickets: Ticket[], milestones: string[], tasks: Pick<Task, 'ticket' | 'status' | 'closedAt'>[]): Eligibility[] {
+export function eligibility(tickets: Ticket[], milestones: string[], tasks: (Pick<Task, 'ticket' | 'status' | 'closedAt'> & Partial<Pick<Task,'error'>>)[]): Eligibility[] {
   const byId = new Map(tickets.map(t => [t.id, t]))
   if (byId.size !== tickets.length) throw new Error('Duplicate ticket identities in discovery')
   const delivered = new Set(tasks.filter(t => t.status === 'merged' && t.closedAt).map(t => t.ticket.id))
@@ -25,14 +25,23 @@ export function eligibility(tickets: Ticket[], milestones: string[], tasks: Pick
     return undefined
   }
   return tickets.map(t => {
+    const task=tasks.find(task=>task.ticket.id===t.id)
     const reason = satisfied(t) ? t.completedDecision && !t.merged && !delivered.has(t.id) ? 'Decision completed (no code merge claimed)' : 'Delivered' : !milestones.includes(t.milestone) ? 'Outside configured milestones'
-      : tasks.some(task => task.ticket.id === t.id) ? 'Already claimed; see task status'
+      : task ? `Task ${task.status}${task.error ? `: ${task.error}` : '; see task status'}`
       : t.exclusion ? t.exclusion
       : t.state === 'closed' ? 'Closed without verified merged delivery'
       : dependencyIssue(t, new Set())
       ?? (t.milestone !== current ? `Waiting for milestone ${current ?? '(none)'}` : '')
-    return { ticketId: t.id, eligible: !reason, reason: reason || 'Ready' }
+    const state=satisfied(t)?t.completedDecision&&!t.merged&&!delivered.has(t.id)?'decision-complete':'delivered'
+      : !milestones.includes(t.milestone)?'excluded':task?task.status:t.exclusion?'excluded':t.state==='closed'?'unverified-closure'
+      : reason?.startsWith('Waiting for milestone')?'milestone':reason?'dependency':'eligible'
+    return { ticketId: t.id, eligible: !reason, reason: reason || 'Ready', state, predecessors:t.predecessors }
   })
+}
+
+/** Parked human waiting is visible wall time but does not spend the task's execution budget. */
+export function taskDeadline(task: Pick<Task,'startedAt'|'phases'|'finishedAt'>,minutes:number,now=Date.now()):number {
+  return Date.parse(task.startedAt)+minutes*60000+(phaseDurations(task,now).parked??0)
 }
 
 /** Wall-clock phase intervals partition time; never sum parallel agent effort into these. */

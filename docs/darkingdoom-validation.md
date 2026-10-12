@@ -1,11 +1,19 @@
 # DarKingDoom Plugin validation — 2026-10-12
 
+## Session ownership and parking update
+
+The installed Web profile was reloaded with the session-scoped sidebar and one-hour parking lifecycle. Live inspection confirmed the loaded runtime hash and source/build stamp matched the new artifacts. Opening #371 showed only that ticket's task metrics, ongoing phase totals and a clickable coordinator origin; clicking it returned to the main TrucX chat. Native task workspaces and the active original source-recovery team were retained. The reload itself did not replay either assignment (worker prompt counts 24 and 43 remained unchanged).
+
+The main session retained its own run controls and displayed a selectable dependency graph with 23 ticket decisions. Delivered and completed decisions were classified separately from exclusions and current task states. #448's early missing-creation-evidence error remained immutable and labelled historical, alongside its later passing delivery gate. The running trial remains capped to #448/#371, two admissions and parallelism two. #371's source-only implementation is ongoing; antivirus assessment, full configured CI estate, final review/staging checks and physical-device evidence remain unmet. Parking was verified with controller fixtures using real persistence and controlled clocks, not by backdating live task state or declaring #371 delivered.
+
+Regressions cover independent repository scheduling during a long review, stale diagnostic guidance after parking, exact-head remote merge reconciliation before parking, capacity retention on failed quiescence, explicit same-session task resumption, Stop/Resume preservation, native descendant/workspace continuation views, and immutable historical review failures. Independent review found two parking races; both received failing regression tests and fixes. No remaining important findings were reported.
+
 ## Verified locally
 
 - Windows, Node 24.15.0, DSH 0.2.0-rc.2, original AgentTeams 0.1.23, OCR installed v1.12.13.
 - `pnpm typecheck`: host and browser TypeScript passed.
 - `pnpm build`: host/browser artifacts built. The inherited DSH browser-loader contract requires CJS; tsdown's general ESM recommendation is expected.
-- `pnpm verify`: 134 tests passed, zero failures. Source/build artifact stamp matched.
+- `pnpm verify`: 148 tests passed, zero failures. Source/build artifact stamp matched.
 - Repository discovery: real temporary repositories, both remotes, remote default branch, repository plan order, full Azure iteration paths, safe metadata reads, missing authentication/defaults, and refusal to redirect a session to another repository.
 - Temporary real Git repositories: fetched target branch, isolated worktree/branch, idempotent adoption, dirty-worktree rejection and branch/target drift.
 - Provider contract fixtures: GitHub dependency closure and closing PRs; Azure native predecessors, custom workflow completion categories, acceptance fields, pagination, exact-head merge and remote policy checks.

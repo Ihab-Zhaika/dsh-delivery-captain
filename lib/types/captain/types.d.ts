@@ -1,5 +1,5 @@
 /** Browser-safe delivery contracts. External data must be validated at adapters. */
-export type Phase = 'setup' | 'analysis' | 'implementation' | 'testing' | 'review' | 'repair' | 'integration' | 'waiting' | 'blocked' | 'complete';
+export type Phase = 'setup' | 'analysis' | 'implementation' | 'testing' | 'review' | 'repair' | 'integration' | 'waiting' | 'blocked' | 'parked' | 'complete';
 export interface Ticket {
     id: string;
     title: string;
@@ -75,7 +75,7 @@ export interface Task {
     headSha?: string;
     workspaceId?: string;
     workspaceError?: string;
-    status: 'starting' | 'running' | 'blocked' | 'ready' | 'merged' | 'failed' | 'cancelled';
+    status: 'starting' | 'running' | 'blocked' | 'parked' | 'ready' | 'merged' | 'failed' | 'cancelled';
     phase: Phase;
     phases: PhaseEvent[];
     startedAt: string;
@@ -94,6 +94,10 @@ export interface Task {
     idleCheckpointAt?: string;
     transitionVersion?: number;
     waitingDecision?: string;
+    blockedSince?: string;
+    parkedAt?: string;
+    parkReason?: string;
+    parkingError?: string;
     blockerFingerprint?: string;
     blockerNotifiedAt?: string;
     lastBlockerNotifyAttemptAt?: string;
@@ -149,8 +153,11 @@ export interface ReviewResult {
     baseSha?: string;
     report: string;
     findings: string[];
+    failureKind?: 'team-evidence' | 'infrastructure' | 'findings';
 }
 export interface WorkerRuntime {
+    parentSession?(sessionId: string): Promise<string | null>;
+    workspacePath?(sessionId: string): Promise<string | null>;
     evidence?(run: Run): Promise<unknown>;
     assertCaptainDiagnostics?(run: Run): Promise<void>;
     registerWorkspace?(task: Task, run: Run): Promise<void>;

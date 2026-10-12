@@ -40,6 +40,27 @@ test('repository identity fields belong to the session and stay read-only', () =
   assert.match(html,/Loading repository configuration/)
 })
 
+test('worker panel shows origin and own phase totals without coordinator controls',()=>{
+  const task={id:'task',sessionId:'worker',ticket:{id:'7',title:'Own ticket',milestone:'M1',url:'',predecessors:[]},status:'parked',phase:'parked',startedAt:'2026-01-01T00:00:00Z',phases:[{phase:'implementation',at:'2026-01-01T00:00:00Z'},{phase:'parked',at:'2026-01-01T00:01:00Z'}],followups:[],reviewRounds:0}
+  const run={id:'run',captainSessionId:'coordinator',status:'running',config:{parallelism:2,milestones:['M1']},tasks:[task],questions:[],tickets:[task.ticket]}
+  const html=renderToStaticMarkup(createElement(ui.CaptainPanel,{sessionId:'worker',onClose(){},openSession:async()=>{},initialSnapshot:{role:'worker',run,coordinatorSessionId:'coordinator'}}))
+  assert.match(html,/Initiated by coordination session/);assert.match(html,/coordinator/);assert.match(html,/Phase timeline/);assert.match(html,/parked/)
+  assert.doesNotMatch(html,/aria-label="Run controls"|Run configuration|Live parallelism|Delivery queue|Start DarKingDoom/)
+})
+
+test('eligibility graph lays out prerequisites before dependents and retains missing/cyclic nodes',()=>{
+  const graph=ui.eligibilityGraph([{id:'1',title:'child',predecessors:['2']},{id:'2',title:'root',predecessors:[]},{id:'3',title:'missing',predecessors:['9']},{id:'4',title:'cycle',predecessors:['5']},{id:'5',title:'cycle',predecessors:['4']}])
+  const node=id=>graph.nodes.find(n=>n.id===id)
+  assert.ok(node('2').x<node('1').x);assert.equal(node('9').missing,true);assert.equal(graph.edges.length,4)
+  assert.ok(graph.nodes.every(n=>Number.isFinite(n.x)&&Number.isFinite(n.y)))
+})
+
+test('resolved review failures remain historical and are not presented as the current gate',()=>{
+  const task={id:'task',ticket:{id:'7'},status:'merged',headSha:'head',reviewHistory:[{passed:false,headSha:'',at:'2026-01-01',report:'Original AgentTeams creation evidence is missing',findings:['Missing evidence']},{passed:true,headSha:'head',at:'2026-01-02',report:'Complete',findings:[]}]}
+  const html=renderToStaticMarkup(createElement(ui.CaptainReviewEvidence,{task}))
+  assert.match(html,/Current gate passed/);assert.match(html,/Historical failure/);assert.match(html,/Unavailable/)
+})
+
 test('worker session links use ordinary root session navigation on current and legacy hosts', async () => {
   for (const modern of [true, false]) {
     const slots = new Map(), opened = [], panels = [], definitions = [], sidebarOpens = []

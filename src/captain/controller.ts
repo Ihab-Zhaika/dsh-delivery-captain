@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type { FollowupInput, Phase, Question, Run, RunConfig, Task, TicketProvider, WorkerRuntime } from './types.ts'
-import { eligibility, validateConfig, taskConfig } from './scheduler.ts'
+import { eligibility, validateConfig, taskConfig, phaseDurations } from './scheduler.ts'
 import { RunStore } from './store.ts'
 
 const TERMINAL = new Set<Task['status']>(['merged', 'failed', 'cancelled'])
@@ -20,6 +20,7 @@ export class CaptainController {
   private readonly startingSessions = new Set<string>()
   private readonly activeProviders = new Map<string, TicketProvider>()
   private ticking?: Promise<void>
+  private readonly runTicks = new Map<string, Promise<void>>()
   private disposed = false
   constructor(store: RunStore, runtime: WorkerRuntime, providerFactory: (config: RunConfig) => TicketProvider) {
     this.store = store; this.runtime = runtime; this.providerFactory = providerFactory
@@ -57,6 +58,32 @@ export class CaptainController {
   state(sessionId: string): Run | null {
     return this.runs.get(sessionId) ?? [...this.runs.values()].find(run => run.tasks.some(t => t.sessionId === sessionId)) ?? null
   }
+  /** Session projection is separate from internal ownership lookup. */
+  view(sessionId: string) {
+    const run = this.state(sessionId)
+    if (!run) return { role: 'idle' as const, run: null, coordinatorSessionId: null }
+    if (run.captainSessionId === sessionId) return { role: 'coordinator' as const, run, coordinatorSessionId: sessionId }
+    const tasks = run.tasks.filter(t => t.sessionId === sessionId)
+    return { role: 'worker' as const, coordinatorSessionId: run.captainSessionId,
+      run: { ...run, tasks, tickets: tasks.map(t => t.ticket), questions: run.questions.filter(q => tasks.some(t => t.id === q.taskId)) } }
+  }
+  async sessionView(sessionId:string) {
+    const seen=new Set<string>();let id:string|null=sessionId
+    while(id&&!seen.has(id)&&seen.size<64) {
+      seen.add(id);const view=this.view(id)
+      if(view.run)return id===sessionId?view:{...view,role:'worker' as const,...view.role==='coordinator'?{run:{...view.run,tasks:[],tickets:[],questions:[]}}:{}}
+      id=await this.runtime.parentSession?.(id)??null
+    }
+    const workspace=await this.runtime.workspacePath?.(sessionId)
+    if(workspace) {
+      const canonical=(path:string)=>process.platform==='win32'?resolve(path).toLowerCase():resolve(path)
+      for(const run of this.runs.values()) {
+        const task=run.tasks.find(t=>canonical(t.worktree)===canonical(workspace))
+        if(task)return this.view(task.sessionId)
+      }
+    }
+    return this.view(sessionId)
+  }
   all(): Run[] { return [...this.runs.values()] }
   private async save(run: Run): Promise<void> { run.updatedAt = now(); await this.store.save(run) }
   private captain(sessionId: string): Run {
@@ -66,7 +93,7 @@ export class CaptainController {
   }
   private worker(sessionId: string): { run: Run; task: Task } {
     for (const run of this.runs.values()) {
-      const task = run.tasks.find(t => t.sessionId === sessionId && !TERMINAL.has(t.status))
+      const task = run.tasks.find(t => t.sessionId === sessionId && !TERMINAL.has(t.status) && t.status !== 'parked')
       if (task && !isStopped(run)) return { run, task }
     }
     throw new Error('Session is not an active assigned worker')
@@ -114,7 +141,7 @@ export class CaptainController {
       await this.save(run)
       await this.drainWorkers(run, false)
       // A worker may still be inside create/start. Drain that operation before cancelling the final roster.
-      await this.ticking
+      await this.runTicks.get(run.id)
       const shutdownErrors = await this.drainWorkers(run, true)
       await this.save(run)
       // A tick may still be finishing an external call. Keep the repository lease until it quiesces.
@@ -126,14 +153,15 @@ export class CaptainController {
 
   async report(sessionId: string, report: { phase: Phase; ready?: boolean; blocked?: boolean; note?: string }): Promise<Task> {
     const { run, task } = this.worker(sessionId)
-    if (!PHASES.includes(report.phase) || report.phase === 'complete') throw new Error('Only verified merge can complete a task')
+    if (!PHASES.includes(report.phase) || report.phase === 'complete' || report.phase === 'parked') throw new Error('Only the controller can complete or park a task')
     if (report.ready && report.blocked) throw new Error('A task cannot be ready and blocked together')
     task.transitionVersion=(task.transitionVersion??0)+1
     delete task.resumeRequested
     delete task.idleCheckpointAt
     this.phase(task, report.phase, report.note)
-    if (report.ready) { task.status = 'ready'; this.phase(task, 'waiting', 'Queued for independent verification and merge') }
-    else if (report.blocked) { task.status = 'blocked'; task.error = report.note ?? 'Worker blocked'; task.lastWakeAt = now(); task.executionActive = true }
+    if (report.ready) { delete task.blockedSince; task.status = 'ready'; this.phase(task, 'waiting', 'Queued for independent verification and merge') }
+    else if (report.blocked) { task.blockedSince ??= now(); task.status = 'blocked'; task.error = report.note ?? 'Worker blocked'; task.lastWakeAt = now(); task.executionActive = true }
+    else if (!['blocked','waiting'].includes(report.phase)) { task.status = 'running'; delete task.blockedSince }
     await this.save(run)
     if (report.blocked) await this.notifyBlocker(run, task)
     return task
@@ -170,8 +198,10 @@ export class CaptainController {
     const task = run.tasks.find(t => t.id === q.taskId)
     if (!task || TERMINAL.has(task.status) || isStopped(run)) return
     if(task.status==='ready')return
+    if(task.status==='parked') { q.recordedAt=now(); task.waitingDecision=q.answer; await this.save(run); return }
+    const diagnosticVersion=task.transitionVersion
     if(task.status==='blocked')await this.runtime.assertCaptainDiagnostics?.(run)
-    if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready'].includes(task.status))return
+    if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready','parked'].includes(task.status)||task.transitionVersion!==diagnosticVersion)return
     if(q.action==='wait'&&task.status==='blocked'){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;task.waitingDecision=q.answer;q.recordedAt=now();await this.save(run);return}
     if (task.status === 'blocked' && !task.executionActive && this.activeCount(run) >= run.config.parallelism) return
     delete task.resumeRequested
@@ -193,13 +223,18 @@ export class CaptainController {
     if(task.status==='ready')throw new Error('Task is already owned by controller verification; guidance cannot interrupt it')
     if (!text.trim() || text.length > 30000) throw new Error('Invalid worker message')
     if(action!=='resume'&&action!=='wait')throw new Error('Invalid guidance action')
+    if(task.status==='parked') {
+      if(action==='resume')throw new Error('Task is parked; use explicit task resumption with changed prerequisite evidence')
+      task.waitingDecision=text;await this.save(run);return
+    }
     const hash=createHash('sha256').update(JSON.stringify([text.trim(),action,task.blockerFingerprint])).digest('hex')
     if(task.lastGuidanceHash===hash){
       if(action==='wait'&&task.status==='blocked'&&task.resumeRequested){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;await this.save(run)}
       return
     }
+    const diagnosticVersion=task.transitionVersion
     if(task.status==='blocked')await this.runtime.assertCaptainDiagnostics?.(run)
-    if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready'].includes(task.status))throw new Error('Task changed while validating diagnostic evidence')
+    if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready','parked'].includes(task.status)||task.transitionVersion!==diagnosticVersion)throw new Error('Task changed while validating diagnostic evidence')
     if(action==='wait'&&task.status==='blocked'){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;task.waitingDecision=text;task.lastGuidanceHash=hash;await this.save(run);return}
     if (task.status === 'blocked' && !task.executionActive && this.activeCount(run) >= run.config.parallelism) throw new Error('No execution slot available; answer will need to wait')
     delete task.resumeRequested
@@ -216,6 +251,20 @@ export class CaptainController {
     await this.save(run)
   }
 
+  async resumeTask(sessionId: string, taskId: string, evidence: string, human = false): Promise<Task> {
+    const run=this.captain(sessionId),task=run.tasks.find(t=>t.id===taskId)
+    if(isStopped(run)||run.status!=='running'||!task||task.status!=='parked')throw new Error('Resume requires a running coordinator and parked task')
+    if(!evidence.trim()||evidence.length>30000)throw new Error('Describe the changed prerequisite or explicit human resumption')
+    if(task.executionActive||task.parkingError)throw new Error('Parking has not safely quiesced the worker')
+    const version=task.transitionVersion
+    if(!human)await this.runtime.assertCaptainDiagnostics?.(run)
+    if(isStopped(run)||this.disposed||task.status!=='parked'||task.transitionVersion!==version)throw new Error('Task changed during resumption validation')
+    task.transitionVersion=(task.transitionVersion??0)+1
+    task.status='blocked';task.resumeRequested=true;task.waitingDecision=evidence;delete task.blockedSince;delete task.idleCheckpointAt
+    this.phase(task,'waiting',`Explicit resumption: ${evidence}`);await this.save(run)
+    return task
+  }
+
   async followup(sessionId: string, input: FollowupInput): Promise<string> {
     const { run, task } = this.worker(sessionId)
     if (!input.title.trim() || !input.body.trim() || !run.config.milestones.includes(input.milestone) || !Array.isArray(input.predecessors) || input.predecessors.some(x => typeof x !== 'string')) throw new Error('Follow-up requires title, scope/acceptance body, configured milestone and predecessor IDs')
@@ -224,7 +273,7 @@ export class CaptainController {
     await this.save(run); return id
   }
 
-  private activeCount(run: Run): number { return run.tasks.filter(t => ['starting','running','ready'].includes(t.status)||t.status==='blocked'&&t.executionActive).length }
+  private activeCount(run: Run): number { return run.tasks.filter(t => ['starting','running','ready'].includes(t.status)||['blocked','parked'].includes(t.status)&&t.executionActive).length }
   private async notifyBlocker(run: Run,task: Task): Promise<void> {
     if(isStopped(run)||this.disposed)return
     const fingerprint=createHash('sha256').update(task.error??'Worker blocked').digest('hex')
@@ -247,18 +296,17 @@ export class CaptainController {
   }
 
   /** Deduplicated timer entry. No model polling is required for queue discovery. */
-  tick(): Promise<void> {
+  tick(runIds?: readonly string[]): Promise<void> {
     if (this.disposed) return Promise.resolve()
-    if (this.ticking) return this.ticking
-    this.ticking = this.tickAll().finally(() => { this.ticking = undefined })
-    return this.ticking
-  }
-  private async tickAll(): Promise<void> {
     for (const run of this.runs.values()) {
-      if (isStopped(run) || this.disposed) continue
-      try { await this.tickRun(run) } catch (error) { if (!isStopped(run) && !this.disposed) { run.error = String(error); await this.save(run) } }
-      finally { this.activeProviders.delete(run.id) }
+      if (isStopped(run) || this.disposed || runIds && !runIds.includes(run.id)) continue
+      if(this.runTicks.has(run.id))continue
+      const tick=this.tickRun(run).catch(async error=>{if(!isStopped(run)&&!this.disposed){run.error=String(error);await this.save(run)}})
+        .finally(()=>{this.activeProviders.delete(run.id);this.runTicks.delete(run.id)})
+      this.runTicks.set(run.id,tick)
     }
+    this.ticking=Promise.all([...this.runTicks.values()]).then(()=>{})
+    return this.ticking
   }
 
   private async tickRun(run: Run): Promise<void> {
@@ -282,6 +330,7 @@ export class CaptainController {
       if (task.prUrl && task.headSha && task.reviewHistory?.some(r => r.passed && r.headSha === task.headSha)) {
         // A process or network failure may have lost the merge acknowledgement. Reconcile before waking a writer.
         const existing = await provider.inspectPullRequest(task)
+        if(isStopped(run)||this.disposed)return
         if (existing.merged) {
           if (existing.headSha !== task.headSha || !existing.mergeSha) throw new Error(`Task ${task.id}: merged PR differs from persisted review`)
           await this.runtime.stop(task.sessionId)
@@ -290,7 +339,22 @@ export class CaptainController {
           await this.save(run); continue
         }
       }
-      if (Date.now() - Date.parse(task.startedAt) > run.config.maxTaskMinutes * 60000) {
+      if(task.status==='blocked'&&!task.resumeRequested) {
+        task.blockedSince ??= [...task.phases].reverse().find(p=>p.phase==='blocked')?.at ?? now()
+        if(Date.now()-Date.parse(task.blockedSince)>3600000) {
+          task.transitionVersion=(task.transitionVersion??0)+1;task.status='parked';task.parkedAt=now();task.parkReason=task.error??'Unresolved blocker'
+          task.executionActive=true;delete task.resumeRequested;this.phase(task,'parked','Blocked over one hour; preserved for prerequisite resolution');await this.save(run)
+        }
+      }
+      if(task.status==='parked') {
+        if(task.executionActive||task.parkingError) {
+          try {await this.runtime.stop(task.sessionId,'shutdown');task.executionActive=false;delete task.parkingError}
+          catch(error){task.parkingError=String(error)}
+          await this.save(run)
+        }
+        continue
+      }
+      if (Date.now() - Date.parse(task.startedAt) - (phaseDurations(task).parked??0) > run.config.maxTaskMinutes * 60000) {
         await this.runtime.stop(task.sessionId); task.status = 'failed'; task.error = 'Task time budget exhausted'; task.finishedAt = now(); this.phase(task, 'blocked', task.error); await this.save(run); continue
       }
       if (task.status === 'ready') { await this.integrate(run, task, provider); continue }
@@ -309,7 +373,7 @@ export class CaptainController {
       }
       if (task.status === 'starting') { await this.launch(run, task, provider); continue }
       if (task.phase!=='waiting'&&!run.questions.some(q=>q.taskId===task.id&&!q.answer)&&!await this.runtime.isRunning(task.sessionId) && Date.now() - Date.parse(task.lastWakeAt ?? task.startedAt) > 30000) {
-        if (task.idleCheckpointAt) { task.status = 'blocked'; task.error ??= 'Worker is idle after one recovery checkpoint; diagnose its team and pending work';this.phase(task,'blocked',task.error);await this.notifyBlocker(run,task) }
+        if (task.idleCheckpointAt) { task.status = 'blocked'; task.blockedSince ??= now(); task.error ??= 'Worker is idle after one recovery checkpoint; diagnose its team and pending work';this.phase(task,'blocked',task.error);await this.notifyBlocker(run,task) }
         else {
           task.idleCheckpointAt=now();task.recoveryAttempts = (task.recoveryAttempts ?? 0) + 1; task.lastWakeAt = now(); await this.save(run)
           await this.runtime.start(task, run)
@@ -355,8 +419,8 @@ export class CaptainController {
       if (isStopped(run) || this.disposed) return
       await this.runtime.start(task, run)
       if (isStopped(run) || this.disposed) { await this.runtime.stop(task.sessionId); return }
-      task.status = 'running'; task.lastWakeAt = now(); this.phase(task, 'analysis')
-    } catch (error) { task.status = 'blocked'; task.error = String(error); task.lastWakeAt = now(); this.phase(task, 'blocked', task.error) }
+      task.status = 'running'; delete task.blockedSince; task.lastWakeAt = now(); this.phase(task, 'analysis')
+    } catch (error) { task.status = 'blocked'; task.blockedSince ??= now(); task.error = String(error); task.lastWakeAt = now(); this.phase(task, 'blocked', task.error) }
     await this.save(run)
   }
 
@@ -372,7 +436,7 @@ export class CaptainController {
       if (!cached) (task.reviewHistory ??= []).push({ ...review, at: now() })
       await this.save(run)
       if (isStopped(run) || this.disposed) return
-      if (!review.passed) { await this.repair(run, task, review.findings.join('\n') || 'Verification/review failed'); return }
+      if (!review.passed) { await this.repair(run, task, review.findings.join('\n') || review.report || 'Verification/review failed'); return }
       task.headSha = review.headSha; this.phase(task, 'integration'); await this.save(run)
       let pr = await provider.ensurePullRequest(task); task.prUrl = pr.url; await this.save(run)
       if (!pr.merged) pr = await provider.inspectPullRequest(task)
@@ -398,7 +462,7 @@ export class CaptainController {
   private async repair(run: Run, task: Task, reason: string): Promise<void> {
     task.error = reason
     if (task.reviewRounds >= run.config.maxRepairRounds) {
-      task.status = 'blocked'; task.recoveryAttempts = run.config.maxRepairRounds; this.phase(task, 'blocked', 'Repair budget exhausted'); await this.save(run)
+      task.status = 'blocked'; task.blockedSince ??= now(); task.recoveryAttempts = run.config.maxRepairRounds; this.phase(task, 'blocked', 'Repair budget exhausted'); await this.save(run)
       await this.notify(run, `Ticket ${task.ticket.id} exhausted repair rounds. Evidence: ${reason}. Keep it blocked unless you have a specific new solution; no bypass of review or scope is permitted.`)
       return
     }
@@ -422,7 +486,8 @@ export class CaptainController {
     await Promise.all(run.tasks.filter(t => !TERMINAL.has(t.status)).map(async task => {
       try {
         await this.runtime.stop(task.sessionId,reason)
-        if (cancel) { task.status = 'cancelled'; this.phase(task, 'blocked', 'Stopped by user'); task.finishedAt = now() }
+        if (cancel && task.status!=='parked') { task.status = 'cancelled'; this.phase(task, 'blocked', 'Stopped by user'); task.finishedAt = now() }
+        if(task.status==='parked'){task.executionActive=false;delete task.parkingError}
       } catch (error) { const message = `${task.ticket.id}: ${String(error)}`; task.error = `Shutdown incomplete: ${message}`; errors.push(message) }
     }))
     if (errors.length) run.error = `Shutdown incomplete; repository ownership retained: ${errors.join('; ')}`
