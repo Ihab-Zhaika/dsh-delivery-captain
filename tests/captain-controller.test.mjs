@@ -450,11 +450,11 @@ test('blocked workers keep their teams and unchanged blockers never trigger assi
   assert.equal(f.messages.filter(m=>m.id==='captain').length,1);assert.equal(task.error,'Native fixture requires verified assessment')
 }))
 
-test('waiting for reports does not resend assignments to an idle parent',()=>fixture(async f=>{
+test('idle waiting teams enter a single hold without resending assignments',()=>fixture(async f=>{
   const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
   await f.controller.report(task.sessionId,{phase:'waiting',note:'Original members are working; waiting for their reports'})
   f.runtime.isRunning=async()=>false;task.lastWakeAt='2000-01-01'
-  await f.controller.tick();await f.controller.tick();assert.equal(f.starts.length,1);assert.equal(task.phase,'waiting')
+  await f.controller.tick();await f.controller.tick();assert.equal(f.starts.length,1);assert.equal(task.phase,'blocked');assert.equal(f.messages.filter(m=>m.id==='captain').length,1)
 }))
 
 test('acknowledged questions and delivered answers are not repeatedly sent',()=>fixture(async f=>{
@@ -797,4 +797,43 @@ test('a dependency hold persistence failure cannot enter the code repair wake la
     await f.controller.report(task.sessionId,{phase:'review',ready:true});await f.controller.tick()
     assert.equal(task.status,'blocked');assert.equal(task.reviewRounds,0);assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,0);assert.match(task.parkingError,/cleanup failed/)
   }finally{f.runtime.stop=stop;f.controller.store.save=save}
+}))
+test('idle waiting workers enter the blocker clock without a timer-only wake and can park',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'waiting',note:'CI member no longer executing; acceptance remains unmet'})
+  f.runtime.isRunning=async()=>false;task.lastWakeAt=new Date(Date.now()-61000).toISOString()
+  const starts=f.starts.length;await f.controller.tick()
+  assert.equal(task.status,'blocked');assert.ok(task.blockedSince);assert.equal(f.starts.length,starts);assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,0)
+  const since=task.blockedSince;await f.controller.tick();assert.equal(task.blockedSince,since)
+  task.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick();assert.equal(task.status,'parked');assert.equal(task.executionActive,false)
+}))
+
+test('waiting roots retain capacity while owned members execute or activity cannot be established',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'waiting',note:'Waiting on actual member work'});task.lastWakeAt=new Date(Date.now()-61000).toISOString()
+  f.runtime.isRunning=async()=>true;await f.controller.tick();assert.equal(task.status,'running');assert.equal(task.blockedSince,undefined)
+  f.runtime.isRunning=async()=>{throw new Error('Native activity unavailable')};await f.controller.tick();assert.equal(task.status,'running');assert.equal(task.blockedSince,undefined)
+}))
+
+test('a late implementation report cannot be overwritten by a stale idle-waiting observation',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'waiting'});task.lastWakeAt=new Date(Date.now()-61000).toISOString()
+  f.runtime.isRunning=async()=>{await f.controller.report(task.sessionId,{phase:'implementation',note:'Actual resumed work'});return false}
+  await f.controller.tick();assert.equal(task.status,'running');assert.equal(task.phase,'implementation');assert.equal(task.blockedSince,undefined)
+}))
+test('an idle waiting hold after concrete guided resumption starts a fresh blocker observation',()=>fixture(async f=>{
+  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Original blocked episode'});task.blockedSince=new Date(Date.now()-3601000).toISOString()
+  await f.controller.message('captain',task.id,'Concrete changed solution')
+  await f.controller.report(task.sessionId,{phase:'waiting',note:'Changed solution has now yielded'})
+  f.runtime.isRunning=async()=>false;task.lastWakeAt=new Date(Date.now()-61000).toISOString()
+  const before=Date.now();await f.controller.tick();assert.equal(task.status,'blocked');assert.ok(Date.parse(task.blockedSince)>=before)
+  await f.controller.tick();assert.equal(task.status,'blocked')
+}))
+test('unknown waiting-worker activity cannot stall independent ready delivery',()=>fixture(async f=>{
+  f.setTickets([ticket('1'),ticket('2')]);const run=await f.controller.start('captain',{...f.config,maxTickets:2,maxTaskMinutes:480});await f.controller.tick();const [waiting,ready]=run.tasks
+  await f.controller.report(waiting.sessionId,{phase:'waiting'});waiting.lastWakeAt=new Date(Date.now()-61000).toISOString()
+  await f.controller.report(ready.sessionId,{phase:'review',ready:true})
+  const isRunning=f.runtime.isRunning;f.runtime.isRunning=async id=>{if(id===waiting.sessionId)throw new Error('Native activity unavailable');return isRunning(id)}
+  await f.controller.tick();assert.equal(waiting.status,'running');assert.equal(ready.status,'merged');assert.ok(ready.closedAt)
 }))

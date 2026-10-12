@@ -536,6 +536,19 @@ export class CaptainController {
         continue
       }
       if (task.status === 'starting') { await this.launch(run, task, provider); continue }
+      if(task.status==='running'&&task.phase==='waiting'&&Date.now()-Date.parse(task.lastWakeAt??task.startedAt)>30000) {
+        const version=task.transitionVersion
+        let executing:boolean
+        try{executing=await this.runtime.isRunning(task.sessionId)}catch{continue}
+        if(isStopped(run)||this.disposed)return
+        if(task.transitionVersion!==version||task.status!=='running'||task.phase!=='waiting')continue
+        if(!executing) {
+          task.transitionVersion=(task.transitionVersion??0)+1
+          task.status='blocked';task.blockedSince=now();task.executionActive=false
+          task.error??='Worker and owned members are idle while waiting; diagnose unmet work or prerequisites before resumption'
+          this.phase(task,'blocked',task.error);await this.save(run);await this.notifyBlocker(run,task);continue
+        }
+      }
       if (task.phase!=='waiting'&&!run.questions.some(q=>q.taskId===task.id&&!q.answer)&&!await this.runtime.isRunning(task.sessionId) && Date.now() - Date.parse(task.lastWakeAt ?? task.startedAt) > 30000) {
         if (task.idleCheckpointAt) { task.status = 'blocked'; task.blockedSince ??= now(); task.error ??= 'Worker is idle after one recovery checkpoint; diagnose its team and pending work';this.phase(task,'blocked',task.error);await this.notifyBlocker(run,task) }
         else {
