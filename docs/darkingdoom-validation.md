@@ -13,7 +13,7 @@ Regressions cover independent repository scheduling during a long review, stale 
 - Windows, Node 24.15.0, DSH 0.2.0-rc.2, original AgentTeams 0.1.23, OCR installed v1.12.13.
 - `pnpm typecheck`: host and browser TypeScript passed.
 - `pnpm build`: host/browser artifacts built. The inherited DSH browser-loader contract requires CJS; tsdown's general ESM recommendation is expected.
-- `pnpm verify`: 160 tests passed, zero failures. Source/build artifact stamp matched.
+- `pnpm verify`: 166 tests passed, zero failures. Source/build artifact stamp matched.
 - Repository discovery: real temporary repositories, both remotes, remote default branch, repository plan order, full Azure iteration paths, safe metadata reads, missing authentication/defaults, and refusal to redirect a session to another repository.
 - Temporary real Git repositories: fetched target branch, isolated worktree/branch, idempotent adoption, dirty-worktree rejection and branch/target drift.
 - Provider contract fixtures: GitHub dependency closure and closing PRs; Azure native predecessors, custom workflow completion categories, acceptance fields, pagination, exact-head merge and remote policy checks.
@@ -74,3 +74,9 @@ Run Start now arms a run-owned native DSH same-session goal in the coordinator. 
 Tests cover goal creation/idempotency, foreign-goal refusal, waiting/wake/shutdown, preserved round counts, native blocked/completed stops, stale waiting after native human rearm, cold-agent activation revoked by Stop and lifecycle revision fences, coordinator-only lifecycle/waiting, admission rollback and Stop continuing worker cancellation after goal completion failure. Independent review found native rearm and cold-activation races; both received failing regression tests and fixes. This verifies loop admission/execution, not resolution of #371's external acceptance prerequisites or clean whole-plugin OCR.
 
 Final reload retained the same native goal identity and 256-round allowance; explicit Resume advanced admitted rounds from 1 to 2. Run status remained running, #448 merged, #371 blocked on its existing prerequisites. The first round exercised darkingdoom_wait and visibly entered quiet waiting, demonstrating event-driven idle behavior rather than repeated worker prompting.
+
+## Stopped configuration
+
+All 166 tests passed, including stopped-only/coordinator-only saves, identity/validation guards, concurrent Resume rejection, immutable task assignment settings, old verification gates versus new admissions, stopped duration preservation, clean/dirty form refresh and ticket-list submission parsing. Independent review's stale form and delimiter findings were fixed. Typechecks/build and generated artifact verification passed.
+
+The background Web host was reloaded only after the live flow was confirmed stopped. Its installed configure endpoint successfully saved the existing settings unchanged; run status remained stopped, task IDs/sessions/statuses/review history were unchanged, no worker prompt counts changed, and both historical tasks received immutable assignment snapshots. No delivery was resumed or admission scope expanded. Browser UI automation remains unavailable under the browser URL policy, so live visual verification is not claimed; source-rendered component regressions and authenticated host probes establish the respective boundaries.

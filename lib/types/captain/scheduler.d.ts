@@ -15,3 +15,4 @@ export declare function phaseDurations(task: Pick<Task, 'phases' | 'finishedAt'>
 /** Validate the UI/command payload without admitting arbitrary configuration fields. */
 export declare function validateConfig(raw: unknown): RunConfig;
 export declare function taskConfig(config: RunConfig, ticketId: string): RunConfig;
+export declare function taskDeliveryConfig(task: Pick<Task, 'ticket' | 'assignmentConfig'>, config: RunConfig): RunConfig;

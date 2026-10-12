@@ -105,3 +105,6 @@ export function taskConfig(config:RunConfig,ticketId:string):RunConfig {
   const commands=config.verifyCommandsByTicket?.[ticketId]
   return commands?{...config,verifyCommands:commands}:config
 }
+export function taskDeliveryConfig(task:Pick<Task,'ticket'|'assignmentConfig'>,config:RunConfig):RunConfig {
+  return taskConfig(task.assignmentConfig??config,task.ticket.id)
+}

@@ -16,7 +16,7 @@ import { prepareWorktree, resolveHead } from './worktrees.ts'
 import { isReviewCurrent, reviewTask } from './review.ts'
 import type { CommandRunner, Run, RunConfig, Task, WorkerRuntime } from './types.ts'
 import { originalTeamReceipt } from './team-receipt.ts'
-import { taskConfig } from './scheduler.ts'
+import { taskDeliveryConfig } from './scheduler.ts'
 import { CoordinatorLoop } from './coordinator-loop.ts'
 
 const loadedHost = (() => {
@@ -135,7 +135,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
   }
   async function registerWorkspace(task: Task, run: Run): Promise<void> {
     const workspace = await ctx.workspaceRegistry.create(task.worktree, `${basename(run.config.workspace ?? task.worktree)} · #${task.ticket.id}`)
-    await ctx.sessionController.create({ sessionId: task.sessionId as SessionId, workspaceId: workspace.id, agentPreset: run.config.workerPreset })
+    await ctx.sessionController.create({ sessionId: task.sessionId as SessionId, workspaceId: workspace.id, agentPreset: taskDeliveryConfig(task,run.config).workerPreset })
     task.workspaceId = workspace.id
     const inspection = await ctx.sessionController.inspect(task.sessionId as SessionId)
     const title = inspection.events.filter(event => event.type === 'session/title').at(-1)?.data as {title?: string; source?: {kind?: string}} | undefined
@@ -145,10 +145,11 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
   }
   async function attach(task: Task, run: Run): Promise<Agent> {
     stopped.delete(task.sessionId)
-    workers.set(task.sessionId, { task, config: taskConfig(run.config,task.ticket.id) })
+    const config=taskDeliveryConfig(task,run.config)
+    workers.set(task.sessionId, { task, config })
     await registerWorkspace(task, run)
     const agent = await resolveAgent(ctx, task.sessionId)
-    await configure(agent, task, run.config)
+    await configure(agent, task, config)
     const captain = run.captainSessionId ? ctx.agents.get(run.captainSessionId as SessionId) : undefined
     const projection = run.captainSessionId && typeof ctx.sessionController.projections === 'function'
       ? await ctx.sessionController.projections({ sessionId: run.captainSessionId as SessionId }, new AbortController().signal)
@@ -244,7 +245,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
         const content=event.data.content
         return content?.some(part=>part.type==='text'&&part.text?.startsWith('You are the DarKingDoom Plugin worker for one ticket.')&&part.text.includes(`Delivery task ${task.id}`))
       })
-      const text=assigned?workerResumePrompt(task):workerPrompt(task,taskConfig(run.config,task.ticket.id))
+      const text=assigned?workerResumePrompt(task):workerPrompt(task,taskDeliveryConfig(task,run.config))
       const key=assigned?`${task.id}:resume:${task.lastWakeAt??run.updatedAt??task.startedAt}`:`${task.id}:assignment`
       await ctx.sessionController.prompt({requestId:promptIdentity(key),sessionId:task.sessionId as SessionId,mode:'queue',content:[{type:'text',text}]},new AbortController().signal)
       task.assignmentDelivered=true

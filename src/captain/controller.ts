@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import type { FollowupInput, Phase, Question, Run, RunConfig, Task, TicketProvider, WorkerRuntime } from './types.ts'
-import { eligibility, validateConfig, taskConfig, phaseDurations } from './scheduler.ts'
+import { eligibility, validateConfig, taskDeliveryConfig, phaseDurations } from './scheduler.ts'
 import { RunStore } from './store.ts'
 
 const TERMINAL = new Set<Task['status']>(['merged', 'failed', 'cancelled'])
@@ -19,6 +19,7 @@ export class CaptainController {
   private readonly starting = new Set<string>()
   private readonly startingSessions = new Set<string>()
   private readonly activeProviders = new Map<string, TicketProvider>()
+  private readonly stoppingRuns = new Set<string>()
   private ticking?: Promise<void>
   private readonly runTicks = new Map<string, Promise<void>>()
   private disposed = false
@@ -35,6 +36,7 @@ export class CaptainController {
       // Workspace membership is independent of execution: retain completed and
       // stopped task histories under their worktrees without waking a model.
       let groupingChanged = false
+      if(isStopped(run)&&!run.stoppedAt){run.stoppedAt=run.updatedAt;groupingChanged=true}
       if (this.runtime.registerWorkspace) for (const task of run.tasks.filter(t => t.baseSha)) {
         const previousGrouping = JSON.stringify([task.workspaceId, task.workspaceError])
         try { await this.runtime.registerWorkspace(task, run); delete task.workspaceError }
@@ -148,8 +150,11 @@ export class CaptainController {
       await this.runtime.coordinatorLoop?.(run,'resume')
       if(run.coordinatorRevision!==revision||this.disposed)throw new Error('Run changed while activating resumption')
       run.status = 'running'
-      for (const t of run.tasks.filter(t => t.status === 'cancelled')) { t.status = 'blocked'; t.resumeRequested = true; delete t.finishedAt; t.recoveryAttempts = 0; delete t.lastWakeAt }
+      delete run.stoppedAt
+      for (const t of run.tasks.filter(t => t.status === 'cancelled'&&run.config.milestones.includes(t.ticket.milestone)&&(!run.config.ticketIds||run.config.ticketIds.includes(t.ticket.id)))) { t.status = 'blocked'; t.resumeRequested = true; delete t.finishedAt; t.recoveryAttempts = 0; delete t.lastWakeAt }
     } else if (action === 'stop') {
+      this.stoppingRuns.add(run.id)
+      try {
       run.status = 'stopped'
       await this.endLoop(run)
       this.activeProviders.get(run.id)?.cancel?.()
@@ -159,14 +164,34 @@ export class CaptainController {
       // A worker may still be inside create/start. Drain that operation before cancelling the final roster.
       await this.runTicks.get(run.id)
       const shutdownErrors = await this.drainWorkers(run, true)
+      run.stoppedAt=now()
       await this.save(run)
       // A tick may still be finishing an external call. Keep the repository lease until it quiesces.
       if (!shutdownErrors.length) await this.store.release(repositoryKey(run.config))
+      }finally{this.stoppingRuns.delete(run.id)}
     } else if(action==='loop') {
       if(run.status!=='running')throw new Error('Resume the run before starting the coordinator loop')
       await this.runtime.coordinatorLoop?.(run,'resume')
     } else throw new Error('Unknown captain control action')
     await this.save(run)
+    return run
+  }
+
+  async configure(sessionId:string,raw:unknown):Promise<Run> {
+    const run=this.captain(sessionId)
+    if(this.disposed||run.status!=='stopped'||this.stoppingRuns.has(run.id))throw new Error('Configuration can only be saved after the run has fully stopped')
+    const config=validateConfig(raw)
+    for(const key of ['provider','repository','workspace','remote','targetBranch','organization','project'] as const) {
+      if(config[key]!==run.config[key])throw new Error(`${key} is part of this run identity; use a new coordinator session to change it`)
+    }
+    const revision=run.coordinatorRevision
+    for(const task of run.tasks)if(task.status!=='merged'&&await this.runtime.isRunning(task.sessionId))throw new Error('A worker is still executing; finish Stop before saving configuration')
+    if(this.disposed||run.status!=='stopped'||this.stoppingRuns.has(run.id)||run.coordinatorRevision!==revision)throw new Error('Run changed while validating stopped configuration')
+    // Preserve original gates and policies even for legacy tasks created before snapshots.
+    for(const task of run.tasks)task.assignmentConfig??=structuredClone(run.config)
+    run.stoppedAt??=run.updatedAt
+    run.coordinatorRevision=(run.coordinatorRevision??0)+1
+    run.config=config;await this.save(run)
     return run
   }
 
@@ -388,7 +413,7 @@ export class CaptainController {
         }
         continue
       }
-      if (Date.now() - Date.parse(task.startedAt) - (phaseDurations(task).parked??0) > run.config.maxTaskMinutes * 60000) {
+      if (Date.now() - Date.parse(task.startedAt) - (phaseDurations(task).parked??0) > taskDeliveryConfig(task,run.config).maxTaskMinutes * 60000) {
         await this.runtime.stop(task.sessionId); task.status = 'failed'; task.error = 'Task time budget exhausted'; task.finishedAt = now(); this.phase(task, 'blocked', task.error); await this.save(run); continue
       }
       if (task.status === 'ready') { await this.integrate(run, task, provider); continue }
@@ -422,11 +447,11 @@ export class CaptainController {
     // Admission counts persisted attempts, including blocked/failed setup. A trial
     // must never substitute another ticket or reset its cap after a restart.
     if (run.config.maxTickets > 0 && run.tasks.length >= run.config.maxTickets && run.tasks.every(t => TERMINAL.has(t.status) && (t.status !== 'merged' || t.closedAt))) {
-      run.status = 'stopped'; await this.endLoop(run);await this.save(run); await this.store.release(repositoryKey(run.config)); return
+      run.status = 'stopped';run.stoppedAt=now(); await this.endLoop(run);await this.save(run); await this.store.release(repositoryKey(run.config)); return
     }
     // A parked blocker needs a new captain decision, not a timed assignment replay.
     if (run.status === 'draining' && this.activeCount(run) === 0) {
-      run.status = 'stopped'; await this.endLoop(run);await this.save(run); await this.store.release(repositoryKey(run.config)); return
+      run.status = 'stopped';run.stoppedAt=now(); await this.endLoop(run);await this.save(run); await this.store.release(repositoryKey(run.config)); return
     }
     if (run.status !== 'running' || this.disposed) { await this.save(run); return }
     const rows = eligibility(run.tickets, run.config.milestones, run.tasks)
@@ -438,7 +463,7 @@ export class CaptainController {
       const safe = ticket.id.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 40)
       const branch = `captain/${safe}-${id.slice(0,8)}`
       const repoHash = createHash('sha256').update(repositoryKey(run.config)).digest('hex').slice(0, 12)
-      const task: Task = { id, ticket, attempt, sessionId: randomUUID(), branch, worktree: join(dirname(run.config.workspace), '.delivery-worktrees', repoHash, id), baseSha: '', status: 'starting', phase: 'setup', phases: [{ phase: 'setup', at: startedAt }], startedAt, reviewRounds: 0, followups: [] }
+      const task: Task = { id, ticket, assignmentConfig:structuredClone(run.config), attempt, sessionId: randomUUID(), branch, worktree: join(dirname(run.config.workspace), '.delivery-worktrees', repoHash, id), baseSha: '', status: 'starting', phase: 'setup', phases: [{ phase: 'setup', at: startedAt }], startedAt, reviewRounds: 0, followups: [] }
       run.tasks.push(task); await this.save(run)
       await this.launch(run, task, provider)
     }
@@ -449,7 +474,7 @@ export class CaptainController {
     try {
       await provider.claim(task.ticket, run.id)
       if (isStopped(run) || this.disposed) return
-      await this.runtime.prepare(task, run.config); await this.save(run)
+      await this.runtime.prepare(task, taskDeliveryConfig(task,run.config)); await this.save(run)
       if (isStopped(run) || this.disposed) return
       await this.runtime.start(task, run)
       if (isStopped(run) || this.disposed) { await this.runtime.stop(task.sessionId); return }
@@ -464,7 +489,7 @@ export class CaptainController {
       await this.runtime.stop(task.sessionId)
       if (isStopped(run) || this.disposed) return
       const previous = task.reviewHistory?.at(-1)
-      const verification=taskConfig(run.config,task.ticket.id)
+      const verification=taskDeliveryConfig(task,run.config)
       const cached = previous?.passed && await this.runtime.isReviewCurrent?.(task, verification, previous)
       if (!cached) { this.phase(task, 'testing'); await this.save(run) }
       const review = cached && previous ? previous : await this.runtime.review(task, verification, async phase => { if (isStopped(run) || this.disposed) throw new Error('Run stopped'); this.phase(task, phase); await this.save(run) })
@@ -496,8 +521,9 @@ export class CaptainController {
   }
   private async repair(run: Run, task: Task, reason: string): Promise<void> {
     task.error = reason
-    if (task.reviewRounds >= run.config.maxRepairRounds) {
-      task.status = 'blocked'; task.blockedSince ??= now(); task.recoveryAttempts = run.config.maxRepairRounds; this.phase(task, 'blocked', 'Repair budget exhausted'); await this.save(run)
+    const repairLimit=taskDeliveryConfig(task,run.config).maxRepairRounds
+    if (task.reviewRounds >= repairLimit) {
+      task.status = 'blocked'; task.blockedSince ??= now(); task.recoveryAttempts = repairLimit; this.phase(task, 'blocked', 'Repair budget exhausted'); await this.save(run)
       await this.notify(run, `Ticket ${task.ticket.id} exhausted repair rounds. Evidence: ${reason}. Keep it blocked unless you have a specific new solution; no bypass of review or scope is permitted.`)
       return
     }

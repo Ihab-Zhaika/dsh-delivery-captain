@@ -65,6 +65,7 @@ export interface Question {
     lastNotifyAttemptAt?: string;
 }
 export interface Task {
+    assignmentConfig?: RunConfig;
     id: string;
     ticket: Ticket;
     attempt: string;
@@ -120,6 +121,7 @@ export interface Run {
     error?: string;
     lastPollAt?: string;
     recoveryPending?: boolean;
+    stoppedAt?: string;
     coordinatorGoalId?: string;
     coordinatorWaiting?: boolean;
     coordinatorLoopError?: string;

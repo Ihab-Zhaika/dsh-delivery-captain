@@ -160,6 +160,17 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       if (typeof body.sessionId !== 'string' || typeof body.action !== 'string' || body.parallelism !== undefined && typeof body.parallelism !== 'number') throw new Error('Invalid control payload')
       reply(res, 200, { run: await controller.control(body.sessionId, body.action, body.parallelism as number | undefined) })
     })
+    route('/api/darkingdoom/configure','POST',async(req,res)=>{
+      const body=await readJsonRequest(req)
+      if(typeof body.sessionId!=='string')throw new Error('Coordinator sessionId required')
+      const saved=controller.state(body.sessionId)
+      if(!saved||saved.captainSessionId!==body.sessionId||saved.status!=='stopped')throw new Error('Only a stopped coordinator can save configuration')
+      const revision=saved.coordinatorRevision
+      const updated=validateConfig(body.config)
+      const context=await repositoryContext(body.sessionId,saved.config.provider)
+      if(saved.coordinatorRevision!==revision||saved.status!=='stopped')throw new Error('Run changed while checking repository configuration')
+      reply(res,200,{run:await controller.configure(body.sessionId,bindRepositoryConfig(context,updated))})
+    })
     route('/api/darkingdoom/resume-task','POST',async(req,res)=>{
       const body=await readJsonRequest(req)
       if(typeof body.sessionId!=='string'||typeof body.taskId!=='string'||typeof body.evidence!=='string')throw new Error('Task resumption needs coordinator identity, task identity and changed prerequisite evidence')

@@ -27,6 +27,8 @@ export declare function captainActionAvailability(status: Run['status'] | undefi
     stop: boolean;
     parallelism: boolean;
 };
+export declare function configurationEditable(status: Run['status'] | undefined, loaded: boolean, busy: boolean, worker: boolean): boolean;
+export declare function shouldHydrateConfiguration(previousRunId: string | null, runId: string, dirty: boolean, previousConfig: string, currentConfig: string): boolean;
 /** Export data rather than interpreting a report string as a URL or HTML. */
 export declare function reviewExport(task: Pick<Task, 'id' | 'ticket'>, review: ReviewEvidence): string;
 export declare function CaptainReviewEvidence({ task }: {
@@ -59,6 +61,7 @@ export declare function phaseDurations(task: Pick<Task, 'phases' | 'finishedAt'>
     milliseconds: number;
 }[];
 export declare function webUrl(value: string | undefined): string | undefined;
+export declare function parseTicketSelection(value: string): string[] | undefined;
 export declare function CaptainPanel({ sessionId, workspace, onClose, openSession, initialSnapshot }: CaptainOpenDetail & {
     onClose: () => void;
     openSession: (parentId: string, childId: string) => Promise<unknown>;

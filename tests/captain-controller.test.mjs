@@ -60,6 +60,40 @@ test('worker view contains only its task, origin and questions; controls stay co
   await assert.rejects(f.controller.control(task.sessionId,'stop'),/captain/)
 }))
 
+test('stopped configuration saves future settings without waking workers or altering existing contracts',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,ticketIds:['1'],maxTickets:1});await f.controller.tick()
+  const task=run.tasks[0],oldCommands=[...run.config.verifyCommands],ids=[task.id,task.sessionId,run.id]
+  await f.controller.control('captain','stop');const starts=f.starts.length
+  const stoppedAt=run.stoppedAt??run.updatedAt
+  await f.controller.configure('captain',{...run.config,ticketIds:undefined,maxTickets:0,parallelism:1,verifyCommands:['new gate']})
+  assert.equal(run.status,'stopped');assert.equal(run.config.maxTickets,0);assert.equal(run.config.ticketIds,undefined);assert.equal(f.starts.length,starts)
+  assert.equal(run.stoppedAt,stoppedAt)
+  assert.deepEqual(task.assignmentConfig.verifyCommands,oldCommands);assert.deepEqual([task.id,task.sessionId,run.id],ids)
+  await f.controller.control('captain','resume');await f.controller.tick()
+  let reviewed=[];f.runtime.review=async(t,c)=>{reviewed.push(c.verifyCommands);return{passed:true,headSha:'head',findings:[],report:'pass'}}
+  await f.controller.report(task.sessionId,{phase:'testing',ready:true});await f.controller.tick()
+  assert.deepEqual(reviewed,[oldCommands]);assert.equal(task.status,'merged')
+  const next=run.tasks.find(t=>t.ticket.id==='2');assert.deepEqual(next.assignmentConfig.verifyCommands,['new gate'])
+}))
+
+test('configuration is coordinator-only, stopped-only and cannot redirect existing task identities',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',f.config);await f.controller.tick()
+  await assert.rejects(f.controller.configure('captain',run.config),/stopped/i)
+  await f.controller.control('captain','stop')
+  await assert.rejects(f.controller.configure(run.tasks[0].sessionId,run.config),/captain/i)
+  for(const patch of [{repository:'other/repo'},{provider:'azure',organization:'https://dev.azure.com/org',project:'project'},{workspace:join(f.dir,'elsewhere')},{remote:'other'},{targetBranch:'other'}])await assert.rejects(f.controller.configure('captain',{...run.config,...patch}),/identity|same run/i)
+  await assert.rejects(f.controller.configure('captain',{...run.config,parallelism:0}),/parallelism/)
+}))
+
+test('saving configuration rejects concurrent Resume and leaves existing settings intact',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',f.config);await f.controller.tick();await f.controller.control('captain','stop')
+  let release,entered;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+  f.runtime.isRunning=async()=>{entered();await gate;return false}
+  const pending=f.controller.configure('captain',{...run.config,parallelism:7});await started
+  await f.controller.control('captain','resume');release()
+  await assert.rejects(pending,/changed|stopped/i);assert.equal(run.config.parallelism,2)
+}))
+
 test('blocking over one hour parks without archiving, frees capacity, and does not unlock dependencies',()=>fixture(async f=>{
   f.setTickets([ticket('1'),ticket('2'),ticket('4','M1',['1']),ticket('3','M2')])
   const run=await f.controller.start('captain',{...f.config,parallelism:1,maxTaskMinutes:480});await f.controller.tick()

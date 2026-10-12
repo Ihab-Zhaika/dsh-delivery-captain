@@ -149,6 +149,28 @@ test('stopped runs can resume but cannot start a replacement run', () => {
   }
 })
 
+test('stopped coordinator configuration is editable with Save and explicit visible ticket selection',()=>{
+  const run={id:'run',captainSessionId:'main',status:'stopped',config:{parallelism:2},tasks:[],tickets:[],questions:[],createdAt:new Date().toISOString()}
+  const html=renderToStaticMarkup(createElement(ui.CaptainPanel,{sessionId:'main',onClose(){},openSession:async()=>{},initialSnapshot:{run,role:'coordinator'}}))
+  assert.doesNotMatch(html,/<fieldset disabled/);assert.match(html,/Save configuration/);assert.match(html,/Ticket IDs/)
+  assert.equal(ui.configurationEditable('stopped',true,false,false),true)
+  for(const status of ['running','paused','draining'])assert.equal(ui.configurationEditable(status,true,false,false),false)
+  assert.equal(ui.configurationEditable('stopped',true,false,true),false)
+})
+
+test('clean stopped drafts hydrate same-run server changes while dirty drafts survive polling',()=>{
+  assert.equal(ui.shouldHydrateConfiguration('run','run',false,'parallelism2','parallelism5'),true)
+  assert.equal(ui.shouldHydrateConfiguration('run','run',true,'parallelism2','parallelism5'),false)
+  assert.equal(ui.shouldHydrateConfiguration('run','run',false,'parallelism5','parallelism5'),false)
+  assert.equal(ui.shouldHydrateConfiguration('old','new',true,'old','new'),true)
+})
+
+test('ticket selection parses on submission, preserving free-form delimiters while typing',()=>{
+  assert.deepEqual(ui.parseTicketSelection('1, 2\n3'),['1','2','3'])
+  assert.equal(ui.parseTicketSelection(' , \n'),undefined)
+  assert.deepEqual(ui.parseTicketSelection('1,1'),['1','1']) // Validation must reject duplicates; never silently change scope.
+})
+
 test('review history exposes commit, findings, safe text excerpt and downloadable evidence', () => {
   const task = { id: 'task-1', ticket: { id: '42' }, reviewHistory: [{ at: '2026-01-01T00:00:00Z', passed: false, headSha: 'abcdef', findings: ['Fix escaping'], report: '<script>alert(1)</script>' }] }
   const html = renderToStaticMarkup(createElement(ui.CaptainReviewEvidence, { task }))

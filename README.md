@@ -137,3 +137,11 @@ The captain prompt section is empty in ordinary sessions. Activated captains rec
 ## License
 
 MIT; original attribution retained. New orchestration is maintained in this fork.
+
+## Edit a stopped run
+
+After Stop finishes, open **Configuration**, edit operational settings and choose **Save configuration**. Save keeps the run stopped; use **Monitor → Resume** separately when ready. Existing task sessions, worktrees, review history and original assignment gates remain intact. Team size, preset, verification and execution/repair limits are captured at assignment and do not retroactively weaken old tickets. Revised settings apply to future admissions; the global parallel limit applies to the resumed scheduler.
+
+**Ticket IDs** is now visible. A trial may have both an admission cap and a ticket allowlist: set Ticket limit to 0 and clear Ticket IDs for continuous eligible intake. This does not bypass milestones or dependencies, reset past admission counts, or automatically unpark tasks. Cancelled tasks outside an updated explicit ticket/milestone selection remain cancelled. Source/repository/remote/target identity is fixed for the run; use another coordinator chat to switch tracker or repository identity.
+
+Configuration remains locked while running, paused or draining and in worker chats. Save verifies native execution is quiescent and rejects concurrent lifecycle changes. Clean form values update from the saved configuration; dirty drafts survive polling. Save is required before resuming with unsaved form changes. Editing stopped settings does not extend the recorded stopped wall time.

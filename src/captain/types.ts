@@ -27,6 +27,7 @@ export interface RepositoryContext {
 export interface PhaseEvent { phase: Phase; at: string; note?: string }
 export interface Question { id: string; taskId: string; question: string; createdAt: string; answer?: string; action?: 'resume' | 'wait'; answeredAt?: string; deliveredAt?: string; recordedAt?: string; notifiedAt?: string; lastNotifyAttemptAt?: string }
 export interface Task {
+  assignmentConfig?:RunConfig;
   id: string; ticket: Ticket; attempt: string; sessionId: string;
   branch: string; worktree: string; baseSha: string; headSha?: string; workspaceId?: string; workspaceError?: string;
   status: 'starting' | 'running' | 'blocked' | 'parked' | 'ready' | 'merged' | 'failed' | 'cancelled';
@@ -47,6 +48,7 @@ export interface Run {
   createdAt: string; updatedAt: string; tasks: Task[]; tickets: Ticket[];
   questions: Question[]; error?: string; lastPollAt?: string;
   recoveryPending?: boolean;
+  stoppedAt?:string;
   coordinatorGoalId?:string; coordinatorWaiting?:boolean; coordinatorLoopError?:string; coordinatorRevision?:number;
 }
 export type CoordinatorLoopAction='start'|'resume'|'pause'|'stop'|'shutdown'|'wait'|'wake';

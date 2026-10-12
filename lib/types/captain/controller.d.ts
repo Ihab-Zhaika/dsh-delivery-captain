@@ -10,6 +10,7 @@ export declare class CaptainController {
     private readonly starting;
     private readonly startingSessions;
     private readonly activeProviders;
+    private readonly stoppingRuns;
     private ticking?;
     private readonly runTicks;
     private disposed;
@@ -43,6 +44,7 @@ export declare class CaptainController {
             error?: string;
             lastPollAt?: string;
             recoveryPending?: boolean;
+            stoppedAt?: string;
             coordinatorGoalId?: string;
             coordinatorWaiting?: boolean;
             coordinatorLoopError?: string;
@@ -74,6 +76,7 @@ export declare class CaptainController {
             error?: string;
             lastPollAt?: string;
             recoveryPending?: boolean;
+            stoppedAt?: string;
             coordinatorGoalId?: string;
             coordinatorWaiting?: boolean;
             coordinatorLoopError?: string;
@@ -88,6 +91,7 @@ export declare class CaptainController {
     private phase;
     start(sessionId: string, raw: unknown): Promise<Run>;
     control(sessionId: string, action: string, parallelism?: number): Promise<Run>;
+    configure(sessionId: string, raw: unknown): Promise<Run>;
     wait(sessionId: string): Promise<void>;
     loopState(sessionId: string): import("./types.ts").CoordinatorLoopState | null;
     report(sessionId: string, report: {

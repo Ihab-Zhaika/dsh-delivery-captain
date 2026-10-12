@@ -6,7 +6,7 @@ import css from './CaptainPanel.module.css'
 export interface CaptainOpenDetail { sessionId: string; workspace?: string }
 interface Eligibility { ticketId: string; eligible: boolean; reason: string; state?: string; predecessors?: string[] }
 interface Snapshot { run: Run | null; eligibility?: Eligibility[]; role?: 'idle'|'coordinator'|'worker'; coordinatorSessionId?: string | null; coordinatorLoop?:CoordinatorLoopState|null }
-type Action = 'pause' | 'resume' | 'drain' | 'stop' | 'parallelism' | 'loop'
+type Action = 'pause' | 'resume' | 'drain' | 'stop' | 'parallelism' | 'loop' | 'save'
 type ReviewEvidence = NonNullable<Task['reviewHistory']>[number]
 
 /** A stopped run retains its identity and claims; only Resume reactivates it. */
@@ -21,6 +21,12 @@ export function captainActionAvailability(status: Run['status'] | undefined, loa
     stop: available && active,
     parallelism: available && active,
   }
+}
+export function configurationEditable(status:Run['status']|undefined,loaded:boolean,busy:boolean,worker:boolean):boolean {
+  return loaded&&!busy&&!worker&&(status===undefined||status==='stopped')
+}
+export function shouldHydrateConfiguration(previousRunId:string|null,runId:string,dirty:boolean,previousConfig:string,currentConfig:string):boolean {
+  return previousRunId!==runId||!dirty&&previousConfig!==currentConfig
 }
 
 /** Export data rather than interpreting a report string as a URL or HTML. */
@@ -116,6 +122,10 @@ function defaults(workspace = ''): RunConfig {
   return { provider: 'github', repository: '', workspace, milestones: [], remote: '', targetBranch: '', parallelism: 2, maxTickets: 0, maxTeamMembers: 4, pollSeconds: 30, maxRepairRounds: 3, maxTaskMinutes: 120, verifyCommands: [], workerPreset: 'standard', requireBrowser: false, requireMemory: false }
 }
 function lines(value: string): string[] { return value.split(/\r?\n/).map(line => line.trim()).filter(Boolean) }
+export function parseTicketSelection(value:string):string[]|undefined {
+  const ids=value.split(/[\s,]+/).filter(Boolean)
+  return ids.length?ids:undefined
+}
 function terminal(task: Task): boolean { return ['merged', 'failed', 'cancelled'].includes(task.status) }
 async function request<T>(url: string, signal: AbortSignal, body?: unknown): Promise<T> {
   const response = await fetch(url, { signal, credentials: 'same-origin', ...(body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) })
@@ -129,16 +139,19 @@ async function request<T>(url: string, signal: AbortSignal, body?: unknown): Pro
 
 export function CaptainPanel({ sessionId, workspace, onClose, openSession, initialSnapshot }: CaptainOpenDetail & { onClose: () => void; openSession: (parentId: string, childId: string) => Promise<unknown>; initialSnapshot?:Snapshot }) {
   const [snapshot, setSnapshot] = useState<Snapshot>(initialSnapshot??{ run: null })
-  const [config, setConfig] = useState<RunConfig>(() => defaults(workspace))
+  const [config, setConfig] = useState<RunConfig>(() => ({...defaults(workspace),...initialSnapshot?.run?.config}))
   const [milestones, setMilestones] = useState('')
   const [commands, setCommands] = useState('')
+  const [ticketSelection,setTicketSelection]=useState(initialSnapshot?.run?.config.ticketIds?.join(', ')??'')
   const [busy, setBusy] = useState(false)
-  const [loaded, setLoaded] = useState(false)
+  const [loaded, setLoaded] = useState(!!initialSnapshot)
   const [repository, setRepository] = useState<RepositoryContext | null>(null)
   const [contextLoading, setContextLoading] = useState(true)
   const [source, setSource] = useState<RunConfig['provider']>()
   const [view, setView] = useState<'configuration' | 'monitor'>('configuration')
   const [error, setError] = useState<string | null>(null)
+  const [notice,setNotice]=useState<string|null>(null)
+  const [dirty,setDirty]=useState(false)
   const [now, setNow] = useState(Date.now())
   const [selected, setSelected] = useState<string | null>(null)
   const [parallelism, setParallelism] = useState(2)
@@ -147,27 +160,33 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
   const generation = useRef(0)
   const mutation = useRef(false)
   const hydrated = useRef<string | null>(null)
+  const hydratedConfig=useRef('')
+  const draftDirty=useRef(false)
   const commandsEdited = useRef(false)
   const run = snapshot.run
   const worker=snapshot.role==='worker'||!!run&&run.captainSessionId!==sessionId
   const allowed = captainActionAvailability(run?.status, loaded, busy)
+  const editable=configurationEditable(run?.status,loaded,busy,worker)
   const task = worker?run?.tasks[0]:run?.tasks.find(item => item.id === selected)
-  const set = <K extends keyof RunConfig>(key: K, value: RunConfig[K]) => setConfig(previous => ({ ...previous, [key]: value }))
+  const markDirty=()=>{draftDirty.current=true;setDirty(true)}
+  const set = <K extends keyof RunConfig>(key: K, value: RunConfig[K]) => {markDirty();setConfig(previous => ({ ...previous, [key]: value }))}
 
   useEffect(() => {
-    if (!loaded || run) return
+    if (!loaded || worker || run&&run.status!=='stopped') return
     const abort = new AbortController()
     setContextLoading(true)
-    void request<RepositoryContext>(`/api/darkingdoom/context?sessionId=${encodeURIComponent(sessionId)}${source ? `&provider=${source}` : ''}`, abort.signal).then(value => {
-      if (abort.signal.aborted || hydrated.current) return
+    const provider=run?.config.provider??source
+    void request<RepositoryContext>(`/api/darkingdoom/context?sessionId=${encodeURIComponent(sessionId)}${provider ? `&provider=${provider}` : ''}`, abort.signal).then(value => {
+      if (abort.signal.aborted) return
       setRepository(value)
+      if(run||hydrated.current)return
       setConfig(previous => ({ ...previous, provider:value.config.provider, workspace:value.config.workspace, repository:value.config.repository, organization:value.config.organization, project:value.config.project, remote:value.config.remote, targetBranch:value.config.targetBranch, query:undefined }))
       setMilestones(value.config.milestones.join('\n'))
       if (!commandsEdited.current) setCommands(value.config.verifyCommands.join('\n'))
     }).catch(cause => { if (!abort.signal.aborted) { setRepository(null); setError(String(cause instanceof Error ? cause.message : cause)) } })
       .finally(() => { if (!abort.signal.aborted) setContextLoading(false) })
     return () => abort.abort()
-  }, [loaded, !!run, sessionId, source])
+  }, [loaded, run?.status, sessionId, source,worker])
 
   const refresh = useCallback(async (signal: AbortSignal) => {
     const version = ++generation.current
@@ -176,13 +195,17 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
     if (signal.aborted || version !== generation.current) return
     setSnapshot(value)
     setLoaded(true)
-    if (value.run && hydrated.current !== value.run.id) {
+    if (value.run && shouldHydrateConfiguration(hydrated.current,value.run.id,draftDirty.current,hydratedConfig.current,JSON.stringify(value.run.config))) {
+      const newRun=hydrated.current!==value.run.id
       hydrated.current = value.run.id
+      hydratedConfig.current=JSON.stringify(value.run.config)
+      draftDirty.current=false;setDirty(false)
       setConfig(value.run.config)
       setMilestones(value.run.config.milestones.join('\n'))
       setCommands(value.run.config.verifyCommands.join('\n'))
+      setTicketSelection(value.run.config.ticketIds?.join(', ')??'')
       setParallelism(value.run.config.parallelism)
-      setView('monitor')
+      if(newRun)setView('monitor')
     }
   }, [sessionId])
 
@@ -206,14 +229,20 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
     if (!signal || mutation.current) return
     mutation.current = true; generation.current++; setBusy(true)
     try {
-      await request(action ? '/api/darkingdoom/control' : '/api/darkingdoom/start', signal, action
+      const value=await request<{run:Run}>(action==='save'?'/api/darkingdoom/configure':action ? '/api/darkingdoom/control' : '/api/darkingdoom/start', signal, action&&action!=='save'
         ? { sessionId, action, ...(action === 'parallelism' ? { parallelism } : {}) }
-        : { sessionId, config: { ...config, milestones: lines(milestones), verifyCommands: lines(commands) } })
+        : { sessionId, config: { ...config, ticketIds:parseTicketSelection(ticketSelection), milestones: lines(milestones), verifyCommands: lines(commands) } })
+      if(action==='save') {
+        draftDirty.current=false;setDirty(false);hydratedConfig.current=JSON.stringify(value.run.config)
+        setConfig(value.run.config);setMilestones(value.run.config.milestones.join('\n'));setCommands(value.run.config.verifyCommands.join('\n'));setParallelism(value.run.config.parallelism)
+        setTicketSelection(value.run.config.ticketIds?.join(', ')??'')
+        setNotice('Configuration saved. The run is still stopped; choose Resume when ready.')
+      }
       await refresh(signal)
     } catch (cause) { if (!signal.aborted) setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { mutation.current = false; if (!signal.aborted) setBusy(false) }
   }
-  function start(event: FormEvent) { event.preventDefault(); void mutate() }
+  function start(event: FormEvent) { event.preventDefault(); void mutate(run?.status==='stopped'?'save':undefined) }
   async function navigate(childId: string) {
     try { await openSession(sessionId, childId) } catch (cause) { setError(`Could not open worker session: ${String(cause)}`) }
   }
@@ -238,6 +267,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
       <div className={css.owner}>Session <code>{sessionId}</code><span>Opening this panel never starts a run.</span></div>
       {worker && <div className={css.origin}><span>Initiated by coordination session</span><button type="button" onClick={()=>void navigate(run!.captainSessionId)}>{run!.captainSessionId} ↗</button><small>This worker view is read-only. Run controls belong to the coordinator.</small></div>}
       {error && <div className={css.error} role="alert"><span>{error}</span><button type="button" onClick={() => setError(null)}>Dismiss</button></div>}
+      {notice&&<div className={css.origin} role="status"><span>{notice}</span><button type="button" onClick={()=>setNotice(null)}>Dismiss</button></div>}
       {run?.error && <div className={css.error} role="alert">Captain: {run.error}</div>}
       {!worker&&run?.coordinatorLoopError&&<div className={css.error} role="alert">{run.coordinatorLoopError}</div>}
       {!worker&&run&&<div className={css.origin} aria-label="Coordinator loop"><strong>Coordinator loop: {snapshot.coordinatorLoop?.status==='active'&&snapshot.coordinatorLoop.activation!=='armed'?'needs Resume':snapshot.coordinatorLoop?.status??'not started'}</strong><small>{snapshot.coordinatorLoop?.maxGoalRounds?`Native DSH goal · ${snapshot.coordinatorLoop.roundsStarted??0} / ${snapshot.coordinatorLoop.maxGoalRounds} rounds`:'Start or Resume enables native loop mode in this main chat.'}{snapshot.coordinatorLoop?.status==='waiting'?' · Quietly awaiting new delivery events':''}</small>{snapshot.coordinatorLoop?.reason&&<p>{snapshot.coordinatorLoop.reason}</p>}{run.status==='running'&&snapshot.coordinatorLoop?.activation!=='armed'&&<button type="button" disabled={busy||!loaded} onClick={()=>void mutate('loop')}>{snapshot.coordinatorLoop?.status==='waiting'?'Wake coordinator':'Start coordinator loop'}</button>}</div>}
@@ -246,16 +276,17 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
         {!worker && <aside hidden={view!=='configuration'} className={css.configuration}><div className={css.sectionTitle}><h2>Run configuration</h2><span>{run ? 'Saved run configuration' : contextLoading ? 'Loading repository configuration…' : 'From the current session repository'}</span></div>
           {!run && repository?.warnings.map((warning,index) => <p className={css.muted} key={index}>{warning}</p>)}
           <form onSubmit={start}>
-            <fieldset disabled={!!run || busy || !loaded} className={css.fields}>
-              <label>Ticket source<select disabled={contextLoading && loaded} value={config.provider} onChange={event => { setContextLoading(true); setSource(event.target.value as RunConfig['provider']) }}><option value="github" disabled={repository ? !repository.providers.includes('github') : false}>GitHub Issues</option><option value="azure" disabled={repository ? !repository.providers.includes('azure') : false}>Azure DevOps</option></select></label>
+            <fieldset disabled={!editable} className={css.fields}>
+              <label>Ticket source<select disabled={!!run||contextLoading && loaded} value={config.provider} onChange={event => { setContextLoading(true); setSource(event.target.value as RunConfig['provider']) }}><option value="github" disabled={repository ? !repository.providers.includes('github') : false}>GitHub Issues</option><option value="azure" disabled={repository ? !repository.providers.includes('azure') : false}>Azure DevOps</option></select></label>
               <label>Repository<input required readOnly value={config.repository} placeholder="Detected from this session" /></label>
               <label>Workspace<input required readOnly value={config.workspace} placeholder="Current session repository" /></label>
               {config.provider === 'azure' && <><label>Organization URL<input required readOnly value={config.organization ?? ''} /></label><label>Project<input required readOnly value={config.project ?? ''} /></label></>}
               <label>Query <span className={css.optional}>(optional)</span><textarea rows={2} value={config.query ?? ''} onChange={event => set('query', event.target.value)} placeholder={config.provider === 'azure' ? 'WIQL query' : 'Additional issue search filters'} /></label>
-              <label>Milestones, in delivery order<textarea disabled={contextLoading} required rows={3} value={milestones} onChange={event => setMilestones(event.target.value)} placeholder="Detected delivery milestones" /><small>{repository?.milestoneSource || 'One exact milestone name per line.'}</small></label>
+              <label>Ticket IDs <span className={css.optional}>(optional)</span><input value={ticketSelection} onChange={event=>{markDirty();setTicketSelection(event.target.value)}} placeholder="All eligible tickets" /><small>Separate IDs with commas. Blank allows all eligible tickets; milestone and dependency gates still apply.</small></label>
+              <label>Milestones, in delivery order<textarea disabled={contextLoading} required rows={3} value={milestones} onChange={event => {markDirty();setMilestones(event.target.value)}} placeholder="Detected delivery milestones" /><small>{repository?.milestoneSource || 'One exact milestone name per line.'}</small></label>
               <div className={css.pair}><label>Remote<input required readOnly value={config.remote} /></label><label>Target branch<input required readOnly value={config.targetBranch} /></label></div>
               <div className={css.pair}><label>Parallel tickets<input required type="number" min={1} max={32} value={config.parallelism} onChange={event => set('parallelism', Number(event.target.value))} /></label><label>Members / team<input required type="number" min={1} max={16} value={config.maxTeamMembers} onChange={event => set('maxTeamMembers', Number(event.target.value))} /></label></div>
-              <label>Verification commands<textarea disabled={contextLoading} required rows={3} value={commands} onChange={event => { commandsEdited.current = true; setCommands(event.target.value) }} placeholder="Detected repository checks" /><small>{repository?.verificationSource || 'One host command per line, run in each task worktree.'}</small></label>
+              <label>Verification commands<textarea disabled={contextLoading} required rows={3} value={commands} onChange={event => { markDirty();commandsEdited.current = true; setCommands(event.target.value) }} placeholder="Detected repository checks" /><small>{repository?.verificationSource || 'One host command per line, run in each task worktree.'}</small></label>
               <details><summary>Execution limits & verification</summary><div className={css.fields}>
                 <div className={css.pair}><label>Poll seconds<input required type="number" min={5} max={3600} value={config.pollSeconds} onChange={event => set('pollSeconds', Number(event.target.value))} /></label><label>Repair rounds<input required type="number" min={0} max={20} value={config.maxRepairRounds} onChange={event => set('maxRepairRounds', Number(event.target.value))} /></label></div>
                 <label>Task timeout (minutes)<input required type="number" min={1} max={1440} value={config.maxTaskMinutes} onChange={event => set('maxTaskMinutes', Number(event.target.value))} /></label>
@@ -266,8 +297,8 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
               </div></details>
             </fieldset>
             <p className={css.authorization}>Start enables the native coordinator loop in this chat and authorizes full access execution, autonomous repair, review, merge and ticket closure within this configuration. The captain answers worker questions automatically.</p>
-            <button type="submit" className={css.primary} disabled={!allowed.start || contextLoading || !repository || !config.targetBranch || !lines(milestones).length || lines(milestones).some(name=>!repository.milestoneCatalog.includes(name)) || !lines(commands).length}>{busy ? 'Applying…' : run ? 'Run already created' : 'Start DarKingDoom Plugin'}</button>
-            {run?.status === 'stopped' && <p className={css.muted}>Use Resume to continue this saved run with its existing tasks and claims.</p>}
+            <button type="submit" className={css.primary} disabled={!(run?.status==='stopped'?editable:allowed.start) || contextLoading || !repository || !config.targetBranch || !lines(milestones).length || lines(milestones).some(name=>!repository.milestoneCatalog.includes(name)) || !lines(commands).length}>{busy ? 'Applying…' : run?.status==='stopped'?'Save configuration':run ? 'Run already created' : 'Start DarKingDoom Plugin'}</button>
+            {run?.status === 'stopped' && <p className={css.muted}>Save changes, then use Resume in Monitor. History, parked tasks and existing task contracts are preserved; new settings apply to future tickets. Source, repository and target identity stay bound to this run.</p>}
             {!loaded && <p className={css.muted}>Loading saved run before enabling Start…</p>}
           </form>
         </aside>}
@@ -275,19 +306,20 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
           {worker && task && <section className={css.card}><div className={css.sectionTitle}><h2>#{task.ticket.id} · {task.ticket.title}</h2><span className={css.status} data-status={task.status}>{task.status}</span></div><div className={css.metrics}><div><span>Total task elapsed</span><strong>{duration(elapsedMs(task.startedAt,task.finishedAt,now))}</strong><small>Includes blocked and parked waiting</small></div><div><span>Current phase</span><strong>{task.phase}</strong><small>{task.finishedAt?'Finished':'Ongoing'}</small></div></div>{task.parkReason&&task.status==='parked'&&<p className={css.authorization}>Parked: {task.parkReason}. Waiting for a changed prerequisite or human help.</p>}</section>}
           {!worker && <>
           <div className={css.metrics}>
-            <div><span>Wall time</span><strong>{run ? duration(elapsedMs(run.createdAt, run.status === 'stopped' ? run.updatedAt : undefined, now)) : '—'}</strong><small>Includes waiting & pauses</small></div>
+            <div><span>Wall time</span><strong>{run ? duration(elapsedMs(run.createdAt, run.status === 'stopped' ? run.stoppedAt??run.updatedAt : undefined, now)) : '—'}</strong><small>Includes waiting & pauses</small></div>
             <div><span>Active tasks / parallel limit</span><strong>{working}<em> / {run?.config.parallelism ?? config.parallelism}</em></strong><small>{merged} merged · {run?.tasks.filter(item=>item.status==='blocked').length??0} blocked · {run?.tasks.filter(item=>item.status==='parked').length??0} parked</small></div>
             <div><span>Task elapsed, summed</span><strong>{run ? duration(totalTaskTime) : '—'}</strong><small>Overlaps; includes waiting</small></div>
             <div><span>Active agent effort</span><strong className={css.unmeasured}>Not measured</strong><small>No runtime effort telemetry</small></div>
           </div>
           <div className={css.controls} aria-label="Run controls">
             <button disabled={!allowed.pause} onClick={() => void mutate('pause')}>Pause</button>
-            <button disabled={!allowed.resume} onClick={() => void mutate('resume')}>Resume</button>
+            <button disabled={!allowed.resume||dirty} onClick={() => void mutate('resume')} title={dirty?'Save configuration before resuming':undefined}>Resume</button>
             <button disabled={!allowed.drain} onClick={() => void mutate('drain')} title="Finish active work without taking more tickets">Drain</button>
             <button className={css.danger} disabled={!allowed.stop} onClick={() => void mutate('stop')}>Stop</button>
             <label>Parallelism<input aria-label="Live parallelism" type="number" min={1} max={32} value={parallelism} disabled={!allowed.parallelism} onChange={event => setParallelism(Number(event.target.value))} /></label>
             <button disabled={!allowed.parallelism || !Number.isInteger(parallelism) || parallelism < 1 || parallelism > 32} onClick={() => void mutate('parallelism')}>Apply</button>
           </div>
+          {dirty&&run?.status==='stopped'&&<p className={css.controlHint}>Save your configuration changes before resuming.</p>}
           <p className={css.controlHint}>Pause holds new dispatch. Drain finishes active tickets. Stop cancels active work. Unresolved blockers park after one hour, preserving work and freeing capacity.</p>
           <section className={css.card}><div className={css.sectionTitle}><h2>Delivery queue</h2><span>{run?.lastPollAt ? `Last discovery ${new Date(run.lastPollAt).toLocaleTimeString()}` : 'Awaiting discovery'}</span></div>
             <div className={css.tableScroll}><table><thead><tr><th>Ticket / task</th><th>Milestone</th><th>Status</th><th>Phase</th><th>Elapsed</th><th>Reviews</th><th>Open</th></tr></thead><tbody>
