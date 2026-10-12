@@ -7,6 +7,8 @@ import ts from 'typescript'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { transform } from 'lightningcss'
+import { createServer } from 'node:http'
+import TestRenderer, { act } from 'react-test-renderer'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const folder = await mkdtemp(join(root, '.captain-ui-test-'))
@@ -31,6 +33,57 @@ test('elapsed time freezes at task completion and rejects invalid timestamps', (
   assert.equal(ui.elapsedMs('invalid', undefined, Date.now()), 0)
   assert.equal(ui.elapsedMs('2026-01-01T01:00:00Z', undefined, Date.parse('2026-01-01T00:00:00Z')), 0)
 })
+
+async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPass=false}={}) {
+  const startedAt=new Date().toISOString(),ticket={id:'7',title:'Own ticket',milestone:'M1',url:'',predecessors:[]}
+  const task={id:'task',sessionId:'worker',ticket,status:'running',phase:'implementation',startedAt,phases:[],followups:[],reviewRounds:0}
+  const config={provider:'github',repository:'owner/repo',workspace:'C:/repo',remote:'origin',targetBranch:'main',milestones:['M1'],parallelism:2,maxTeamMembers:3,maxTickets:0,pollSeconds:30,maxRepairRounds:3,maxTaskMinutes:120,verifyCommands:['test'],workerPreset:'standard',requireMemory:false,requireBrowser:false}
+  const run={id:'run',captainSessionId:'coordinator',status:'running',config,tasks:[task],tickets:[ticket],questions:[],createdAt:startedAt}
+  const snapshot={run,role:coordinator?'coordinator':'worker',coordinatorSessionId:'coordinator'}
+  let requests=0,renderer,firstResponse
+  const server=createServer((req,res)=>{
+    if(req.url.startsWith('/api/darkingdoom/state')) {
+      if(++requests===1){if(deferFirst){firstResponse=res;return};res.writeHead(404,{'content-type':'text/plain'});res.end('Not Found')}
+      else{res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(snapshot))}
+    }else{res.writeHead(controlPass?200:409,{'content-type':'application/json'});res.end(JSON.stringify(controlPass?{run}:{error:'Control rejected by lifecycle guard'}))}
+  })
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve))
+  const originalFetch=globalThis.fetch,origin=`http://127.0.0.1:${server.address().port}`
+  globalThis.fetch=(url,options)=>originalFetch(new URL(url,origin),options)
+  const settle=async(ms=150)=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,ms))})
+  try {
+    await act(async()=>{renderer=TestRenderer.create(createElement(ui.CaptainPanel,{sessionId:coordinator?'coordinator':'worker',onClose(){},openSession:async()=>{},initialSnapshot:snapshot}))})
+    await settle()
+    await fn({renderer,settle,text:()=>JSON.stringify(renderer.toJSON()),requests:()=>requests,failFirst:()=>{assert.ok(firstResponse);firstResponse.writeHead(404,{'content-type':'text/plain'});firstResponse.end('Not Found')}})
+  }finally{
+    if(renderer)await act(async()=>renderer.unmount())
+    globalThis.fetch=originalFetch;server.closeAllConnections();await new Promise(resolve=>server.close(resolve))
+  }
+}
+
+test('a worker panel clears a transient refresh 404 after the next successful poll',()=>withPollingPanel(async p=>{
+  assert.match(p.text(),/404/);assert.match(p.text(),/Own ticket/)
+  await p.settle(3100)
+  assert.ok(p.requests()>=2);assert.doesNotMatch(p.text(),/404/);assert.match(p.text(),/Own ticket/)
+}))
+
+test('poll recovery cannot hide a failed coordinator action',()=>withPollingPanel(async p=>{
+  await act(async()=>p.renderer.root.findAllByType('button').find(b=>b.children.includes('Monitor')).props.onClick())
+  await act(async()=>p.renderer.root.findAllByType('button').find(b=>b.children.includes('Stop')).props.onClick())
+  await p.settle();assert.match(p.text(),/Control rejected by lifecycle guard/)
+  await p.settle(3100);assert.ok(p.requests()>=2);assert.match(p.text(),/Control rejected by lifecycle guard/)
+},true))
+
+test('request errors identify the failed method and plugin endpoint',()=>withPollingPanel(async p=>{
+  assert.match(p.text(),/GET \/api\/darkingdoom\/state/)
+}))
+
+test('an old delayed refresh 404 cannot replace a newer healthy snapshot',()=>withPollingPanel(async p=>{
+  await act(async()=>p.renderer.root.findAllByType('button').find(b=>b.children.includes('Monitor')).props.onClick())
+  await act(async()=>p.renderer.root.findAllByType('button').find(b=>b.children.includes('Apply')).props.onClick())
+  await p.settle();assert.ok(p.requests()>=2);assert.doesNotMatch(p.text(),/404/)
+  p.failFirst();await p.settle();assert.doesNotMatch(p.text(),/404/)
+},true,{deferFirst:true,controlPass:true}))
 
 test('repository identity fields belong to the session and stay read-only', () => {
   const html = renderToStaticMarkup(createElement(ui.CaptainPanel, {sessionId:'repo-session', workspace:'C:/repo', onClose(){}, openSession:async()=>{}}))

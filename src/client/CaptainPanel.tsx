@@ -132,7 +132,7 @@ async function request<T>(url: string, signal: AbortSignal, body?: unknown): Pro
   const value: unknown = await response.json().catch(() => null)
   if (!response.ok) {
     const detail = value && typeof value === 'object' && 'error' in value ? String(value.error) : response.statusText
-    throw new Error(`${response.status}: ${detail || 'DarKingDoom Plugin request failed'}`)
+    throw new Error(`${body===undefined?'GET':'POST'} ${url.split('?')[0]} — ${response.status}: ${detail || 'DarKingDoom Plugin request failed'}`)
   }
   return value as T
 }
@@ -150,6 +150,8 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
   const [source, setSource] = useState<RunConfig['provider']>()
   const [view, setView] = useState<'configuration' | 'monitor'>('configuration')
   const [error, setError] = useState<string | null>(null)
+  const [pollError,setPollError]=useState<string|null>(null)
+  const [contextError,setContextError]=useState<string|null>(null)
   const [notice,setNotice]=useState<string|null>(null)
   const [dirty,setDirty]=useState(false)
   const [now, setNow] = useState(Date.now())
@@ -168,6 +170,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
   const allowed = captainActionAvailability(run?.status, loaded, busy)
   const editable=configurationEditable(run?.status,loaded,busy,worker)
   const task = worker?run?.tasks[0]:run?.tasks.find(item => item.id === selected)
+  const displayedError=error??pollError??(!worker?contextError:null)
   const markDirty=()=>{draftDirty.current=true;setDirty(true)}
   const set = <K extends keyof RunConfig>(key: K, value: RunConfig[K]) => {markDirty();setConfig(previous => ({ ...previous, [key]: value }))}
 
@@ -178,21 +181,25 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
     const provider=run?.config.provider??source
     void request<RepositoryContext>(`/api/darkingdoom/context?sessionId=${encodeURIComponent(sessionId)}${provider ? `&provider=${provider}` : ''}`, abort.signal).then(value => {
       if (abort.signal.aborted) return
+      setContextError(null)
       setRepository(value)
       if(run||hydrated.current)return
       setConfig(previous => ({ ...previous, provider:value.config.provider, workspace:value.config.workspace, repository:value.config.repository, organization:value.config.organization, project:value.config.project, remote:value.config.remote, targetBranch:value.config.targetBranch, query:undefined }))
       setMilestones(value.config.milestones.join('\n'))
       if (!commandsEdited.current) setCommands(value.config.verifyCommands.join('\n'))
-    }).catch(cause => { if (!abort.signal.aborted) { setRepository(null); setError(String(cause instanceof Error ? cause.message : cause)) } })
+    }).catch(cause => { if (!abort.signal.aborted) { setRepository(null); setContextError(String(cause instanceof Error ? cause.message : cause)) } })
       .finally(() => { if (!abort.signal.aborted) setContextLoading(false) })
     return () => abort.abort()
   }, [loaded, run?.status, sessionId, source,worker])
 
   const refresh = useCallback(async (signal: AbortSignal) => {
     const version = ++generation.current
-    const value = await request<Snapshot>(`/api/darkingdoom/state?sessionId=${encodeURIComponent(sessionId)}`, signal)
-    if (!value || typeof value !== 'object' || !('run' in value)) throw new Error('DarKingDoom Plugin returned an invalid state')
+    let value:Snapshot
+    try {value = await request<Snapshot>(`/api/darkingdoom/state?sessionId=${encodeURIComponent(sessionId)}`, signal)}
+    catch(cause){if(signal.aborted||version!==generation.current)return;throw cause}
     if (signal.aborted || version !== generation.current) return
+    if (!value || typeof value !== 'object' || !('run' in value)) throw new Error('DarKingDoom Plugin returned an invalid state')
+    setPollError(null)
     setSnapshot(value)
     setLoaded(true)
     if (value.run && shouldHydrateConfiguration(hydrated.current,value.run.id,draftDirty.current,hydratedConfig.current,JSON.stringify(value.run.config))) {
@@ -215,7 +222,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
     let timer: ReturnType<typeof setTimeout>
     const poll = async () => {
       if (!mutation.current) {
-        try { await refresh(abort.signal) } catch (cause) { if (!abort.signal.aborted) setError(String(cause instanceof Error ? cause.message : cause)) }
+        try { await refresh(abort.signal) } catch (cause) { if (!abort.signal.aborted) setPollError(String(cause instanceof Error ? cause.message : cause)) }
       }
       if (!abort.signal.aborted) timer = setTimeout(() => { void poll() }, 3000)
     }
@@ -228,6 +235,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
     const signal = controller.current?.signal
     if (!signal || mutation.current) return
     mutation.current = true; generation.current++; setBusy(true)
+    setError(null)
     try {
       const value=await request<{run:Run}>(action==='save'?'/api/darkingdoom/configure':action ? '/api/darkingdoom/control' : '/api/darkingdoom/start', signal, action&&action!=='save'
         ? { sessionId, action, ...(action === 'parallelism' ? { parallelism } : {}) }
@@ -266,7 +274,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
       <header className={css.header}><div className={css.heading}><span className={css.mark} aria-hidden>⌁</span><div><span className={css.eyebrow}>AUTONOMOUS DELIVERY</span><h1 id="darkingdoom-title">DarKingDoom Plugin</h1></div><span className={css.status} data-status={run?.status ?? 'idle'}>{run?.status ?? 'Not started'}</span></div><button type="button" onClick={onClose} aria-label="Close DarKingDoom Plugin">✕</button></header>
       <div className={css.owner}>Session <code>{sessionId}</code><span>Opening this panel never starts a run.</span></div>
       {worker && <div className={css.origin}><span>Initiated by coordination session</span><button type="button" onClick={()=>void navigate(run!.captainSessionId)}>{run!.captainSessionId} ↗</button><small>This worker view is read-only. Run controls belong to the coordinator.</small></div>}
-      {error && <div className={css.error} role="alert"><span>{error}</span><button type="button" onClick={() => setError(null)}>Dismiss</button></div>}
+      {displayedError && <div className={css.error} role="alert"><span>{displayedError}</span><button type="button" onClick={() => {setError(null);setPollError(null);setContextError(null)}}>Dismiss</button></div>}
       {notice&&<div className={css.origin} role="status"><span>{notice}</span><button type="button" onClick={()=>setNotice(null)}>Dismiss</button></div>}
       {run?.error && <div className={css.error} role="alert">Captain: {run.error}</div>}
       {!worker&&run?.coordinatorLoopError&&<div className={css.error} role="alert">{run.coordinatorLoopError}</div>}
