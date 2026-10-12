@@ -217,6 +217,30 @@ test('cold restart restores existing workers without duplicate claims or session
   const next=new CaptainController(new RunStore(join(f.dir,'state')),f.runtime,()=>f.provider)
   try {await next.restore();await next.tick();assert.deepEqual(restored,ids);assert.equal(next.state('captain').tasks.length,2);assert.equal(f.starts.length,2)}finally{await next.dispose()}
 }))
+
+test('cold restore registers all prepared task workspaces even for completed and stopped runs without waking them',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:2});await f.controller.tick()
+  await f.controller.report(run.tasks[0].sessionId,{phase:'review',ready:true});await f.controller.tick()
+  await f.controller.control('captain','stop');await f.controller.dispose()
+  const registered=[];f.runtime.registerWorkspace=async t=>{registered.push(t.sessionId);t.workspaceId=`workspace-${t.id}`}
+  const next=new CaptainController(new RunStore(join(f.dir,'state')),f.runtime,()=>f.provider)
+  try {await next.restore();assert.deepEqual(registered,run.tasks.map(t=>t.sessionId));assert.equal(f.starts.length,2);assert.equal(next.state('captain').tasks[0].status,'merged');assert.ok(next.state('captain').tasks.every(t=>t.workspaceId))}finally{await next.dispose()}
+}))
+
+test('missing historical worktrees preserve restored runs and stopped elapsed timestamps',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:2});await f.controller.tick()
+  await f.controller.report(run.tasks[0].sessionId,{phase:'review',ready:true});await f.controller.tick()
+  await f.controller.control('captain','stop');await f.controller.dispose()
+  run.updatedAt='2026-01-01T12:00:00.000Z';await new RunStore(join(f.dir,'state')).save(run)
+  f.runtime.registerWorkspace=async t=>{if(t.status==='merged')throw new Error('ENOENT: historical worktree removed');t.workspaceId='surviving-workspace'}
+  const next=new CaptainController(new RunStore(join(f.dir,'state')),f.runtime,()=>f.provider)
+  try {
+    await next.restore();const restored=next.state('captain')
+    assert.equal(restored.updatedAt,run.updatedAt);assert.match(restored.tasks[0].workspaceError,/ENOENT/)
+    assert.equal(restored.tasks[0].status,'merged');assert.equal(restored.tasks[1].workspaceId,'surviving-workspace');assert.equal(f.starts.length,2)
+    assert.equal((await new RunStore(join(f.dir,'state')).loadAll())[0].updatedAt,run.updatedAt)
+  } finally {await next.dispose()}
+}))
 test('one shutdown failure does not leave other workers running or release ownership',()=>fixture(async f=>{
   await f.controller.start('captain',f.config);await f.controller.tick()
   const run=f.controller.state('captain'), stopped=[]

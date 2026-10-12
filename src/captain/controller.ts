@@ -31,13 +31,27 @@ export class CaptainController {
       validateConfig(run.config)
       const previous = this.runs.get(run.captainSessionId)
       if (previous && previous.createdAt > run.createdAt) continue
+      // Workspace membership is independent of execution: retain completed and
+      // stopped task histories under their worktrees without waking a model.
+      let groupingChanged = false
+      if (this.runtime.registerWorkspace) for (const task of run.tasks.filter(t => t.baseSha)) {
+        const previousGrouping = JSON.stringify([task.workspaceId, task.workspaceError])
+        try { await this.runtime.registerWorkspace(task, run); delete task.workspaceError }
+        catch (error) { task.workspaceError = `Workspace registration failed: ${String(error)}` }
+        groupingChanged ||= previousGrouping !== JSON.stringify([task.workspaceId, task.workspaceError])
+      }
+      // Grouping migration must not extend a stopped run's elapsed duration.
+      if (groupingChanged) await this.store.save(run)
       if (!isStopped(run)) {
         await this.store.acquire(repositoryKey(run.config))
         try { await this.providerFactory(run.config).preflight(); await this.runtime.preflight(run.config) }
         catch (error) { run.error = `Recovery preflight failed: ${String(error)}`; run.recoveryPending = true; await this.save(run) }
       }
       this.runs.set(run.captainSessionId, run)
-      if (!isStopped(run) && !run.recoveryPending) for (const task of run.tasks.filter(t => !TERMINAL.has(t.status) && t.baseSha)) await this.runtime.restore?.(task, run)
+      if (!isStopped(run) && !run.recoveryPending) {
+        try { for (const task of run.tasks.filter(t => !TERMINAL.has(t.status) && t.baseSha)) await this.runtime.restore?.(task, run) }
+        catch (error) { run.error = `Recovery worker restore failed: ${String(error)}`; run.recoveryPending = true; await this.save(run) }
+      }
     }
   }
   state(sessionId: string): Run | null {

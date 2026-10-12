@@ -71,6 +71,8 @@ export interface Task {
     worktree: string;
     baseSha: string;
     headSha?: string;
+    workspaceId?: string;
+    workspaceError?: string;
     status: 'starting' | 'running' | 'blocked' | 'ready' | 'merged' | 'failed' | 'cancelled';
     phase: Phase;
     phases: PhaseEvent[];
@@ -138,6 +140,7 @@ export interface ReviewResult {
     findings: string[];
 }
 export interface WorkerRuntime {
+    registerWorkspace?(task: Task, run: Run): Promise<void>;
     restore?(task: Task, run: Run): Promise<void>;
     preflight(config: RunConfig): Promise<void>;
     prepare(task: Task, config: RunConfig): Promise<void>;

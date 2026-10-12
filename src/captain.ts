@@ -18,7 +18,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { discoverRepository, bindRepositoryConfig } from './captain/repository-context.ts'
 
 export const name = 'darkingdoom'
-export const inject = ['tools', 'agents', 'sessionController', 'subagents', 'systemPrompt']
+export const inject = ['tools', 'agents', 'sessionController', 'subagents', 'systemPrompt', 'workspaceRegistry']
 export interface Config { stateDirectory?: string }
 export const Config: z<Config> = z.object({ stateDirectory: z.string() })
 function callerId(agent: { id: string } | undefined): string { if (!agent) throw new Error('An assigned session is required'); return agent.id }

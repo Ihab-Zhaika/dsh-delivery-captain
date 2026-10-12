@@ -28,7 +28,7 @@ export interface PhaseEvent { phase: Phase; at: string; note?: string }
 export interface Question { id: string; taskId: string; question: string; createdAt: string; answer?: string; answeredAt?: string; deliveredAt?: string; notifiedAt?: string; lastNotifyAttemptAt?: string }
 export interface Task {
   id: string; ticket: Ticket; attempt: string; sessionId: string;
-  branch: string; worktree: string; baseSha: string; headSha?: string;
+  branch: string; worktree: string; baseSha: string; headSha?: string; workspaceId?: string; workspaceError?: string;
   status: 'starting' | 'running' | 'blocked' | 'ready' | 'merged' | 'failed' | 'cancelled';
   phase: Phase; phases: PhaseEvent[]; startedAt: string; finishedAt?: string;
   reviewRounds: number; error?: string; prUrl?: string; mergedSha?: string;
@@ -58,6 +58,7 @@ export interface TicketProvider {
 }
 export interface ReviewResult { passed: boolean; headSha: string; baseSha?: string; report: string; findings: string[] }
 export interface WorkerRuntime {
+  registerWorkspace?(task: Task, run: Run): Promise<void>;
   restore?(task: Task, run: Run): Promise<void>;
   preflight(config: RunConfig): Promise<void>;
   prepare(task: Task, config: RunConfig): Promise<void>;

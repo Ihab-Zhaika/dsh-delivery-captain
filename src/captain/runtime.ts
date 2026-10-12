@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
@@ -7,6 +7,7 @@ import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller'
 import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-workspace'
 import { canDeclareDelivery, findTeamByCaptain, readArchivedTeam, readTeam } from '../state.ts'
 import { auditTeamWorkspace } from '../workspace-audit.ts'
 import { runCommand } from './commands.ts'
@@ -108,10 +109,20 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
     else permissions(ctx).set(agent.session, 'danger-full-access')
     await ctx.sessionController.prompt({ requestId: randomUUID() as SessionRequestId, sessionId: sessionId as SessionId, mode: 'steer', content: [{ type: 'text', text }] }, new AbortController().signal)
   }
+  async function registerWorkspace(task: Task, run: Run): Promise<void> {
+    const workspace = await ctx.workspaceRegistry.create(task.worktree, `${basename(run.config.workspace ?? task.worktree)} · #${task.ticket.id}`)
+    await ctx.sessionController.create({ sessionId: task.sessionId as SessionId, workspaceId: workspace.id, agentPreset: run.config.workerPreset })
+    task.workspaceId = workspace.id
+    const inspection = await ctx.sessionController.inspect(task.sessionId as SessionId)
+    const title = inspection.events.filter(event => event.type === 'session/title').at(-1)?.data as {title?: string; source?: {kind?: string}} | undefined
+    if (!title?.title || title.source?.kind !== 'user' && title.title.startsWith('You are the DarKingDoom Plugin')) {
+      await ctx.sessionController.rename({ sessionId: task.sessionId as SessionId, title: `#${task.ticket.id} ${task.ticket.title}` })
+    }
+  }
   async function attach(task: Task, run: Run): Promise<Agent> {
     stopped.delete(task.sessionId)
     workers.set(task.sessionId, { task, config: taskConfig(run.config,task.ticket.id) })
-    await ctx.sessionController.create({ sessionId: task.sessionId as SessionId, cwd: task.worktree, agentPreset: run.config.workerPreset })
+    await registerWorkspace(task, run)
     const agent = await resolveAgent(ctx, task.sessionId)
     await configure(agent, task, run.config)
     const captain = run.captainSessionId ? ctx.agents.get(run.captainSessionId as SessionId) : undefined
@@ -153,6 +164,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
   }
   return {
     async preflight(config) {
+      if (typeof ctx.workspaceRegistry?.create !== 'function' || typeof ctx.sessionController?.rename !== 'function') throw new Error('DSH native workspace registry and session title APIs are required')
       if (typeof ctx.sessionController?.create !== 'function' || typeof ctx.sessionController?.resolveAgent !== 'function' || typeof ctx.sessionController?.prompt !== 'function' || typeof ctx.sessionController?.inspect !== 'function' || typeof ctx.subagents?.drainContinuableChildren !== 'function' || typeof ctx.subagents?.listChildren !== 'function' || typeof ctx.agents?.get !== 'function') throw new Error('DSH 0.2.0-rc.2 root session, inspection and scoped child drain APIs are required')
       permissions(ctx); await checkTools(config)
       await runCommandImpl('git', ['--version'], { cwd: config.workspace })
@@ -164,6 +176,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       await runCommandImpl('git', ['rev-parse', '--show-toplevel'], { cwd: config.workspace })
     },
     prepare: (task, config) => prepareWorktree(task, config, runCommandImpl, options.teamStateDir),
+    registerWorkspace,
     async restore(task, run) { await attach(task, run) },
     async start(task: Task, run: Run) {
       const agent = await attach(task, run)

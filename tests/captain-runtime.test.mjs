@@ -56,21 +56,23 @@ test('review verifies immutable committed head and rejects verification modifica
   assert.equal(dirty.passed, false)
 })
 function host() {
-  const calls = []; const hooks = []; const agents = new Map()
+  const calls = []; const hooks = []; const agents = new Map(); const workspaces = new Map()
   const permissions = { resolve: () => ({ sandbox: 'danger-full-access', approval: 'never' }), set: (session, preset) => calls.push(['permission', session.id, preset]) }
   const ctx = {
+    workspaceRegistry: { create: async(path,title)=>{calls.push(['workspace',path,title]);let workspace=workspaces.get(path);if(!workspace){workspace={id:`workspace-${workspaces.size+1}`,path,title};workspaces.set(path,workspace)}return workspace} },
     get: name => name === 'permissionPresets' ? permissions : ctx[name],
     tools: { get: () => ({}), schemas: () => [{ name: 'hindsight_recall' }, { name: 'ego_browser' }] },
     agents: { get: id => agents.get(id), list: () => [...agents.values()], isOwnedBy: () => false },
     subagents: { drainContinuableDescendants: async roots => calls.push(['permanent-drain', roots[0].id]), listChildren: async()=>[{id:'owned-child',mode:'continuable'}], drainContinuableChildren: async(parent,ids)=>calls.push(['drain',parent.id,ids]) },
     sessionController: {
-      inspect: async id=>({meta:{id},inheritedEventCount:0,events:agents.get(id)?.events??[]}),
-      create: async req => { calls.push(['create', req]); if (!agents.has(req.sessionId)) agents.set(req.sessionId, { id: req.sessionId, status: 'idle', session: { id: req.sessionId, header: { cwd: req.cwd } }, ctx: { on: (name, fn) => hooks.push([name, fn]) }, cancel: () => calls.push(['cancel']), whenIdle: async () => calls.push(['idle']) }); return { sessionId: req.sessionId } },
+      inspect: async id=>({meta:{id},inheritedEventCount:0,events:[...agents.get(id)?.events??[],...agents.get(id)?.title?[{type:'session/title',data:{title:agents.get(id).title,source:{kind:'user'}}}]:[]]}),
+      rename: async req=>{calls.push(['rename',req]);agents.get(req.sessionId).title=req.title},
+      create: async req => { calls.push(['create', req]);const cwd=req.cwd??[...workspaces.values()].find(w=>w.id===req.workspaceId)?.path; if (!agents.has(req.sessionId)) agents.set(req.sessionId, { id: req.sessionId, status: 'idle', session: { id: req.sessionId, header: { cwd } }, ctx: { on: (name, fn) => hooks.push([name, fn]) }, cancel: () => calls.push(['cancel']), whenIdle: async () => calls.push(['idle']) }); return { sessionId: req.sessionId } },
       resolveAgent: async id => ({ agent: agents.get(id) }),
       prompt: async req => { calls.push(['prompt', req]); agents.get(req.sessionId).status = 'running'; return { accepted: true } },
     },
   }
-  return { ctx, calls, hooks, agents }
+  return { ctx, calls, hooks, agents, workspaces }
 }
 async function seedTeam(root, h, item, archived = true) {
   const team = { id: 'original-team', name: 'Original team', captainSessionId: item.sessionId, description: `Delivery task ${item.id}`, createdAt: Date.now(), taskSeq: 1, phase: 'running', members: [{ id: 'member-session', name: 'implementer', joinedAt: Date.now(), status: archived ? 'removed' : 'idle' }], tasks: [{ id: 't1', subject: 'Implementation', assignee: 'implementer', status: 'completed', dependencies: [], output: 'Implemented and tested', createdAt: Date.now(), updatedAt: Date.now() }] }
@@ -87,15 +89,42 @@ async function seedTeam(root, h, item, archived = true) {
 test('worker is ordinary root, permissions precede prompt, genuine activity and descendants drain', async () => {
   const h = host(); const rt = runtime.createRuntime(h.ctx, { runner: async () => '' })
   await rt.start(task({ worktree: '/worker' }), { config })
-  assert.equal(h.calls[0][0], 'create'); assert.equal(h.calls[0][1].cwd, '/worker'); assert.equal(h.calls[0][1].parentAgent, undefined)
-  assert.equal(h.calls[1][0], 'permission'); assert.equal(h.calls[2][0], 'prompt')
-  const prompt = h.calls[2][1].content[0].text
+  const created=h.calls.find(c=>c[0]==='create')[1]
+  assert.equal(h.calls[0][0],'workspace');assert.equal(created.workspaceId,'workspace-1');assert.equal(created.cwd,undefined);assert.equal(created.parentAgent,undefined)
+  assert.equal(h.agents.get('session-1').session.header.cwd,'/worker')
+  assert.ok(h.calls.findIndex(c=>c[0]==='permission')<h.calls.findIndex(c=>c[0]==='prompt'))
+  const prompt = h.calls.find(c=>c[0]==='prompt')[1].content[0].text
   assert.match(prompt, /agent_teams_create/); assert.match(prompt, /automatic/); assert.match(prompt, /darkingdoom_report/)
   assert.equal(await rt.isRunning('session-1'), true)
   h.agents.get('session-1').status = 'idle'; assert.equal(await rt.isRunning('session-1'), false)
   await rt.send('session-1', 'Repair findings'); assert.equal(await rt.isRunning('session-1'), true)
   await rt.stop('session-1'); assert.deepEqual(h.calls.slice(-4).map(x => x[0]), ['cancel', 'drain', 'cancel', 'idle'])
   await rt.send('session-1', 'Repair after review'); assert.equal(h.calls.at(-1)[0], 'prompt')
+})
+
+test('task workspace registration is idempotent and preserves existing sessions and customized titles',async()=>{
+  const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker'})
+  await rt.registerWorkspace(item,{config:{...config,workspace:'/TrucX'}})
+  assert.equal(item.workspaceId,'workspace-1');assert.equal(h.workspaces.get('/worker').title,'TrucX · #1')
+  assert.equal(h.agents.get(item.sessionId).title,'#1 Fix')
+  h.agents.get(item.sessionId).title='My investigation'
+  await rt.registerWorkspace(item,{config:{...config,workspace:'/TrucX'}})
+  assert.equal(h.workspaces.size,1);assert.equal(h.agents.size,1);assert.equal(h.agents.get(item.sessionId).title,'My investigation')
+  h.agents.get(item.sessionId).title='You are the DarKingDoom Plugin — my custom title'
+  await rt.registerWorkspace(item,{config:{...config,workspace:'/TrucX'}})
+  assert.equal(h.agents.get(item.sessionId).title,'You are the DarKingDoom Plugin — my custom title')
+  delete h.agents.get(item.sessionId).title
+  h.agents.get(item.sessionId).events=[{type:'session/title',data:{title:'You are the DarKingDoom Plugin worker',source:{kind:'fallback'}}}]
+  await rt.registerWorkspace(item,{config:{...config,workspace:'/TrucX'}})
+  assert.equal(h.agents.get(item.sessionId).title,'#1 Fix')
+  assert.equal(h.calls.some(c=>c[0]==='prompt'||c[0]==='permission'),false)
+})
+
+test('workspace registration failures cannot start an ungrouped worker',async()=>{
+  const h=host(),rt=runtime.createRuntime(h.ctx)
+  h.ctx.workspaceRegistry.create=async()=>{throw new Error('Workspace unavailable')}
+  await assert.rejects(rt.start(task({worktree:'/worker'}),{config}),/Workspace unavailable/)
+  assert.equal(h.calls.some(c=>c[0]==='create'||c[0]==='prompt'),false)
 })
 test('captain notifications recover an ordinary session through the controller', async () => {
   const h = host(); const rt = runtime.createRuntime(h.ctx)

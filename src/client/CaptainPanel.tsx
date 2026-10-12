@@ -249,6 +249,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
             <div className={css.phaseTotals}>{phaseDurations(task, now).map(row => <span key={row.phase}>{row.phase}<strong>{duration(row.milliseconds)}</strong></span>)}</div>
             <ol className={css.timeline}>{task.phases.map((event, index) => <li key={`${event.at}-${index}`}><time>{new Date(event.at).toLocaleTimeString()}</time><strong>{event.phase}</strong>{event.note && <p>{event.note}</p>}</li>)}</ol>
             <div className={css.taskMetadata}><span>Branch <code>{task.branch}</code></span><span>Worktree <code>{task.worktree}</code></span>{task.mergedSha && <span>Merged <code>{task.mergedSha}</code></span>}</div>
+            {task.workspaceError && <p role="alert">{task.workspaceError}</p>}
             <CaptainReviewEvidence task={task} />
           </section>}
           <div className={css.lowerGrid}>

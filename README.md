@@ -1,6 +1,6 @@
 # DarKingDoom Plugin for DeepSeek Harness
 
-An explicitly activated, continuous GitHub / Azure DevOps delivery orchestrator. Each ticket gets a dedicated DSH session and Git worktree. Workers use the **original installed AgentTeams** with advance approval. Delivery proceeds through implementation, tests, OpenCodeReview, repair, PR checks, merge and closure.
+An explicitly activated, continuous GitHub / Azure DevOps delivery orchestrator. Each ticket gets a Git worktree registered as a **native DSH workspace**, with its dedicated ordinary root session underneath. Workers use the **original installed AgentTeams** with advance approval. Delivery proceeds through implementation, tests, OpenCodeReview, repair, PR checks, merge and closure.
 
 Forked from [NanmiCoder/dsh-agent-teams](https://github.com/NanmiCoder/dsh-agent-teams), retaining its history and MIT attribution. Original source remains for provenance and read-only helpers; its plugin entry is not mounted by this package. See [upstream README](README.upstream.md).
 
@@ -75,6 +75,8 @@ GitHub uses native blocked-by relationships supplemented by explicit `Depends on
 For a selected-ticket trial, command JSON may supply `ticketIds:["448","371"]` with `maxTickets:2` and `parallelism:2`. Other tickets remain in milestone and dependency accounting but cannot be admitted. `verifyCommandsByTicket` can supply nonempty command arrays for individual ticket IDs, while `verifyCommands` remains the default for every other task. This supports a documentation-only gate alongside a full application CI gate without applying the documentation override to application changes.
 
 Each ordinary root worker leads an original AgentTeams team with `approval="automatic"`. Full-access policy is written through DSH's permission service and inherited by original descendants. Workers ask durable questions; the captain answers and wakes them. Recovery is bounded. Irresolvable work stays blocked while other eligible work continues; later milestones stay locked.
+
+The sidebar shows a workspace such as **TrucX · #371** for each task worktree and a ticket-labelled root session within it. New sessions created with that workspace's **+** action stay in the same worktree for scoped continuation. A separately admitted follow-up ticket receives its own worktree/workspace. Recovery adopts the original session and workspace identities; completed task histories remain grouped. Removed historical worktrees produce a task-level grouping warning instead of preventing plugin startup. Registering or opening a workspace never starts a new delivery run.
 
 Independent follow-ups are linked to their source, assigned a configured milestone and enter the same eligibility rules. They cannot legitimately replace current acceptance requirements. AgentTeams and the worker contract enforce scope; full-access agents are not OS-isolated from one another.
 
