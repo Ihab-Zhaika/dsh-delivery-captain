@@ -47,7 +47,10 @@ export interface Run {
   createdAt: string; updatedAt: string; tasks: Task[]; tickets: Ticket[];
   questions: Question[]; error?: string; lastPollAt?: string;
   recoveryPending?: boolean;
+  coordinatorGoalId?:string; coordinatorWaiting?:boolean; coordinatorLoopError?:string; coordinatorRevision?:number;
 }
+export type CoordinatorLoopAction='start'|'resume'|'pause'|'stop'|'shutdown'|'wait'|'wake';
+export interface CoordinatorLoopState {status:'not-started'|'active'|'waiting'|'paused'|'blocked'|'complete'|'unavailable';id?:string;phase?:'active'|'paused'|'blocked'|'complete';activation?:'armed'|'disarmed';roundsStarted?:number;maxGoalRounds?:number;reason?:string}
 export interface PullRequest { id: string; url: string; headSha: string; merged: boolean; mergeSha?: string; checksPassed: boolean; blockedReason?: string }
 export interface FollowupInput { title: string; body: string; milestone: string; predecessors: string[] }
 export interface TicketProvider {
@@ -63,6 +66,8 @@ export interface TicketProvider {
 }
 export interface ReviewResult { passed: boolean; headSha: string; baseSha?: string; report: string; findings: string[]; failureKind?: 'team-evidence' | 'infrastructure' | 'findings' }
 export interface WorkerRuntime {
+  coordinatorLoop?(run:Run,action:CoordinatorLoopAction):Promise<void>;
+  coordinatorLoopState?(run:Run):CoordinatorLoopState;
   parentSession?(sessionId:string):Promise<string|null>;
   workspacePath?(sessionId:string):Promise<string|null>;
   evidence?(run: Run): Promise<unknown>;

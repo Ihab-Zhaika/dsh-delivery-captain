@@ -1,12 +1,12 @@
 /** Native sidebar content. Mounting never enables automation or captures chat focus. */
 import { useCallback, useEffect, useRef, useState, useId, type FormEvent } from 'react'
-import type { Phase, Run, RunConfig, Task, Ticket, RepositoryContext } from '../captain/types.ts'
+import type { Phase, Run, RunConfig, Task, Ticket, RepositoryContext, CoordinatorLoopState } from '../captain/types.ts'
 import css from './CaptainPanel.module.css'
 
 export interface CaptainOpenDetail { sessionId: string; workspace?: string }
 interface Eligibility { ticketId: string; eligible: boolean; reason: string; state?: string; predecessors?: string[] }
-interface Snapshot { run: Run | null; eligibility?: Eligibility[]; role?: 'idle'|'coordinator'|'worker'; coordinatorSessionId?: string | null }
-type Action = 'pause' | 'resume' | 'drain' | 'stop' | 'parallelism'
+interface Snapshot { run: Run | null; eligibility?: Eligibility[]; role?: 'idle'|'coordinator'|'worker'; coordinatorSessionId?: string | null; coordinatorLoop?:CoordinatorLoopState|null }
+type Action = 'pause' | 'resume' | 'drain' | 'stop' | 'parallelism' | 'loop'
 type ReviewEvidence = NonNullable<Task['reviewHistory']>[number]
 
 /** A stopped run retains its identity and claims; only Resume reactivates it. */
@@ -239,6 +239,8 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
       {worker && <div className={css.origin}><span>Initiated by coordination session</span><button type="button" onClick={()=>void navigate(run!.captainSessionId)}>{run!.captainSessionId} ↗</button><small>This worker view is read-only. Run controls belong to the coordinator.</small></div>}
       {error && <div className={css.error} role="alert"><span>{error}</span><button type="button" onClick={() => setError(null)}>Dismiss</button></div>}
       {run?.error && <div className={css.error} role="alert">Captain: {run.error}</div>}
+      {!worker&&run?.coordinatorLoopError&&<div className={css.error} role="alert">{run.coordinatorLoopError}</div>}
+      {!worker&&run&&<div className={css.origin} aria-label="Coordinator loop"><strong>Coordinator loop: {snapshot.coordinatorLoop?.status==='active'&&snapshot.coordinatorLoop.activation!=='armed'?'needs Resume':snapshot.coordinatorLoop?.status??'not started'}</strong><small>{snapshot.coordinatorLoop?.maxGoalRounds?`Native DSH goal · ${snapshot.coordinatorLoop.roundsStarted??0} / ${snapshot.coordinatorLoop.maxGoalRounds} rounds`:'Start or Resume enables native loop mode in this main chat.'}{snapshot.coordinatorLoop?.status==='waiting'?' · Quietly awaiting new delivery events':''}</small>{snapshot.coordinatorLoop?.reason&&<p>{snapshot.coordinatorLoop.reason}</p>}{run.status==='running'&&snapshot.coordinatorLoop?.activation!=='armed'&&<button type="button" disabled={busy||!loaded} onClick={()=>void mutate('loop')}>{snapshot.coordinatorLoop?.status==='waiting'?'Wake coordinator':'Start coordinator loop'}</button>}</div>}
       {!worker && <nav className={css.views} aria-label="Plugin view"><button type="button" aria-pressed={view==='configuration'} onClick={()=>setView('configuration')}>Configuration</button><button type="button" aria-pressed={view==='monitor'} onClick={()=>setView('monitor')}>Monitor</button></nav>}
       <div className={css.body}>
         {!worker && <aside hidden={view!=='configuration'} className={css.configuration}><div className={css.sectionTitle}><h2>Run configuration</h2><span>{run ? 'Saved run configuration' : contextLoading ? 'Loading repository configuration…' : 'From the current session repository'}</span></div>
@@ -263,7 +265,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
                 <label className={css.check}><input type="checkbox" checked={config.requireBrowser} onChange={event => set('requireBrowser', event.target.checked)} />Require browser verification</label>
               </div></details>
             </fieldset>
-            <p className={css.authorization}>Start authorizes full access execution, autonomous repair, review, merge and ticket closure within this configuration. The captain answers worker questions automatically.</p>
+            <p className={css.authorization}>Start enables the native coordinator loop in this chat and authorizes full access execution, autonomous repair, review, merge and ticket closure within this configuration. The captain answers worker questions automatically.</p>
             <button type="submit" className={css.primary} disabled={!allowed.start || contextLoading || !repository || !config.targetBranch || !lines(milestones).length || lines(milestones).some(name=>!repository.milestoneCatalog.includes(name)) || !lines(commands).length}>{busy ? 'Applying…' : run ? 'Run already created' : 'Start DarKingDoom Plugin'}</button>
             {run?.status === 'stopped' && <p className={css.muted}>Use Resume to continue this saved run with its existing tasks and claims.</p>}
             {!loaded && <p className={css.muted}>Loading saved run before enabling Start…</p>}

@@ -17,6 +17,7 @@ import { isReviewCurrent, reviewTask } from './review.ts'
 import type { CommandRunner, Run, RunConfig, Task, WorkerRuntime } from './types.ts'
 import { originalTeamReceipt } from './team-receipt.ts'
 import { taskConfig } from './scheduler.ts'
+import { CoordinatorLoop } from './coordinator-loop.ts'
 
 const loadedHost = (() => {
   let build: unknown = null
@@ -76,6 +77,7 @@ export function workerResumePrompt(task: Task): string {
 
 export interface RuntimeOptions { runner?: CommandRunner; teamStateDir?: string }
 export function createRuntime(ctx: Context, options: RuntimeOptions = {}): WorkerRuntime {
+  const coordinator=new CoordinatorLoop(ctx)
   const runCommandImpl = options.runner ?? runCommand
   const workers = new Map<string, { task: Task; config: RunConfig }>()
   const configured = new WeakSet<Agent>()
@@ -185,6 +187,8 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
     } finally { controlCalls.delete(callId) }
   }
   return {
+    coordinatorLoop:(run,action)=>coordinator.control(run,action),
+    coordinatorLoopState:run=>coordinator.state(run),
     async parentSession(sessionId) {
       try {const inspection=await ctx.sessionController.inspect(sessionId as SessionId);return inspection.meta.origin==='subagent'?inspection.meta.parentSession??null:null} catch {return null}
     },

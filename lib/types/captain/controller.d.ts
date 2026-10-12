@@ -43,6 +43,10 @@ export declare class CaptainController {
             error?: string;
             lastPollAt?: string;
             recoveryPending?: boolean;
+            coordinatorGoalId?: string;
+            coordinatorWaiting?: boolean;
+            coordinatorLoopError?: string;
+            coordinatorRevision?: number;
         };
     };
     sessionView(sessionId: string): Promise<{
@@ -70,15 +74,22 @@ export declare class CaptainController {
             error?: string;
             lastPollAt?: string;
             recoveryPending?: boolean;
+            coordinatorGoalId?: string;
+            coordinatorWaiting?: boolean;
+            coordinatorLoopError?: string;
+            coordinatorRevision?: number;
         };
     }>;
     all(): Run[];
     private save;
+    private endLoop;
     private captain;
     private worker;
     private phase;
     start(sessionId: string, raw: unknown): Promise<Run>;
     control(sessionId: string, action: string, parallelism?: number): Promise<Run>;
+    wait(sessionId: string): Promise<void>;
+    loopState(sessionId: string): import("./types.ts").CoordinatorLoopState | null;
     report(sessionId: string, report: {
         phase: Phase;
         ready?: boolean;

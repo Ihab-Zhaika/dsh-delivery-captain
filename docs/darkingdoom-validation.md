@@ -13,7 +13,7 @@ Regressions cover independent repository scheduling during a long review, stale 
 - Windows, Node 24.15.0, DSH 0.2.0-rc.2, original AgentTeams 0.1.23, OCR installed v1.12.13.
 - `pnpm typecheck`: host and browser TypeScript passed.
 - `pnpm build`: host/browser artifacts built. The inherited DSH browser-loader contract requires CJS; tsdown's general ESM recommendation is expected.
-- `pnpm verify`: 148 tests passed, zero failures. Source/build artifact stamp matched.
+- `pnpm verify`: 160 tests passed, zero failures. Source/build artifact stamp matched.
 - Repository discovery: real temporary repositories, both remotes, remote default branch, repository plan order, full Azure iteration paths, safe metadata reads, missing authentication/defaults, and refusal to redirect a session to another repository.
 - Temporary real Git repositories: fetched target branch, isolated worktree/branch, idempotent adoption, dirty-worktree rejection and branch/target drift.
 - Provider contract fixtures: GitHub dependency closure and closing PRs; Azure native predecessors, custom workflow completion categories, acceptance fields, pagination, exact-head merge and remote policy checks.
@@ -66,3 +66,11 @@ The first controller gate exposed that DSH 0.2.0-rc.2 omits the optional `agent-
 TrucX's pinned host SDK 10.0.112 was provisioned privately from Microsoft's official ZIP after SHA-512 verification, without changing `global.json` or machine SDKs. Docker staging still requires its own genuine build, integration, image, browser and physical-device evidence. Android/iPhone installs and a second physical LAN device are unavailable to this automation; they cannot be relabelled as browser-emulation passes or silently deferred acceptance. BrowserSkill's Edge connection was skipped at the owner's request. Hindsight's live memory service has not been exercised. Their capability wiring is tested; live service behavior remains an integration boundary.
 
 Task phase and elapsed metrics are implemented. Aggregate active-agent effort, token usage and cost are intentionally shown as unmeasured. Worktrees are retained, and external repository policies may block fully unattended merging. GitHub supports github.com and normal merge commits in this version. Single-host locking is not a distributed multi-machine claim service.
+
+## Native coordinator loop
+
+Run Start now arms a run-owned native DSH same-session goal in the coordinator. Existing-run activation was verified live through authorized Resume in the main TrucX chat: the native service reported active/armed, admitted round 1 and its actual 256-round cap. The run identity, two admissions, parallelism two, worktrees and worker sessions were unchanged. The UI displays actual phase/activation/counters and offers explicit loop activation for an existing run. Quiet waiting can be woken by new delivery events without replaying assignments.
+
+Tests cover goal creation/idempotency, foreign-goal refusal, waiting/wake/shutdown, preserved round counts, native blocked/completed stops, stale waiting after native human rearm, cold-agent activation revoked by Stop and lifecycle revision fences, coordinator-only lifecycle/waiting, admission rollback and Stop continuing worker cancellation after goal completion failure. Independent review found native rearm and cold-activation races; both received failing regression tests and fixes. This verifies loop admission/execution, not resolution of #371's external acceptance prerequisites or clean whole-plugin OCR.
+
+Final reload retained the same native goal identity and 256-round allowance; explicit Resume advanced admitted rounds from 1 to 2. Run status remained running, #448 merged, #371 blocked on its existing prerequisites. The first round exercised darkingdoom_wait and visibly entered quiet waiting, demonstrating event-driven idle behavior rather than repeated worker prompting.

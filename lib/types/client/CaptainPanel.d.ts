@@ -1,4 +1,4 @@
-import type { Phase, Run, Task, Ticket } from '../captain/types.ts';
+import type { Phase, Run, Task, Ticket, CoordinatorLoopState } from '../captain/types.ts';
 export interface CaptainOpenDetail {
     sessionId: string;
     workspace?: string;
@@ -15,6 +15,7 @@ interface Snapshot {
     eligibility?: Eligibility[];
     role?: 'idle' | 'coordinator' | 'worker';
     coordinatorSessionId?: string | null;
+    coordinatorLoop?: CoordinatorLoopState | null;
 }
 type ReviewEvidence = NonNullable<Task['reviewHistory']>[number];
 /** A stopped run retains its identity and claims; only Resume reactivates it. */

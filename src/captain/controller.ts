@@ -86,7 +86,12 @@ export class CaptainController {
   }
   all(): Run[] { return [...this.runs.values()] }
   private async save(run: Run): Promise<void> { run.updatedAt = now(); await this.store.save(run) }
+  private async endLoop(run:Run):Promise<void> {
+    try{await this.runtime.coordinatorLoop?.(run,'stop');delete run.coordinatorLoopError}
+    catch(error){run.coordinatorLoopError=`Coordinator loop completion failed: ${String(error)}`}
+  }
   private captain(sessionId: string): Run {
+    if(this.startingSessions.has(sessionId))throw new Error('Run is still starting')
     const run = this.runs.get(sessionId)
     if (!run) throw new Error('Session is not an explicitly activated captain')
     return run
@@ -112,30 +117,41 @@ export class CaptainController {
     this.startingSessions.add(sessionId)
     try {
       await this.store.acquire(key)
+      let pendingRun:Run|undefined
       try {
         await this.providerFactory(config).preflight()
         await this.runtime.preflight(config)
-        const run: Run = { version: 1, id: randomUUID(), captainSessionId: sessionId, config, status: 'running', createdAt: now(), updatedAt: now(), tasks: [], tickets: [], questions: [] }
-        await this.save(run); this.runs.set(sessionId, run)
+        const run: Run = { version: 1, id: randomUUID(), captainSessionId: sessionId, config, status: 'paused', createdAt: now(), updatedAt: now(), tasks: [], tickets: [], questions: [] }
+        pendingRun=run;this.runs.set(sessionId,run)
+        await this.runtime.coordinatorLoop?.(run,'start')
+        run.status='running';await this.save(run)
         return run
-      } catch (error) { await this.store.release(key); throw error }
+      } catch (error) {
+        if(pendingRun){pendingRun.status='stopped';try{await this.runtime.coordinatorLoop?.(pendingRun,'stop')}catch{/* Preserve original admission error. */};this.runs.delete(sessionId)}
+        await this.store.release(key); throw error
+      }
     } finally { this.starting.delete(key); this.startingSessions.delete(sessionId) }
   }
 
   async control(sessionId: string, action: string, parallelism?: number): Promise<Run> {
     const run = this.captain(sessionId)
+    const revision=['loop','resume','pause','drain','stop'].includes(action)?run.coordinatorRevision=(run.coordinatorRevision??0)+1:run.coordinatorRevision
     if (action === 'parallelism') run.config = validateConfig({ ...run.config, parallelism })
-    else if (action === 'pause') run.status = 'paused'
+    else if (action === 'pause') {run.status = 'paused';await this.runtime.coordinatorLoop?.(run,'pause')}
     else if (action === 'drain') run.status = 'draining'
     else if (action === 'resume') {
       if ([...this.runs.values()].some(r => r.id !== run.id && r.status !== 'stopped' && repositoryKey(r.config) === repositoryKey(run.config))) throw new Error('Repository already owned by a different run')
       await this.store.acquire(repositoryKey(run.config))
       await this.providerFactory(run.config).preflight()
       await this.runtime.preflight(run.config)
+      if(run.coordinatorRevision!==revision||this.disposed)throw new Error('Run changed while validating resumption')
+      await this.runtime.coordinatorLoop?.(run,'resume')
+      if(run.coordinatorRevision!==revision||this.disposed)throw new Error('Run changed while activating resumption')
       run.status = 'running'
       for (const t of run.tasks.filter(t => t.status === 'cancelled')) { t.status = 'blocked'; t.resumeRequested = true; delete t.finishedAt; t.recoveryAttempts = 0; delete t.lastWakeAt }
     } else if (action === 'stop') {
       run.status = 'stopped'
+      await this.endLoop(run)
       this.activeProviders.get(run.id)?.cancel?.()
       // Commit revocation before awaiting cancellation: late worker reports cannot mutate delivery.
       await this.save(run)
@@ -146,9 +162,23 @@ export class CaptainController {
       await this.save(run)
       // A tick may still be finishing an external call. Keep the repository lease until it quiesces.
       if (!shutdownErrors.length) await this.store.release(repositoryKey(run.config))
+    } else if(action==='loop') {
+      if(run.status!=='running')throw new Error('Resume the run before starting the coordinator loop')
+      await this.runtime.coordinatorLoop?.(run,'resume')
     } else throw new Error('Unknown captain control action')
     await this.save(run)
     return run
+  }
+
+  async wait(sessionId:string):Promise<void> {
+    const run=this.captain(sessionId)
+    if(run.status!=='running')throw new Error('Only a running coordinator may wait for events')
+    if(run.questions.some(q=>!q.answer))throw new Error('Answer pending worker questions before waiting')
+    await this.runtime.coordinatorLoop?.(run,'wait');await this.save(run)
+  }
+  loopState(sessionId:string) {
+    const run=this.state(sessionId)
+    return run?this.runtime.coordinatorLoopState?.(run)??{status:'not-started' as const}:null
   }
 
   async report(sessionId: string, report: { phase: Phase; ready?: boolean; blocked?: boolean; note?: string }): Promise<Task> {
@@ -287,7 +317,11 @@ export class CaptainController {
   async announce(run: Run, text: string): Promise<void> { await this.notify(run, text) }
   private async notify(run: Run, text: string, deliveryKey?: string): Promise<boolean> {
     if(isStopped(run)||this.disposed)return false
-    try { await this.runtime.send(run.captainSessionId, text,deliveryKey); return true } catch (error) { run.error = `Captain delivery deferred: ${String(error)}`; await this.save(run); return false }
+    try {
+      await this.runtime.coordinatorLoop?.(run,'wake')
+      if(isStopped(run)||this.disposed)return false
+      await this.runtime.send(run.captainSessionId, text,deliveryKey); return true
+    } catch (error) { run.error = `Captain delivery deferred: ${String(error)}`; await this.save(run); return false }
   }
   private async notifyQuestion(run: Run, q: Question): Promise<void> {
     q.lastNotifyAttemptAt = now(); await this.save(run)
@@ -299,7 +333,7 @@ export class CaptainController {
   tick(runIds?: readonly string[]): Promise<void> {
     if (this.disposed) return Promise.resolve()
     for (const run of this.runs.values()) {
-      if (isStopped(run) || this.disposed || runIds && !runIds.includes(run.id)) continue
+      if (isStopped(run) || this.disposed || this.startingSessions.has(run.captainSessionId) || runIds && !runIds.includes(run.id)) continue
       if(this.runTicks.has(run.id))continue
       const tick=this.tickRun(run).catch(async error=>{if(!isStopped(run)&&!this.disposed){run.error=String(error);await this.save(run)}})
         .finally(()=>{this.activeProviders.delete(run.id);this.runTicks.delete(run.id)})
@@ -388,11 +422,11 @@ export class CaptainController {
     // Admission counts persisted attempts, including blocked/failed setup. A trial
     // must never substitute another ticket or reset its cap after a restart.
     if (run.config.maxTickets > 0 && run.tasks.length >= run.config.maxTickets && run.tasks.every(t => TERMINAL.has(t.status) && (t.status !== 'merged' || t.closedAt))) {
-      run.status = 'stopped'; await this.save(run); await this.store.release(repositoryKey(run.config)); return
+      run.status = 'stopped'; await this.endLoop(run);await this.save(run); await this.store.release(repositoryKey(run.config)); return
     }
     // A parked blocker needs a new captain decision, not a timed assignment replay.
     if (run.status === 'draining' && this.activeCount(run) === 0) {
-      run.status = 'stopped'; await this.save(run); await this.store.release(repositoryKey(run.config)); return
+      run.status = 'stopped'; await this.endLoop(run);await this.save(run); await this.store.release(repositoryKey(run.config)); return
     }
     if (run.status !== 'running' || this.disposed) { await this.save(run); return }
     const rows = eligibility(run.tickets, run.config.milestones, run.tasks)
@@ -420,6 +454,7 @@ export class CaptainController {
       await this.runtime.start(task, run)
       if (isStopped(run) || this.disposed) { await this.runtime.stop(task.sessionId); return }
       task.status = 'running'; delete task.blockedSince; task.lastWakeAt = now(); this.phase(task, 'analysis')
+      if(run.coordinatorWaiting)await this.notify(run,`Ticket #${task.ticket.id} is executing in dedicated session ${task.sessionId}; read current delivery status before guiding it.`,`assigned:${task.id}`)
     } catch (error) { task.status = 'blocked'; task.blockedSince ??= now(); task.error = String(error); task.lastWakeAt = now(); this.phase(task, 'blocked', task.error) }
     await this.save(run)
   }
@@ -472,6 +507,8 @@ export class CaptainController {
 
   async dispose(): Promise<void> {
     this.disposed = true
+    for(const run of this.runs.values())run.coordinatorRevision=(run.coordinatorRevision??0)+1
+    for(const run of this.runs.values())try{await this.runtime.coordinatorLoop?.(run,'shutdown')}catch(error){run.coordinatorLoopError=String(error)}
     for (const provider of this.activeProviders.values()) provider.cancel?.()
     for (const run of this.runs.values()) await this.drainWorkers(run, false,'shutdown')
     await this.ticking

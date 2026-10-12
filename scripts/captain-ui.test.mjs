@@ -48,6 +48,15 @@ test('worker panel shows origin and own phase totals without coordinator control
   assert.doesNotMatch(html,/aria-label="Run controls"|Run configuration|Live parallelism|Delivery queue|Start DarKingDoom/)
 })
 
+test('existing coordinator run shows native loop state and an activation control without another run Start',()=>{
+  const run={id:'run',captainSessionId:'main',status:'running',config:{parallelism:2},tasks:[],tickets:[],questions:[],createdAt:new Date().toISOString()}
+  const props={sessionId:'main',onClose(){},openSession:async()=>{}}
+  const stopped=renderToStaticMarkup(createElement(ui.CaptainPanel,{...props,initialSnapshot:{run,role:'coordinator',coordinatorLoop:{status:'not-started'}}}))
+  assert.match(stopped,/Start coordinator loop/);assert.match(stopped,/Run already created/)
+  const active=renderToStaticMarkup(createElement(ui.CaptainPanel,{...props,initialSnapshot:{run,role:'coordinator',coordinatorLoop:{status:'active',activation:'armed',roundsStarted:3,maxGoalRounds:256}}}))
+  assert.match(active,/Coordinator loop: active/);assert.match(active,/3 \/ 256 rounds/);assert.doesNotMatch(active,/Start coordinator loop/)
+})
+
 test('eligibility graph lays out prerequisites before dependents and retains missing/cyclic nodes',()=>{
   const graph=ui.eligibilityGraph([{id:'1',title:'child',predecessors:['2']},{id:'2',title:'root',predecessors:[]},{id:'3',title:'missing',predecessors:['9']},{id:'4',title:'cycle',predecessors:['5']},{id:'5',title:'cycle',predecessors:['4']}])
   const node=id=>graph.nodes.find(n=>n.id===id)
@@ -116,7 +125,8 @@ test('initial dashboard makes authorization explicit and prevents starting befor
   assert.match(html,/>Monitor<\/button>/)
   assert.match(html, /value="C:\/repo"/)
   assert.match(html, /disabled="">Start DarKingDoom Plugin/)
-  assert.match(html, /Start authorizes full access execution, autonomous repair, review, merge and ticket closure/)
+  assert.match(html, /Start enables the native coordinator loop in this chat/)
+  assert.match(html, /authorizes full access execution, autonomous repair, review, merge and ticket closure/)
   assert.match(html, /Active agent effort/)
   assert.match(html, /Not measured/)
   assert.match(html, /Opening this panel never starts a run/)

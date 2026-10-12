@@ -18,6 +18,38 @@ async function fixture(fn) {
   try {await fn({controller,runtime,provider,dir,starts,messages,merges,config:config(dir),setTickets:v=>tickets=v,setPassing:v=>passing=v,setChecks:v=>remoteChecks=v})} finally {await controller.dispose();await rm(dir,{recursive:true,force:true})}
 }
 
+test('run Start arms the main loop and lifecycle controls never arm worker sessions',()=>fixture(async f=>{
+  const calls=[];f.runtime.coordinatorLoop=async(run,action)=>calls.push([run.captainSessionId,action])
+  const run=await f.controller.start('captain',f.config)
+  assert.deepEqual(calls,[['captain','start']]);await f.controller.tick()
+  await f.controller.control('captain','pause');await f.controller.control('captain','resume');await f.controller.control('captain','stop')
+  assert.deepEqual(calls.map(c=>c[1]),['start','pause','resume','stop'])
+  assert.ok(calls.every(c=>c[0]===run.captainSessionId))
+}))
+
+test('loop admission failure leaves no run or worker behind',()=>fixture(async f=>{
+  f.runtime.coordinatorLoop=async()=>{throw new Error('Unrelated goal')}
+  await assert.rejects(f.controller.start('captain',f.config),/Unrelated/)
+  assert.equal(f.controller.state('captain'),null);await f.controller.tick();assert.equal(f.starts.length,0)
+}))
+
+test('coordinator wait is authorized only in the leader after pending questions are answered',()=>fixture(async f=>{
+  const actions=[];f.runtime.coordinatorLoop=async(_run,action)=>actions.push(action)
+  const run=await f.controller.start('captain',f.config);await f.controller.tick()
+  await assert.rejects(f.controller.wait(run.tasks[0].sessionId),/captain/)
+  const q=await f.controller.question(run.tasks[0].sessionId,'Which path?')
+  await assert.rejects(f.controller.wait('captain'),/pending worker questions/)
+  await f.controller.answer('captain',q.id,'Current conventions')
+  const before=f.messages.length;await f.controller.wait('captain');assert.equal(f.messages.length,before);assert.equal(actions.at(-1),'wait')
+}))
+
+test('failed native loop completion cannot prevent Stop from cancelling workers',()=>fixture(async f=>{
+  f.runtime.coordinatorLoop=async(_run,action)=>{if(action==='stop')throw new Error('Goal durability failure')}
+  const run=await f.controller.start('captain',f.config);await f.controller.tick()
+  await f.controller.control('captain','stop')
+  assert.equal(run.status,'stopped');assert.ok(run.tasks.every(t=>t.status==='cancelled'));assert.match(run.coordinatorLoopError,/durability/)
+}))
+
 test('worker view contains only its task, origin and questions; controls stay coordinator-owned',()=>fixture(async f=>{
   const run=await f.controller.start('captain',f.config);await f.controller.tick()
   const task=run.tasks[0]
