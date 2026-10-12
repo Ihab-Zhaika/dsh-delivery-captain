@@ -31,6 +31,14 @@ test('prepare fetches target, creates isolated branch and idempotently adopts ex
   await assert.rejects(worktrees.prepareWorktree(item, cfg, runner), /branch|worktree/)
 })
 const manifest = (head = 'head', base = 'base') => ({ status: 'complete', comments: [], manifest: { schema_version: 'ocr.run-manifest/v1', operation: 'review', terminal_state: 'complete', input: { mode: 'range', resolved_base: base, resolved_head: head }, coverage: { selected: [{ item_id: 'a', path: 'a.txt' }], completed: [{ item_id: 'a', path: 'a.txt' }], reused: [], failed: [], waived: [] } } })
+test('existing prepared worktree resume validates local identity without a remote fetch',async t=>{
+  const root=await repo(t),item=task({worktree:join(root,'work')}),cfg={...config,workspace:root}
+  await worktrees.prepareWorktree(item,cfg,runner)
+  const offline=async(file,args,opts)=>{if(args[0]==='fetch')throw new Error('Remote unavailable');return runner(file,args,opts)}
+  await worktrees.prepareWorktree(item,cfg,offline)
+  git(item.worktree,'switch','-c','wrong')
+  await assert.rejects(worktrees.prepareWorktree(item,cfg,offline),/unexpected branch/)
+})
 test('OCR parser requires exact input, all changed paths and complete coverage', () => {
   assert.deepEqual(review.parseOcrReport(JSON.stringify(manifest()), 'head', 'base', ['a.txt']), [])
   for (const value of [{}, { ...manifest(), status: 'partial' }, { ...manifest(), manifest: { ...manifest().manifest, coverage: { ...manifest().manifest.coverage, completed: [] } } }]) {
@@ -145,6 +153,16 @@ test('assignment text renders ticket newlines and recovery never repeats the ful
   delete item.assignmentDelivered;h.agents.get(item.sessionId).status='idle';item.lastWakeAt='recovery-2'
   await runtime.createRuntime(h.ctx).start(item,{config})
   assert.equal(h.calls.filter(c=>c[0]==='prompt'&&c[1].content[0].text.includes('Acceptance line one')).length,1)
+})
+
+test('human solved checkpoint authorizes one normal retry without clarification and consumes its receipt after admission',async()=>{
+  const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker',assignmentDelivered:true,pendingHumanRetry:{at:'human-1',reason:'solved',previousBlocker:'Prior WAIT'}})
+  await rt.start(item,{config})
+  const prompt=h.calls.filter(c=>c[0]==='prompt').at(-1)[1].content[0].text
+  assert.match(prompt,/human-retry/);assert.match(prompt,/Do not ask.*what.*solved/i);assert.match(prompt,/once/i);assert.match(prompt,/not.*passing.*gate/i)
+  assert.equal(item.pendingHumanRetry,undefined)
+  h.agents.get(item.sessionId).status='idle';item.lastWakeAt='idle-recovery';await rt.start(item,{config})
+  assert.doesNotMatch(h.calls.filter(c=>c[0]==='prompt').at(-1)[1].content[0].text,/human-retry/)
 })
 
 test('blocked-worker guidance requires actual scoped main-session original team and completed delegated diagnostics',async t=>{

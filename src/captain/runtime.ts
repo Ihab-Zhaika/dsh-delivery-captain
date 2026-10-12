@@ -72,6 +72,7 @@ function promptIdentity(key: string): SessionRequestId {
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-4${hex.slice(13,16)}-a${hex.slice(17,20)}-${hex.slice(20,32)}` as SessionRequestId
 }
 export function workerResumePrompt(task: Task): string {
+  if(task.pendingHumanRetry)return `## DarKingDoom human retry\n\n\`\`\`json\n${JSON.stringify({type:'darkingdoom.human-retry',taskId:task.id,ticketId:task.ticket.id,worktree:task.worktree,branch:task.branch,teamMemberLimit:task.assignmentConfig?.maxTeamMembers,...task.pendingHumanRetry},null,2)}\n\`\`\`\n\nThis is an explicit HUMAN Resume. A short reason such as "solved" is sufficient authorization to retry the previously blocked normal step once. It supersedes the prior WAIT for this retry. Do not ask the captain or human what "solved" means or demand proof of resolution before the normal retry. Use the SAME original AgentTeams team and session; do not recreate it. Direct the responsible member to run the original bounded operation in the assigned worktree and judge actual results. If it still fails or needs an unavailable resource/device, report the concrete blocker and yield without repeated retries. Preserve history and remaining scope. No antivirus exclusions, security weakening, disguised/renamed replacement helpers, alternative loaders, fabricated evidence, or skipped verification. This authorizes a retry, not a passing verification or merge gate. The original acceptance and full verification/review requirements remain enforced.`
   return `## DarKingDoom recovery checkpoint\n\n\`\`\`json\n${JSON.stringify({type:'darkingdoom.resume',taskId:task.id,ticketId:task.ticket.id,phase:task.phase,teamMemberLimit:task.assignmentConfig?.maxTeamMembers,worktree:task.worktree,branch:task.branch,reason:(task.waitingDecision??task.error)?.slice(0,1200)??'Check the current original team and collect outstanding reports'},null,2)}\n\`\`\`\n\nThe assignment and acceptance are already in this session; they are not being replayed. Preserve existing captain decisions and execution holds. Use original agent_teams_status, retain the active team, and collect real member/job reports. A missing team needs a concrete captain recovery decision; never recreate teams in a timer loop. Continue safe independent work, or report waiting/blocked and yield. Ask once only when evidence changed. This controller checkpoint is not a new human instruction or permission to bypass a hold.`
 }
 
@@ -258,6 +259,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       const key=assigned?`${task.id}:resume:${task.lastWakeAt??run.updatedAt??task.startedAt}`:`${task.id}:assignment`
       await ctx.sessionController.prompt({requestId:promptIdentity(key),sessionId:task.sessionId as SessionId,mode:'queue',content:[{type:'text',text}]},new AbortController().signal)
       task.assignmentDelivered=true
+      delete task.pendingHumanRetry
       if(task.error?.startsWith('Shutdown incomplete:')) {
         try {
           // This verifies present request/inbox capability, not future shutdown

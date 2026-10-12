@@ -13,6 +13,8 @@ export declare class CaptainController {
     private readonly stoppingRuns;
     private ticking?;
     private readonly runTicks;
+    private readonly resumeDispatches;
+    private readonly resumingTasks;
     private disposed;
     constructor(store: RunStore, runtime: WorkerRuntime, providerFactory: (config: RunConfig) => TicketProvider);
     /** Rehydrate only explicitly started runs. Startup does not opt ordinary sessions in. */
@@ -105,6 +107,9 @@ export declare class CaptainController {
     private deliverAnswer;
     message(sessionId: string, taskId: string, text: string, action?: 'resume' | 'wait'): Promise<void>;
     resumeTask(sessionId: string, taskId: string, evidence: string, human?: boolean, teamMemberLimit?: number): Promise<Task>;
+    /** Existing assignment transport never waits for the intake/discovery lane. */
+    private dispatchResumes;
+    private dispatchResumeRun;
     followup(sessionId: string, input: FollowupInput): Promise<string>;
     private activeCount;
     private notifyBlocker;

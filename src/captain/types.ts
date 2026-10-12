@@ -29,6 +29,7 @@ export interface Question { id: string; taskId: string; question: string; create
 export interface Task {
   assignmentConfig?:RunConfig;
   budgetStartedAt?:string;
+  pendingHumanRetry?:{at:string;reason:string;previousBlocker?:string};
   id: string; ticket: Ticket; attempt: string; sessionId: string;
   branch: string; worktree: string; baseSha: string; headSha?: string; workspaceId?: string; workspaceError?: string;
   status: 'starting' | 'running' | 'blocked' | 'parked' | 'ready' | 'merged' | 'failed' | 'cancelled';

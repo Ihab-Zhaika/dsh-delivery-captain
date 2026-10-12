@@ -17,7 +17,6 @@ export async function fetchTarget(config: RunConfig, run: CommandRunner, cwd = c
 
 /** Adopt only the exact registered branch/path. Never reset existing work. */
 export async function prepareWorktree(task: Task, config: RunConfig, run: CommandRunner, teamStateDir = '.agent-teams'): Promise<void> {
-  const target = await fetchTarget(config, run)
   await run('git', ['check-ref-format', `refs/heads/${task.branch}`], { cwd: config.workspace })
   if (!/^\.?[a-zA-Z0-9_-]+$/.test(teamStateDir)) throw new Error('AgentTeams stateDir must be a single workspace directory name')
   const common = resolve(config.workspace, (await run('git', ['rev-parse', '--git-common-dir'], { cwd: config.workspace })).trim())
@@ -37,13 +36,15 @@ export async function prepareWorktree(task: Task, config: RunConfig, run: Comman
     if (!record.includes(`branch refs/heads/${task.branch}`)) throw new Error('Existing worktree is on an unexpected branch')
     if (await realpath(expected) !== await realpath((await run('git', ['rev-parse', '--show-toplevel'], { cwd: expected })).trim())) throw new Error('Unexpected worktree root')
     if (task.baseSha) await run('git', ['merge-base', '--is-ancestor', task.baseSha, 'HEAD'], { cwd: expected })
-    else task.baseSha = (await run('git', ['merge-base', target, 'HEAD'], { cwd: expected })).trim()
+    else task.baseSha = (await run('git', ['merge-base', await fetchTarget(config, run), 'HEAD'], { cwd: expected })).trim()
     return
   }
   let exists = true
   try { await access(expected) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') exists = false; else throw error }
   if (exists) throw new Error('Refusing to adopt an unregistered worktree path')
   if (records.some(fields => fields.includes(`branch refs/heads/${task.branch}`))) throw new Error('Task branch already belongs to another worktree')
+  if(task.baseSha)throw new Error('Prepared task worktree is missing; do not recreate it on Resume')
+  const target = await fetchTarget(config, run)
   await run('git', ['worktree', 'add', '-b', task.branch, expected, target], { cwd: config.workspace })
   task.baseSha = target
 }

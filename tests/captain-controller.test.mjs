@@ -104,6 +104,111 @@ test('explicit human parked-task resumption raises its team resource cap without
   assert.ok(Date.parse(task.budgetStartedAt)>=Date.now()-1000)
 }))
 
+test('explicit assigned-task resume reaches its worker without tracker discovery or a second claim',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'External prerequisite'})
+  task.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick();assert.equal(task.status,'parked')
+  f.provider.discover=async()=>{throw new Error('Tracker offline')};f.provider.claim=async()=>{throw new Error('Unexpected duplicate claim')}
+  const starts=f.starts.length,identity=[task.id,task.sessionId,task.worktree]
+  await f.controller.resumeTask('captain',task.id,'Human resolved the prerequisite',true)
+  assert.equal(task.status,'running');assert.equal(f.starts.length,starts+1)
+  assert.deepEqual([task.id,task.sessionId,task.worktree],identity)
+  await f.controller.tick();assert.equal(f.starts.length,starts+1);assert.match(run.error,/Tracker offline/)
+}))
+
+test('a short human retry reason is accepted for an idle waiting worker and remains distinct from model recovery',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick()
+  const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'waiting',note:'Prior wait'});await f.runtime.stop(task.sessionId)
+  const starts=f.starts.length;await f.controller.resumeTask('captain',task.id,'solved',true)
+  assert.equal(f.starts.length,starts+1);assert.equal(task.status,'running');assert.equal(task.pendingHumanRetry.reason,'solved')
+  assert.equal(task.pendingHumanRetry.previousBlocker,'Prior wait')
+}))
+
+test('human resume dispatch is independent of an already pending discovery request',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Prerequisite'})
+  task.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick()
+  let release,entered;const enteredDiscovery=new Promise(r=>entered=r),pending=new Promise(r=>release=r)
+  f.provider.discover=async()=>{entered();await pending;return []}
+  const tick=f.controller.tick();await enteredDiscovery;const starts=f.starts.length
+  try{await f.controller.resumeTask('captain',task.id,'Explicit human retry',true);assert.equal(f.starts.length,starts+1);assert.equal(task.status,'running')}
+  finally{release();await tick}
+  assert.equal(f.starts.length,starts+1)
+}))
+
+test('Stop drains direct resume admission and prevents a late start from reviving work',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Prerequisite'});task.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick()
+  let release,entered;const preparing=new Promise(r=>entered=r),pending=new Promise(r=>release=r)
+  f.runtime.prepare=async()=>{entered();await pending}
+  const starts=f.starts.length,resume=f.controller.resumeTask('captain',task.id,'Human retry',true);await preparing
+  const stop=f.controller.control('captain','stop');assert.equal(run.status,'stopped');release();await Promise.all([resume,stop])
+  assert.equal(f.starts.length,starts);assert.equal(task.status,'cancelled')
+}))
+
+test('discovery completing during direct resume cannot claim or launch the same task twice',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Prerequisite'});task.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick()
+  let releaseDiscovery,enteredDiscovery,releasePrepare,enteredPrepare
+  const discoveryEntered=new Promise(r=>enteredDiscovery=r),discoveryGate=new Promise(r=>releaseDiscovery=r)
+  const prepareEntered=new Promise(r=>enteredPrepare=r),prepareGate=new Promise(r=>releasePrepare=r)
+  f.provider.discover=async()=>{enteredDiscovery();await discoveryGate;return []}
+  let claims=0,prepares=0;f.provider.claim=async()=>claims++
+  f.runtime.prepare=async()=>{prepares++;enteredPrepare();await prepareGate}
+  const starts=f.starts.length,tick=f.controller.tick();await discoveryEntered
+  const resume=f.controller.resumeTask('captain',task.id,'Human retry',true);await prepareEntered
+  releaseDiscovery();await new Promise(r=>setTimeout(r,20));releasePrepare();await Promise.all([tick,resume])
+  assert.equal(claims,0);assert.equal(prepares,1);assert.equal(f.starts.length,starts+1)
+}))
+
+test('Pause during direct resume validation defers admission without losing the request',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Prerequisite'});task.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick()
+  let release,entered;const preparing=new Promise(r=>entered=r),pending=new Promise(r=>release=r)
+  f.runtime.prepare=async()=>{entered();await pending}
+  const starts=f.starts.length,resume=f.controller.resumeTask('captain',task.id,'Human retry',true);await preparing
+  await f.controller.control('captain','pause');release();await resume
+  assert.equal(f.starts.length,starts);assert.equal(task.status,'blocked');assert.equal(task.resumeRequested,true)
+  f.provider.discover=async()=>{throw new Error('Offline')};await f.controller.control('captain','resume');await f.controller.tick()
+  assert.equal(f.starts.length,starts+1);assert.equal(task.status,'running')
+}))
+
+test('automatic direct resume cannot renew or bypass an expired assignment budget',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:120});await f.controller.tick()
+  const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Prerequisite'});task.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick()
+  task.budgetStartedAt=new Date(Date.now()-4*3600000).toISOString();task.phases=[{phase:'parked',at:new Date(Date.now()-3600000).toISOString()}]
+  const starts=f.starts.length;f.provider.discover=async()=>{throw new Error('Offline')}
+  await f.controller.resumeTask('captain',task.id,'Changed evidence',false)
+  assert.equal(f.starts.length,starts);assert.equal(task.status,'failed');assert.match(task.error,/budget exhausted/)
+}))
+
+test('offline dispatch refreshes stale blocked activity before enforcing capacity',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,parallelism:1});await f.controller.tick()
+  const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Old activity'})
+  await f.controller.control('captain','stop');await f.controller.control('captain','resume')
+  assert.equal(task.executionActive,true);f.provider.discover=async()=>{throw new Error('Offline')}
+  const starts=f.starts.length;await f.controller.tick()
+  assert.equal(f.starts.length,starts+1);assert.equal(task.status,'running')
+}))
+
+test('another idle blocked worker cannot retain a stale capacity slot when discovery is offline',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:2,maxTaskMinutes:480});await f.controller.tick()
+  const [first,second]=run.tasks
+  await f.controller.report(first.sessionId,{phase:'blocked',blocked:true,note:'Prerequisite'});first.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick()
+  await f.controller.report(second.sessionId,{phase:'blocked',blocked:true,note:'Another blocker'});await f.runtime.stop(second.sessionId)
+  await f.controller.control('captain','parallelism',1);f.provider.discover=async()=>{throw new Error('Offline')}
+  const starts=f.starts.length;await f.controller.resumeTask('captain',first.id,'solved',true)
+  assert.equal(second.executionActive,false);assert.equal(first.status,'running');assert.equal(f.starts.length,starts+1)
+}))
+
+test('direct resume rechecks the budget after asynchronous local preparation',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:120});await f.controller.tick()
+  const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Prerequisite'});task.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick()
+  f.runtime.prepare=async()=>{task.budgetStartedAt=new Date(Date.now()-4*3600000).toISOString()}
+  const starts=f.starts.length;await f.controller.resumeTask('captain',task.id,'Explicit human retry',true)
+  assert.equal(f.starts.length,starts);assert.equal(task.status,'failed');assert.match(task.error,/budget exhausted/)
+}))
+
 test('team resource overrides require human resumption within the configured run cap',()=>fixture(async f=>{
   const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick()
   const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'External hold'});task.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick();run.config.maxTeamMembers=5
