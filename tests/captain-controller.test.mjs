@@ -612,12 +612,40 @@ test('pending CI reuses current review and confirmed merge recovery does not re-
   f.provider.inspectPullRequest=async()=>({id:'1',url:'url',merged:true,headSha:'head',mergeSha:'merged',checksPassed:true})
   await f.controller.tick();assert.equal(reviews,1);assert.equal(task.status,'merged');assert.ok(task.closedAt)
 }))
-test('closure failure cannot advance to next milestone',()=>fixture(async f=>{
-  f.setTickets([ticket('1'),ticket('2','M2')]);f.provider.close=async()=>{throw new Error('Temporary provider outage')}
+test('closure failure cannot unlock its dependent in another milestone',()=>fixture(async f=>{
+  f.setTickets([ticket('1'),ticket('2','M2',['1'])]);f.provider.close=async()=>{throw new Error('Temporary provider outage')}
   await f.controller.start('captain',{...f.config,parallelism:1});await f.controller.tick()
   const task=f.controller.state('captain').tasks[0]
   await f.controller.report(task.sessionId,{phase:'review',ready:true});await f.controller.tick();await f.controller.tick()
   assert.equal(task.status,'merged');assert.equal(task.closedAt,undefined);assert.equal(f.starts.length,1)
+}))
+
+test('free slots take independent later-milestone work while preserving milestone priority',()=>fixture(async f=>{
+  f.setTickets([{...ticket('1','M1'),priority:9},{...ticket('2','M2'),priority:0},ticket('3','M2',['1'])])
+  const run=await f.controller.start('captain',{...f.config,parallelism:2});await f.controller.tick()
+  assert.deepEqual(run.tasks.map(t=>t.ticket.id),['1','2'])
+  await f.controller.report(run.tasks[0].sessionId,{phase:'blocked',blocked:true,note:'External prerequisite'})
+  await f.controller.tick();assert.equal(run.tasks.length,2)
+}))
+
+test('live milestone scope updates preserve workers and immutable task contracts',()=>fixture(async f=>{
+  f.setTickets([ticket('1'),ticket('2','M2')])
+  const run=await f.controller.start('captain',{...f.config,milestones:['M1']});await f.controller.tick()
+  const task=run.tasks[0],snapshot=JSON.stringify(task.assignmentConfig),starts=f.starts.length
+  await f.controller.updateMilestones('captain',['M1','M2'])
+  assert.equal(f.starts.length,starts);assert.equal(JSON.stringify(task.assignmentConfig),snapshot)
+  await assert.rejects(f.controller.updateMilestones(task.sessionId,['M2']),/captain/i)
+  await assert.rejects(f.controller.updateMilestones('captain',[]),/milestone/i)
+  await f.controller.tick();assert.deepEqual(run.tasks.map(t=>t.ticket.id),['1','2'])
+}))
+
+test('milestone changes during a worker launch cannot admit tickets outside the new scope',()=>fixture(async f=>{
+  f.setTickets([ticket('1'),ticket('2','M2')]);const run=await f.controller.start('captain',f.config)
+  let release,entered;const started=new Promise(r=>entered=r),pending=new Promise(r=>release=r),originalStart=f.runtime.start
+  f.runtime.start=async t=>{await originalStart(t);entered();await pending}
+  const claims=[];f.provider.claim=async t=>claims.push(t.id)
+  const tick=f.controller.tick();await started;await f.controller.updateMilestones('captain',['M1']);release();await tick
+  assert.deepEqual(claims,['1']);assert.deepEqual(run.tasks.map(t=>t.ticket.id),['1'])
 }))
 test('cold restart restores existing workers without duplicate claims or sessions',()=>fixture(async f=>{
   await f.controller.start('captain',f.config);await f.controller.tick()

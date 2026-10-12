@@ -204,6 +204,16 @@ export class CaptainController {
     if(run.questions.some(q=>!q.answer))throw new Error('Answer pending worker questions before waiting')
     await this.runtime.coordinatorLoop?.(run,'wait');await this.save(run)
   }
+
+  async updateMilestones(sessionId:string,milestones:unknown,expectedRevision?:number):Promise<Run> {
+    const run=this.captain(sessionId)
+    if(this.disposed||!['running','paused'].includes(run.status)||expectedRevision!==undefined&&run.coordinatorRevision!==expectedRevision)throw new Error('Milestone scope needs the active coordinator; run changed during validation')
+    const updated=validateConfig({...run.config,milestones})
+    for(const task of run.tasks)task.assignmentConfig??=structuredClone(run.config)
+    run.coordinatorRevision=(run.coordinatorRevision??0)+1
+    run.config=updated;await this.save(run)
+    return run
+  }
   loopState(sessionId:string) {
     const run=this.state(sessionId)
     return run?this.runtime.coordinatorLoopState?.(run)??{status:'not-started' as const}:null
@@ -534,11 +544,12 @@ export class CaptainController {
       run.status = 'stopped';run.stoppedAt=now(); await this.endLoop(run);await this.save(run); await this.store.release(repositoryKey(run.config)); return
     }
     if (run.status !== 'running' || this.disposed) { await this.save(run); return }
-    const rows = eligibility(run.tickets, run.config.milestones, run.tasks)
-    const eligible = new Set(rows.filter(r => r.eligible).map(r => r.ticketId))
-    const queue = run.tickets.filter(t => eligible.has(t.id)).sort((a,b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
-    for (const ticket of queue) {
+    while(true) {
       if (run.status !== 'running' || this.disposed || this.activeCount(run) >= run.config.parallelism || run.config.maxTickets > 0 && run.tasks.length >= run.config.maxTickets) break
+      // Scope/order and task states can change while the previous launch awaits.
+      const eligible = new Set(eligibility(run.tickets,run.config.milestones,run.tasks).filter(r=>r.eligible).map(r=>r.ticketId))
+      const ticket = run.tickets.filter(t=>eligible.has(t.id)).sort((a,b)=>run.config.milestones.indexOf(a.milestone)-run.config.milestones.indexOf(b.milestone)||a.priority-b.priority||a.createdAt.localeCompare(b.createdAt)||a.id.localeCompare(b.id))[0]
+      if(!ticket)break
       const id = randomUUID(), attempt = randomUUID(), startedAt = now()
       const safe = ticket.id.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 40)
       const branch = `captain/${safe}-${id.slice(0,8)}`

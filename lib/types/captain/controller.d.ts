@@ -95,6 +95,7 @@ export declare class CaptainController {
     control(sessionId: string, action: string, parallelism?: number): Promise<Run>;
     configure(sessionId: string, raw: unknown): Promise<Run>;
     wait(sessionId: string): Promise<void>;
+    updateMilestones(sessionId: string, milestones: unknown, expectedRevision?: number): Promise<Run>;
     loopState(sessionId: string): import("./types.ts").CoordinatorLoopState | null;
     report(sessionId: string, report: {
         phase: Phase;

@@ -9,7 +9,6 @@ export function eligibility(tickets: Ticket[], milestones: string[], tasks: (Pic
   if (byId.size !== tickets.length) throw new Error('Duplicate ticket identities in discovery')
   const delivered = new Set(tasks.filter(t => t.status === 'merged' && t.closedAt).map(t => t.ticket.id))
   const satisfied = (t: Ticket): boolean => delivered.has(t.id) || (t.state === 'closed' && (t.merged || t.completedDecision === true))
-  const current = milestones.find(m => tickets.some(t => t.milestone === m && !satisfied(t)))
   const dependencyIssue = (ticket: Ticket, path: Set<string>): string | undefined => {
     if (path.has(ticket.id)) return `Dependency cycle involving ${ticket.id}`
     const next = new Set(path).add(ticket.id)
@@ -19,7 +18,6 @@ export function eligibility(tickets: Ticket[], milestones: string[], tasks: (Pic
       if (satisfied(predecessor)) continue
       const cycle = dependencyIssue(predecessor, next)
       if (cycle) return cycle
-      if (milestones.indexOf(predecessor.milestone) > milestones.indexOf(ticket.milestone)) return `Predecessor ${id} belongs to a later milestone`
       return `Waiting for predecessor ${id} to be merged and closed`
     }
     return undefined
@@ -31,10 +29,10 @@ export function eligibility(tickets: Ticket[], milestones: string[], tasks: (Pic
       : t.exclusion ? t.exclusion
       : t.state === 'closed' ? 'Closed without verified merged delivery'
       : dependencyIssue(t, new Set())
-      ?? (t.milestone !== current ? `Waiting for milestone ${current ?? '(none)'}` : '')
+      ?? ''
     const state=satisfied(t)?t.completedDecision&&!t.merged&&!delivered.has(t.id)?'decision-complete':'delivered'
       : !milestones.includes(t.milestone)?'excluded':task?task.status:t.exclusion?'excluded':t.state==='closed'?'unverified-closure'
-      : reason?.startsWith('Waiting for milestone')?'milestone':reason?'dependency':'eligible'
+      : reason?'dependency':'eligible'
     return { ticketId: t.id, eligible: !reason, reason: reason || 'Ready', state, predecessors:t.predecessors }
   })
 }
