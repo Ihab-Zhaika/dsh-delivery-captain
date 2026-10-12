@@ -178,6 +178,35 @@ test('host shutdown quiesces workers while retaining the original active team gr
   const evidence=await rt.evidence({config:{...config,workspace:root},tasks:[item]})
   assert.equal(evidence.workers[0].team.state,'active');assert.ok(h.calls.some(c=>c[0]==='drain'))
 })
+
+test('inbox clearing failure still aborts the active phase and attempts owned child cleanup',async()=>{
+  const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker'})
+  await rt.restore(item,{config})
+  let aborted=0
+  h.agents.get(item.sessionId).cancel=(_cause,options)=>{if(!options?.keepInbox)throw new Error('inbox projection registration is not active');aborted++}
+  await assert.rejects(rt.stop(item.sessionId,'shutdown'),/inbox projection registration/)
+  assert.ok(aborted>0);assert.ok(h.calls.some(c=>c[0]==='drain'));assert.ok(h.calls.some(c=>c[0]==='idle'))
+})
+
+test('live lifecycle evidence reads the exact registered agent inbox without changing it',async()=>{
+  const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker'})
+  await rt.restore(item,{config});const agent=h.agents.get(item.sessionId)
+  agent.inbox={nextTurn:[],nextStep:[]}
+  const evidence=await rt.evidence({config,tasks:[item]})
+  assert.equal(evidence.workers[0].lifecycle.inbox.readable,true);assert.equal(evidence.workers[0].lifecycle.sessionMatches,true)
+  Object.defineProperty(agent.inbox,'nextTurn',{get(){throw new Error('projection registration is not active')}})
+  const unhealthy=await rt.evidence({config,tasks:[item]})
+  assert.equal(unhealthy.workers[0].lifecycle.inbox.readable,false);assert.match(unhealthy.workers[0].lifecycle.inbox.error,/not active/)
+})
+
+test('healthy native request admission retains old shutdown errors in history while preserving gate failures',async()=>{
+  for(const message of ['Shutdown incomplete: prior inbox registration failure','Verification finding remains unresolved']) {
+    const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker',phases:[],error:message})
+    await rt.restore(item,{config});h.agents.get(item.sessionId).inbox={nextTurn:[],nextStep:[]}
+    await rt.start(item,{config})
+    if(message.startsWith('Shutdown incomplete:')){assert.equal(item.error,undefined);assert.ok(item.phases.some(p=>p.note?.includes(message)))}else assert.equal(item.error,message)
+  }
+})
 test('idle root counts as active while owned descendants work', async () => {
   const h = host(); const rt = runtime.createRuntime(h.ctx)
   await rt.start(task({ worktree: '/worker' }), { config })
@@ -202,6 +231,16 @@ test('scoped team admission enforces automatic capped inline plan', async () => 
   assert.equal((await call({ approval: 'required', plan: { members: [{}] } })).kind, 'deny')
   assert.equal((await call({ approval: 'automatic', plan: { members: [{}, {}, {}] } })).kind, 'deny')
   assert.equal((await call({ approval: 'automatic', description: 'Delivery task t1', plan: { members: [{}] } })).kind, 'allow')
+})
+
+test('an explicitly raised resource snapshot updates already-configured team admission guards',async()=>{
+  const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker',assignmentConfig:{...config,maxTeamMembers:2}})
+  await rt.start(item,{config})
+  const gate=h.hooks.find(([name])=>name==='tools/pre-execute')[1]
+  const call=count=>gate({name:'agent_teams_create',arguments:{approval:'automatic',description:'Delivery task t1',plan:{members:Array.from({length:count},()=>({}))}}},async()=>({kind:'allow'}))
+  assert.equal((await call(3)).kind,'deny')
+  item.assignmentConfig={...item.assignmentConfig,maxTeamMembers:5}
+  assert.equal((await call(5)).kind,'allow');assert.equal((await call(6)).kind,'deny')
 })
 test('review fails closed on malformed output or a timeout', async t => {
   const root = await repo(t); const item = task({ worktree: root, baseSha: git(root, 'rev-parse', 'HEAD') })

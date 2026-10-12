@@ -104,11 +104,11 @@ export declare class CaptainController {
     answer(sessionId: string, questionId: string, answer: string, action?: 'resume' | 'wait'): Promise<Question>;
     private deliverAnswer;
     message(sessionId: string, taskId: string, text: string, action?: 'resume' | 'wait'): Promise<void>;
-    resumeTask(sessionId: string, taskId: string, evidence: string, human?: boolean): Promise<Task>;
+    resumeTask(sessionId: string, taskId: string, evidence: string, human?: boolean, teamMemberLimit?: number): Promise<Task>;
     followup(sessionId: string, input: FollowupInput): Promise<string>;
     private activeCount;
     private notifyBlocker;
-    announce(run: Run, text: string): Promise<void>;
+    announce(run: Run, text: string): Promise<boolean>;
     private notify;
     private notifyQuestion;
     /** Deduplicated timer entry. No model polling is required for queue discovery. */

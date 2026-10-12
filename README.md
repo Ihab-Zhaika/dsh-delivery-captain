@@ -50,6 +50,8 @@ Milestone order comes from `.darkingdoom.json` or `docs/delivery/{github,azure-d
 
 Adjust parallel tickets, team size, execution limits, optional source filters, milestone scope and verification commands as needed. To declare defaults in another repository, commit `.darkingdoom.json` containing `milestones` (ordered exact names) and `verifyCommands` (host commands, one per array entry).
 
+Saved team sizes apply to future assignments. An explicit human task resumption can also raise that existing task's member cap up to the saved run limit; its verification, acceptance and repair limits stay bound to the original assignment. Explicit human task Resume, or run Resume of selected cancelled tasks, starts a fresh bounded execution window with that assignment's original duration. Previous elapsed time, phase history and failures remain visible; automatic model resumption cannot renew the budget.
+
 For a bounded trial, set **Ticket limit** to **1** under **Execution limits & verification**, and **Parallel tickets** to **1**. The limit counts admitted attempts, including blocked setup; it is retained through recovery and Resume. The run stops after its admitted tickets reach a terminal state (merged tickets must also be closed). **0** keeps consuming eligible tickets continuously. Parallelism alone does not limit the total tickets a run can consume.
 
 **Start DarKingDoom Plugin** grants advance authority for full filesystem/shell/network access, original AgentTeams automatic approval, pushes, PR creation, gated merges, follow-ups and closure. Installing the plugin, opening its panel or reading ticket content never activates an ordinary session. There is no model-callable activation tool.

@@ -94,6 +94,23 @@ test('saving configuration rejects concurrent Resume and leaves existing setting
   await assert.rejects(pending,/changed|stopped/i);assert.equal(run.config.parallelism,2)
 }))
 
+test('explicit human parked-task resumption raises its team resource cap without changing original gates',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0],commands=[...task.assignmentConfig.verifyCommands]
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Missing prerequisite'});task.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick()
+  run.config.maxTeamMembers=5
+  await f.controller.resumeTask('captain',task.id,'The .NET issue is resolved; human permits five team members.',true,5)
+  assert.equal(task.assignmentConfig.maxTeamMembers,5);assert.deepEqual(task.assignmentConfig.verifyCommands,commands);assert.equal(task.assignmentConfig.maxTaskMinutes,480)
+  assert.ok(Date.parse(task.budgetStartedAt)>=Date.now()-1000)
+}))
+
+test('team resource overrides require human resumption within the configured run cap',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'External hold'});task.blockedSince=new Date(Date.now()-3601000).toISOString();await f.controller.tick();run.config.maxTeamMembers=5
+  for(const [human,limit] of [[false,5],[true,6],[true,0],[true,1]])await assert.rejects(f.controller.resumeTask('captain',task.id,'New evidence',human,limit),/team|human|limit/i)
+  assert.equal(task.status,'parked');assert.equal(task.assignmentConfig.maxTeamMembers,2)
+}))
+
 test('blocking over one hour parks without archiving, frees capacity, and does not unlock dependencies',()=>fixture(async f=>{
   f.setTickets([ticket('1'),ticket('2'),ticket('4','M1',['1']),ticket('3','M2')])
   const run=await f.controller.start('captain',{...f.config,parallelism:1,maxTaskMinutes:480});await f.controller.tick()
@@ -468,6 +485,14 @@ test('failed question notification is durably retried',()=>fixture(async f=>{
   f.runtime.send=async(id)=>{if(id==='captain'&&++deliveries===1)throw new Error('Unavailable')}
   const q=await f.controller.question(task.sessionId,'Decision needed');q.lastNotifyAttemptAt='2000-01-01'
   await f.controller.tick();assert.ok(q.notifiedAt);assert.equal(deliveries,2)
+}))
+
+test('operator announcements expose actual native admission failure instead of falsely acknowledging delivery',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',f.config)
+  f.runtime.send=async()=>{throw new Error('Transport unavailable')}
+  assert.equal(await f.controller.announce(run,'New host evidence'),false)
+  f.runtime.send=async()=>{}
+  assert.equal(await f.controller.announce(run,'New host evidence'),true)
 }))
 test('pending CI reuses current review and confirmed merge recovery does not re-review',()=>fixture(async f=>{
   let reviews=0

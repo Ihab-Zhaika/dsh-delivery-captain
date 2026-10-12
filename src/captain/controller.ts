@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import type { FollowupInput, Phase, Question, Run, RunConfig, Task, TicketProvider, WorkerRuntime } from './types.ts'
-import { eligibility, validateConfig, taskDeliveryConfig, phaseDurations } from './scheduler.ts'
+import { eligibility, validateConfig, taskDeliveryConfig, taskDeadline } from './scheduler.ts'
 import { RunStore } from './store.ts'
 
 const TERMINAL = new Set<Task['status']>(['merged', 'failed', 'cancelled'])
@@ -151,7 +151,7 @@ export class CaptainController {
       if(run.coordinatorRevision!==revision||this.disposed)throw new Error('Run changed while activating resumption')
       run.status = 'running'
       delete run.stoppedAt
-      for (const t of run.tasks.filter(t => t.status === 'cancelled'&&run.config.milestones.includes(t.ticket.milestone)&&(!run.config.ticketIds||run.config.ticketIds.includes(t.ticket.id)))) { t.status = 'blocked'; t.resumeRequested = true; delete t.finishedAt; t.recoveryAttempts = 0; delete t.lastWakeAt }
+      for (const t of run.tasks.filter(t => t.status === 'cancelled'&&run.config.milestones.includes(t.ticket.milestone)&&(!run.config.ticketIds||run.config.ticketIds.includes(t.ticket.id)))) { t.status = 'blocked'; t.budgetStartedAt=now(); t.phases.push({phase:t.phase,at:now(),note:'Explicit run Resume starts a fresh bounded execution window; previous elapsed/history and assignment gates retained.'});t.resumeRequested = true; delete t.finishedAt; t.recoveryAttempts = 0; delete t.lastWakeAt }
     } else if (action === 'stop') {
       this.stoppingRuns.add(run.id)
       try {
@@ -306,15 +306,22 @@ export class CaptainController {
     await this.save(run)
   }
 
-  async resumeTask(sessionId: string, taskId: string, evidence: string, human = false): Promise<Task> {
+  async resumeTask(sessionId: string, taskId: string, evidence: string, human = false, teamMemberLimit?:number): Promise<Task> {
     const run=this.captain(sessionId),task=run.tasks.find(t=>t.id===taskId)
     if(isStopped(run)||run.status!=='running'||!task||task.status!=='parked')throw new Error('Resume requires a running coordinator and parked task')
     if(!evidence.trim()||evidence.length>30000)throw new Error('Describe the changed prerequisite or explicit human resumption')
+    const originalConfig=taskDeliveryConfig(task,run.config)
+    if(teamMemberLimit!==undefined&&(!human||!Number.isInteger(teamMemberLimit)||teamMemberLimit<originalConfig.maxTeamMembers||teamMemberLimit>run.config.maxTeamMembers))throw new Error('A team resource override requires human resumption and a raised member limit within the configured run cap')
     if(task.executionActive||task.parkingError)throw new Error('Parking has not safely quiesced the worker')
     const version=task.transitionVersion
     if(!human)await this.runtime.assertCaptainDiagnostics?.(run)
     if(isStopped(run)||this.disposed||task.status!=='parked'||task.transitionVersion!==version)throw new Error('Task changed during resumption validation')
     task.transitionVersion=(task.transitionVersion??0)+1
+    if(human){task.budgetStartedAt=now();task.phases.push({phase:task.phase,at:now(),note:'Explicit human task Resume starts a fresh bounded execution window; original elapsed/history and gate policies retained.'})}
+    if(teamMemberLimit!==undefined) {
+      task.assignmentConfig={...structuredClone(task.assignmentConfig??run.config),maxTeamMembers:teamMemberLimit}
+      task.phases.push({phase:task.phase,at:now(),note:`Human resource override: team member limit ${originalConfig.maxTeamMembers} → ${teamMemberLimit}; verification, acceptance and other assignment policies unchanged.`})
+    }
     task.status='blocked';task.resumeRequested=true;task.waitingDecision=evidence;delete task.blockedSince;delete task.idleCheckpointAt
     this.phase(task,'waiting',`Explicit resumption: ${evidence}`);await this.save(run)
     return task
@@ -339,7 +346,7 @@ export class CaptainController {
     if(await this.notify(run,text,`blocker:${task.id}:${fingerprint}`)){task.blockerFingerprint=fingerprint;task.blockerNotifiedAt=now()}
     await this.save(run)
   }
-  async announce(run: Run, text: string): Promise<void> { await this.notify(run, text) }
+  async announce(run: Run, text: string): Promise<boolean> { return this.notify(run, text) }
   private async notify(run: Run, text: string, deliveryKey?: string): Promise<boolean> {
     if(isStopped(run)||this.disposed)return false
     try {
@@ -413,7 +420,7 @@ export class CaptainController {
         }
         continue
       }
-      if (Date.now() - Date.parse(task.startedAt) - (phaseDurations(task).parked??0) > taskDeliveryConfig(task,run.config).maxTaskMinutes * 60000) {
+      if (Date.now()>taskDeadline(task,taskDeliveryConfig(task,run.config).maxTaskMinutes)) {
         await this.runtime.stop(task.sessionId); task.status = 'failed'; task.error = 'Task time budget exhausted'; task.finishedAt = now(); this.phase(task, 'blocked', task.error); await this.save(run); continue
       }
       if (task.status === 'ready') { await this.integrate(run, task, provider); continue }

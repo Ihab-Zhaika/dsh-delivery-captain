@@ -40,8 +40,15 @@ export function eligibility(tickets: Ticket[], milestones: string[], tasks: (Pic
 }
 
 /** Parked human waiting is visible wall time but does not spend the task's execution budget. */
-export function taskDeadline(task: Pick<Task,'startedAt'|'phases'|'finishedAt'>,minutes:number,now=Date.now()):number {
-  return Date.parse(task.startedAt)+minutes*60000+(phaseDurations(task,now).parked??0)
+export function taskDeadline(task: Pick<Task,'startedAt'|'phases'|'finishedAt'> & Partial<Pick<Task,'budgetStartedAt'>>,minutes:number,now=Date.now()):number {
+  const start=Date.parse(task.budgetStartedAt??task.startedAt)
+  let parked=0
+  task.phases.forEach((event,i)=>{
+    if(event.phase!=='parked')return
+    const end=task.phases[i+1]?.at??task.finishedAt
+    parked+=Math.max(0,(end?Date.parse(end):now)-Math.max(start,Date.parse(event.at)))
+  })
+  return start+minutes*60000+parked
 }
 
 /** Wall-clock phase intervals partition time; never sum parallel agent effort into these. */

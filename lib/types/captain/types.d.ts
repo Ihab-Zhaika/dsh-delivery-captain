@@ -66,6 +66,7 @@ export interface Question {
 }
 export interface Task {
     assignmentConfig?: RunConfig;
+    budgetStartedAt?: string;
     id: string;
     ticket: Ticket;
     attempt: string;
