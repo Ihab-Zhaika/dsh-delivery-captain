@@ -5,7 +5,7 @@
 - Windows, Node 24.15.0, DSH 0.2.0-rc.2, original AgentTeams 0.1.23, OCR installed v1.12.13.
 - `pnpm typecheck`: host and browser TypeScript passed.
 - `pnpm build`: host/browser artifacts built. The inherited DSH browser-loader contract requires CJS; tsdown's general ESM recommendation is expected.
-- `pnpm verify`: 119 tests passed, zero failures. Source/build artifact stamp matched.
+- `pnpm verify`: 134 tests passed, zero failures. Source/build artifact stamp matched.
 - Repository discovery: real temporary repositories, both remotes, remote default branch, repository plan order, full Azure iteration paths, safe metadata reads, missing authentication/defaults, and refusal to redirect a session to another repository.
 - Temporary real Git repositories: fetched target branch, isolated worktree/branch, idempotent adoption, dirty-worktree rejection and branch/target drift.
 - Provider contract fixtures: GitHub dependency closure and closing PRs; Azure native predecessors, custom workflow completion categories, acceptance fields, pagination, exact-head merge and remote policy checks.
@@ -30,6 +30,16 @@ The isolated Web profile intentionally had no model credentials. A UI-only chat 
 ## Naming
 
 Offline naming compatibility passed. Short command/tool names produce optional publisher-prefix recommendations. The community registry lookup returned no reviewed matches for DSH 0.2.0-rc.2. Index SHA-256: `0a9ba9bd9b4e0d2ab8136e750103b55ee23487e3e954c643aea1b210c4045a34`, source `https://raw.githubusercontent.com/oh-my-dsh/dsh-plugin-registry/main/registry/index.json`. This is not a namespace reservation.
+
+## Waiting and diagnostic-team correction
+
+The live trial exposed a controller loop: a blocked report could stop/archive a still-working original team, followed by timed relaunches that repeated the full assignment. Waiting and blocked states now retain teams; timed blocker relaunches are removed. Initial assignments render actual ticket newlines alongside formatted JSON metadata and are delivered once. Recovery is a compact checkpoint. Native request identities and persisted acknowledgement fields suppress duplicate delivery.
+
+The main TrucX session genuinely created original team `dd-diagnostics-371-20261012-0700`, with runtime, verification and acceptance diagnosticians. All three delegated tasks completed with real nonempty member session IDs. Their reports distinguish historical archive uncertainty, unfinished implementation, antivirus refusal, unsupported Windows full-CI execution, and missing physical devices. None is a staging acceptance pass. Screenshot: `artifacts/darkingdoom-live-diagnostics.png`.
+
+Blocked-worker guidance now requires actual original main-team evidence and complete delegated diagnosis. Waiting decisions remain recorded without waking a parked worker, including repeated waits after Stop/Resume. Concurrency regressions cover slot reservation, newer ready/terminal transitions during message delivery, and Stop during a blocked activity read. Normal shutdown preserves active team graphs; explicit Stop/review retain archival semantics.
+
+Read-only evidence reports capture the loaded module hash/build stamp at module evaluation, native worker creation receipts, current active/archive state and user-message counts. The fresh host's hash and source stamp matched the installed build. Unknown historical archive causes remain explicitly unknown; session inspection does not activate an Agent.
 
 ## Integration boundaries for the user's trial
 

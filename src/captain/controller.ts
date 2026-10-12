@@ -128,19 +128,21 @@ export class CaptainController {
     const { run, task } = this.worker(sessionId)
     if (!PHASES.includes(report.phase) || report.phase === 'complete') throw new Error('Only verified merge can complete a task')
     if (report.ready && report.blocked) throw new Error('A task cannot be ready and blocked together')
+    task.transitionVersion=(task.transitionVersion??0)+1
     delete task.resumeRequested
+    delete task.idleCheckpointAt
     this.phase(task, report.phase, report.note)
     if (report.ready) { task.status = 'ready'; this.phase(task, 'waiting', 'Queued for independent verification and merge') }
-    else if (report.blocked) { task.status = 'blocked'; task.error = report.note ?? 'Worker blocked'; task.lastWakeAt = now() }
+    else if (report.blocked) { task.status = 'blocked'; task.error = report.note ?? 'Worker blocked'; task.lastWakeAt = now(); task.executionActive = true }
     await this.save(run)
-    if (report.blocked) await this.notify(run, `Worker ${task.id} is blocked: ${task.error}. Resolve within its acceptance criteria; use darkingdoom_message to guide the worker. No human approval is required.`)
+    if (report.blocked) await this.notifyBlocker(run, task)
     return task
   }
 
   async question(sessionId: string, question: string): Promise<Question> {
     const { run, task } = this.worker(sessionId)
     if (!question.trim() || question.length > 20000) throw new Error('Question must be 1–20000 characters')
-    const duplicate = run.questions.find(q => q.taskId === task.id && q.question === question && !q.answer)
+    const duplicate = run.questions.find(q => q.taskId === task.id && q.question === question)
     if (duplicate) return duplicate
     const item: Question = { id: randomUUID(), taskId: task.id, question, createdAt: now() }
     run.questions.push(item); await this.save(run)
@@ -148,12 +150,18 @@ export class CaptainController {
     return item
   }
 
-  async answer(sessionId: string, questionId: string, answer: string): Promise<Question> {
+  async answer(sessionId: string, questionId: string, answer: string, action: 'resume' | 'wait' = 'resume'): Promise<Question> {
     const run = this.captain(sessionId)
     if (isStopped(run)) throw new Error('Captain run stopped')
     const q = run.questions.find(q => q.id === questionId)
     if (!q || !answer.trim() || answer.length > 30000) throw new Error('Invalid question or answer')
-    q.answer = answer; q.answeredAt = now(); delete q.deliveredAt; await this.save(run)
+    if (action !== 'resume' && action !== 'wait') throw new Error('Invalid answer action')
+    if (q.answer === answer && q.action === action && (q.deliveredAt||q.recordedAt)) {
+      const task=run.tasks.find(t=>t.id===q.taskId)
+      if(action==='wait'&&task?.status==='blocked'&&task.resumeRequested){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;await this.save(run)}
+      return q
+    }
+    q.answer = answer; q.action = action; q.answeredAt = now(); delete q.deliveredAt; delete q.recordedAt; await this.save(run)
     await this.deliverAnswer(run, q)
     return q
   }
@@ -161,25 +169,51 @@ export class CaptainController {
   private async deliverAnswer(run: Run, q: Question): Promise<void> {
     const task = run.tasks.find(t => t.id === q.taskId)
     if (!task || TERMINAL.has(task.status) || isStopped(run)) return
-    if (task.status === 'blocked' && this.activeCount(run) >= run.config.parallelism) return
+    if(task.status==='ready')return
+    if(task.status==='blocked')await this.runtime.assertCaptainDiagnostics?.(run)
+    if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready'].includes(task.status))return
+    if(q.action==='wait'&&task.status==='blocked'){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;task.waitingDecision=q.answer;q.recordedAt=now();await this.save(run);return}
+    if (task.status === 'blocked' && !task.executionActive && this.activeCount(run) >= run.config.parallelism) return
     delete task.resumeRequested
+    const previousStatus=task.status
+    const version=task.transitionVersion=(task.transitionVersion??0)+1
     task.status = 'running'; await this.save(run)
-    await this.runtime.send(task.sessionId, `Captain answer to ${q.id}: ${q.answer}`)
+    await this.runtime.send(task.sessionId, `Captain answer to ${q.id}: ${q.answer}${q.action==='wait'?'\nDecision: wait. Preserve the existing team and execution holds; do not retry unchanged work. Report waiting/blocked and yield when no independent safe work remains.':''}`,`answer:${q.id}:${createHash('sha256').update(JSON.stringify([q.answer,q.action])).digest('hex')}`)
     if (isStopped(run) || this.disposed) { await this.runtime.stop(task.sessionId); return }
-    this.phase(task, 'analysis'); delete task.error
+    if(!TERMINAL.has(task.status)&&task.transitionVersion===version){
+      if(q.action==='wait'){task.status=previousStatus;task.executionActive=true;if(previousStatus!=='blocked')this.phase(task,'waiting')}
+    else {this.phase(task,'analysis');delete task.error;delete task.idleCheckpointAt;delete task.waitingDecision}
+    }
     q.deliveredAt = now(); task.lastWakeAt = now(); await this.save(run)
   }
 
-  async message(sessionId: string, taskId: string, text: string): Promise<void> {
+  async message(sessionId: string, taskId: string, text: string, action: 'resume' | 'wait' = 'resume'): Promise<void> {
     const run = this.captain(sessionId), task = run.tasks.find(t => t.id === taskId)
     if (!task || TERMINAL.has(task.status) || isStopped(run)) throw new Error('Task is not active')
+    if(task.status==='ready')throw new Error('Task is already owned by controller verification; guidance cannot interrupt it')
     if (!text.trim() || text.length > 30000) throw new Error('Invalid worker message')
-    if (task.status === 'blocked' && this.activeCount(run) >= run.config.parallelism) throw new Error('No execution slot available; answer will need to wait')
+    if(action!=='resume'&&action!=='wait')throw new Error('Invalid guidance action')
+    const hash=createHash('sha256').update(JSON.stringify([text.trim(),action,task.blockerFingerprint])).digest('hex')
+    if(task.lastGuidanceHash===hash){
+      if(action==='wait'&&task.status==='blocked'&&task.resumeRequested){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;await this.save(run)}
+      return
+    }
+    if(task.status==='blocked')await this.runtime.assertCaptainDiagnostics?.(run)
+    if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready'].includes(task.status))throw new Error('Task changed while validating diagnostic evidence')
+    if(action==='wait'&&task.status==='blocked'){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;task.waitingDecision=text;task.lastGuidanceHash=hash;await this.save(run);return}
+    if (task.status === 'blocked' && !task.executionActive && this.activeCount(run) >= run.config.parallelism) throw new Error('No execution slot available; answer will need to wait')
     delete task.resumeRequested
+    const previousStatus=task.status
+    const version=task.transitionVersion=(task.transitionVersion??0)+1
     task.status = 'running'; await this.save(run)
-    await this.runtime.send(task.sessionId, `Captain guidance: ${text}`)
+    await this.runtime.send(task.sessionId, `Captain guidance: ${text}${action==='wait'?'\nDecision: wait. Preserve the current team and holds; do not retry unchanged work.':''}`,`guidance:${task.id}:${hash}`)
     if (isStopped(run) || this.disposed) { await this.runtime.stop(task.sessionId); return }
-    task.status = 'running'; task.lastWakeAt = now(); this.phase(task, 'analysis'); delete task.error; await this.save(run)
+    task.lastGuidanceHash=hash;task.lastWakeAt=now()
+    if(!TERMINAL.has(task.status)&&task.transitionVersion===version){
+      if(action==='wait'){task.status=previousStatus;task.executionActive=true;if(previousStatus!=='blocked')this.phase(task,'waiting')}
+      else{task.status='running';this.phase(task,'analysis');delete task.error;delete task.idleCheckpointAt;delete task.waitingDecision}
+    }
+    await this.save(run)
   }
 
   async followup(sessionId: string, input: FollowupInput): Promise<string> {
@@ -190,14 +224,25 @@ export class CaptainController {
     await this.save(run); return id
   }
 
-  private activeCount(run: Run): number { return run.tasks.filter(t => ['starting','running','ready'].includes(t.status)).length }
+  private activeCount(run: Run): number { return run.tasks.filter(t => ['starting','running','ready'].includes(t.status)||t.status==='blocked'&&t.executionActive).length }
+  private async notifyBlocker(run: Run,task: Task): Promise<void> {
+    if(isStopped(run)||this.disposed)return
+    const fingerprint=createHash('sha256').update(task.error??'Worker blocked').digest('hex')
+    if(task.blockerFingerprint===fingerprint&&task.blockerNotifiedAt)return
+    if(task.lastBlockerNotifyAttemptAt&&Date.now()-Date.parse(task.lastBlockerNotifyAttemptAt)<60000)return
+    task.lastBlockerNotifyAttemptAt=now();await this.save(run)
+    const text=`## Worker blocker: #${task.ticket.id}\n\n\`\`\`json\n${JSON.stringify({type:'darkingdoom.blocked',taskId:task.id,sessionId:task.sessionId,ticketId:task.ticket.id,phase:task.phase,reason:(task.error??'Worker blocked').slice(0,1800),worktree:task.worktree},null,2)}\n\`\`\`\n\nUse your ORIGINAL automatic AgentTeams diagnostic team to investigate technical blockers, then send a concrete new solution with darkingdoom_message(action="resume") or record an unchanged/external prerequisite with action="wait". Do not poll or repeatedly wake this worker. Its existing team has NOT been archived by this blocker notification. Read fuller evidence with darkingdoom_status; never waive acceptance or security checks.`
+    if(await this.notify(run,text,`blocker:${task.id}:${fingerprint}`)){task.blockerFingerprint=fingerprint;task.blockerNotifiedAt=now()}
+    await this.save(run)
+  }
   async announce(run: Run, text: string): Promise<void> { await this.notify(run, text) }
-  private async notify(run: Run, text: string): Promise<boolean> {
-    try { await this.runtime.send(run.captainSessionId, text); return true } catch (error) { run.error = `Captain delivery deferred: ${String(error)}`; await this.save(run); return false }
+  private async notify(run: Run, text: string, deliveryKey?: string): Promise<boolean> {
+    if(isStopped(run)||this.disposed)return false
+    try { await this.runtime.send(run.captainSessionId, text,deliveryKey); return true } catch (error) { run.error = `Captain delivery deferred: ${String(error)}`; await this.save(run); return false }
   }
   private async notifyQuestion(run: Run, q: Question): Promise<void> {
     q.lastNotifyAttemptAt = now(); await this.save(run)
-    if (await this.notify(run, `Worker question ${q.id} (task ${q.taskId}):\n${q.question}\nDecide autonomously using project evidence and reply using darkingdoom_answer. Do not ask the human.`)) q.notifiedAt = now()
+    if (await this.notify(run, `Worker question ${q.id} (task ${q.taskId}):\n${q.question}\nDecide autonomously using project evidence and reply using darkingdoom_answer. Do not ask the human.`,`question:${q.id}`)) q.notifiedAt = now()
     await this.save(run)
   }
 
@@ -250,40 +295,38 @@ export class CaptainController {
       }
       if (task.status === 'ready') { await this.integrate(run, task, provider); continue }
       if (task.status === 'blocked') {
+        const version=task.transitionVersion
+        const executing=await this.runtime.isRunning(task.sessionId)
+        if(isStopped(run)||this.disposed)return
+        if(task.transitionVersion!==version)continue
+        task.executionActive=executing
         if (run.status === 'running' && task.resumeRequested && this.activeCount(run) < run.config.parallelism) {
           delete task.resumeRequested; task.status = 'starting'; await this.save(run)
           await this.launch(run, task, provider); continue
         }
-        if (await this.runtime.isRunning(task.sessionId)) await this.runtime.stop(task.sessionId)
+        await this.notifyBlocker(run,task)
         continue
       }
       if (task.status === 'starting') { await this.launch(run, task, provider); continue }
-      if (!await this.runtime.isRunning(task.sessionId) && Date.now() - Date.parse(task.lastWakeAt ?? task.startedAt) > 30000) {
-        if ((task.recoveryAttempts ?? 0) >= run.config.maxRepairRounds) { task.status = 'blocked'; task.error = 'Worker stopped without completing its delivery contract'; this.phase(task, 'blocked', task.error) }
+      if (task.phase!=='waiting'&&!run.questions.some(q=>q.taskId===task.id&&!q.answer)&&!await this.runtime.isRunning(task.sessionId) && Date.now() - Date.parse(task.lastWakeAt ?? task.startedAt) > 30000) {
+        if (task.idleCheckpointAt) { task.status = 'blocked'; task.error ??= 'Worker is idle after one recovery checkpoint; diagnose its team and pending work';this.phase(task,'blocked',task.error);await this.notifyBlocker(run,task) }
         else {
-          task.recoveryAttempts = (task.recoveryAttempts ?? 0) + 1; task.lastWakeAt = now(); await this.save(run)
+          task.idleCheckpointAt=now();task.recoveryAttempts = (task.recoveryAttempts ?? 0) + 1; task.lastWakeAt = now(); await this.save(run)
           await this.runtime.start(task, run)
         }
       }
     }
     for (const q of run.questions) {
       if (isStopped(run)) return
-      if (q.answer && !q.deliveredAt) await this.deliverAnswer(run, q)
-      if (!q.answer && Date.now() - Date.parse(q.lastNotifyAttemptAt ?? q.createdAt) >= (q.notifiedAt ? 300000 : 60000)) await this.notifyQuestion(run, q)
+      if (q.answer && !q.deliveredAt && !q.recordedAt) await this.deliverAnswer(run, q)
+      if (!q.answer && !q.notifiedAt && Date.now() - Date.parse(q.lastNotifyAttemptAt ?? q.createdAt) >= 60000) await this.notifyQuestion(run, q)
     }
     // Admission counts persisted attempts, including blocked/failed setup. A trial
     // must never substitute another ticket or reset its cap after a restart.
     if (run.config.maxTickets > 0 && run.tasks.length >= run.config.maxTickets && run.tasks.every(t => TERMINAL.has(t.status) && (t.status !== 'merged' || t.closedAt))) {
       run.status = 'stopped'; await this.save(run); await this.store.release(repositoryKey(run.config)); return
     }
-    // Retry parked technical blockers with bounded recovery, never unlimited model loops.
-    for (const task of run.tasks.filter(t => t.status === 'blocked')) {
-      if (run.status !== 'running' || this.activeCount(run) >= run.config.parallelism) break
-      if (task.resumeRequested) continue
-      if ((task.recoveryAttempts ?? 0) >= run.config.maxRepairRounds || Date.now() - Date.parse(task.lastWakeAt ?? task.startedAt) < 60000) continue
-      task.recoveryAttempts = (task.recoveryAttempts ?? 0) + 1; task.status = 'running'; task.lastWakeAt = now(); this.phase(task, 'analysis'); await this.save(run)
-      await this.launch(run, task, provider)
-    }
+    // A parked blocker needs a new captain decision, not a timed assignment replay.
     if (run.status === 'draining' && this.activeCount(run) === 0) {
       run.status = 'stopped'; await this.save(run); await this.store.release(repositoryKey(run.config)); return
     }
@@ -366,19 +409,19 @@ export class CaptainController {
   async dispose(): Promise<void> {
     this.disposed = true
     for (const provider of this.activeProviders.values()) provider.cancel?.()
-    for (const run of this.runs.values()) await this.drainWorkers(run, false)
+    for (const run of this.runs.values()) await this.drainWorkers(run, false,'shutdown')
     await this.ticking
     // Preserve run status for cold recovery; stop writers before releasing leases.
     const errors: string[] = []
-    for (const run of this.runs.values()) errors.push(...await this.drainWorkers(run, false))
+    for (const run of this.runs.values()) errors.push(...await this.drainWorkers(run, false,'shutdown'))
     if (errors.length) throw new Error(`Shutdown incomplete; repository leases retained: ${errors.join('; ')}`)
     await this.store.dispose()
   }
-  private async drainWorkers(run: Run, cancel: boolean): Promise<string[]> {
+  private async drainWorkers(run: Run, cancel: boolean,reason: 'stop'|'shutdown'='stop'): Promise<string[]> {
     const errors: string[] = []
     await Promise.all(run.tasks.filter(t => !TERMINAL.has(t.status)).map(async task => {
       try {
-        await this.runtime.stop(task.sessionId)
+        await this.runtime.stop(task.sessionId,reason)
         if (cancel) { task.status = 'cancelled'; this.phase(task, 'blocked', 'Stopped by user'); task.finishedAt = now() }
       } catch (error) { const message = `${task.ticket.id}: ${String(error)}`; task.error = `Shutdown incomplete: ${message}`; errors.push(message) }
     }))

@@ -76,6 +76,10 @@ For a selected-ticket trial, command JSON may supply `ticketIds:["448","371"]` w
 
 Each ordinary root worker leads an original AgentTeams team with `approval="automatic"`. Full-access policy is written through DSH's permission service and inherited by original descendants. Workers ask durable questions; the captain answers and wakes them. Recovery is bounded. Irresolvable work stays blocked while other eligible work continues; later milestones stay locked.
 
+The full assignment is delivered once, with formatted JSON metadata and the ticket's actual multiline Markdown. Recovery sends a short checkpoint instead of replaying the ticket. Waiting for members or a pending answer does not restart the parent. Blocked reports retain the current team; unchanged blockers are not retried by a timer. Accepted notices, answers and identical guidance are deduplicated through persisted state and native prompt identities. One unexplained-idle checkpoint is allowed before the main session receives a diagnostic blocker.
+
+The activated main session must use original AgentTeams for read-only technical diagnosis. Guiding a blocked worker requires genuine main-session creation receipts and completed delegated reports. `darkingdoom_answer` and `darkingdoom_message` require `action:"resume"` for a concrete actionable change, or `action:"wait"` for an unchanged hold. A wait decision for a parked worker is recorded without waking it; it also consumes any pending resume. `darkingdoom_status` includes the loaded runtime hash/build stamp and read-only live/archived team evidence. Archived history does not prove who initiated an old archive.
+
 The sidebar shows a workspace such as **TrucX · #371** for each task worktree and a ticket-labelled root session within it. New sessions created with that workspace's **+** action stay in the same worktree for scoped continuation. A separately admitted follow-up ticket receives its own worktree/workspace. Recovery adopts the original session and workspace identities; completed task histories remain grouped. Removed historical worktrees produce a task-level grouping warning instead of preventing plugin startup. Registering or opening a workspace never starts a new delivery run.
 
 Independent follow-ups are linked to their source, assigned a configured milestone and enter the same eligibility rules. They cannot legitimately replace current acceptance requirements. AgentTeams and the worker contract enforce scope; full-access agents are not OS-isolated from one another.
@@ -94,6 +98,8 @@ Passing review is reused while waiting for CI only if worktree, head and target 
 - **Stop:** revoke admission, quiesce workers, archive their original teams, cancel command trees and drain selected continuable children, preserving files/state and the root session's ability to launch a recovery team on Resume.
 
 The DSH host must stay running. Closing the dashboard does not stop automation. Cold restart restores explicitly enabled runs and rechecks prerequisites. A single-host repository lease prevents duplicate captain ownership. State: `$DSH_HOME/darkingdoom` (default `~/.dsh/darkingdoom`). Worktrees: beside the checkout under `.delivery-worktrees/`. Worktrees are retained for inspection, never automatically deleted. AgentTeams state is ignored through Git `info/exclude`.
+
+Normal host shutdown quiesces execution and preserves original team graphs for recovery. Explicit Stop and controller review still use the original archive operation. Waiting or reporting a blocker does not archive a team.
 
 ## Statistics
 

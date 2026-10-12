@@ -25,7 +25,7 @@ export interface RepositoryContext {
   milestoneCatalog: string[];
 }
 export interface PhaseEvent { phase: Phase; at: string; note?: string }
-export interface Question { id: string; taskId: string; question: string; createdAt: string; answer?: string; answeredAt?: string; deliveredAt?: string; notifiedAt?: string; lastNotifyAttemptAt?: string }
+export interface Question { id: string; taskId: string; question: string; createdAt: string; answer?: string; action?: 'resume' | 'wait'; answeredAt?: string; deliveredAt?: string; recordedAt?: string; notifiedAt?: string; lastNotifyAttemptAt?: string }
 export interface Task {
   id: string; ticket: Ticket; attempt: string; sessionId: string;
   branch: string; worktree: string; baseSha: string; headSha?: string; workspaceId?: string; workspaceError?: string;
@@ -34,6 +34,10 @@ export interface Task {
   reviewRounds: number; error?: string; prUrl?: string; mergedSha?: string;
   lastWakeAt?: string; followups: string[];
   recoveryAttempts?: number; resumeRequested?: boolean; closedAt?: string;
+  assignmentDelivered?: boolean; executionActive?: boolean; idleCheckpointAt?: string;
+  transitionVersion?: number;
+  waitingDecision?: string;
+  blockerFingerprint?: string; blockerNotifiedAt?: string; lastBlockerNotifyAttemptAt?: string; lastGuidanceHash?: string;
   reviewHistory?: Array<ReviewResult & { at: string }>;
 }
 export interface Run {
@@ -58,13 +62,15 @@ export interface TicketProvider {
 }
 export interface ReviewResult { passed: boolean; headSha: string; baseSha?: string; report: string; findings: string[] }
 export interface WorkerRuntime {
+  evidence?(run: Run): Promise<unknown>;
+  assertCaptainDiagnostics?(run: Run): Promise<void>;
   registerWorkspace?(task: Task, run: Run): Promise<void>;
   restore?(task: Task, run: Run): Promise<void>;
   preflight(config: RunConfig): Promise<void>;
   prepare(task: Task, config: RunConfig): Promise<void>;
   start(task: Task, run: Run): Promise<void>;
-  send(sessionId: string, text: string): Promise<void>;
-  stop(sessionId: string): Promise<void>;
+  send(sessionId: string, text: string, deliveryKey?: string): Promise<void>;
+  stop(sessionId: string,reason?: 'stop'|'shutdown'): Promise<void>;
   isRunning(sessionId: string): Promise<boolean>;
   review(task: Task, config: RunConfig, onPhase?: (phase: Phase) => Promise<void>): Promise<ReviewResult>;
   isReviewCurrent?(task: Task, config: RunConfig, review: ReviewResult): Promise<boolean>;

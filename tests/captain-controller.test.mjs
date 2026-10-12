@@ -138,6 +138,108 @@ test('questions are durable and answers wake the owning worker',()=>fixture(asyn
   assert.equal(q.answer,'Use project convention');assert.ok(q.deliveredAt)
   assert.ok(f.messages.some(m=>m.id===task.sessionId&&m.text.includes('Use project convention')))
 }))
+
+test('blocked workers keep their teams and unchanged blockers never trigger assignment retries or duplicate notices',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  const stops=[];f.runtime.stop=async id=>stops.push(id)
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Native fixture requires verified assessment'})
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Native fixture requires verified assessment'})
+  task.lastWakeAt='2000-01-01';await f.controller.tick();await f.controller.tick()
+  assert.deepEqual(stops,[]);assert.equal(f.starts.length,1)
+  assert.equal(f.messages.filter(m=>m.id==='captain').length,1);assert.equal(task.error,'Native fixture requires verified assessment')
+}))
+
+test('waiting for reports does not resend assignments to an idle parent',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'waiting',note:'Original members are working; waiting for their reports'})
+  f.runtime.isRunning=async()=>false;task.lastWakeAt='2000-01-01'
+  await f.controller.tick();await f.controller.tick();assert.equal(f.starts.length,1);assert.equal(task.phase,'waiting')
+}))
+
+test('acknowledged questions and delivered answers are not repeatedly sent',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  const q=await f.controller.question(task.sessionId,'Which safe source-only task can proceed?')
+  q.lastNotifyAttemptAt='2000-01-01';await f.controller.tick()
+  assert.equal(f.messages.filter(m=>m.id==='captain').length,1)
+  await f.controller.answer('captain',q.id,'Continue the documentation draft')
+  await f.controller.answer('captain',q.id,'Continue the documentation draft')
+  assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,1)
+}))
+
+test('identical captain guidance cannot repeatedly wake a parked worker',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.message('captain',task.id,'Use the existing team and preserve the execution hold')
+  await f.controller.message('captain',task.id,'Use the existing team and preserve the execution hold')
+  assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,1)
+}))
+
+test('idle workers receive one checkpoint then notify the captain without repeated launches',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  f.runtime.isRunning=async()=>false;task.lastWakeAt='2000-01-01';await f.controller.tick()
+  assert.equal(f.starts.length,2);assert.ok(task.idleCheckpointAt)
+  task.lastWakeAt='2000-01-01';await f.controller.tick();await f.controller.tick()
+  assert.equal(f.starts.length,2);assert.equal(task.status,'blocked');assert.equal(f.messages.filter(m=>m.id==='captain').length,1)
+}))
+
+test('blocked descendant activity retains capacity and wait guidance preserves the blocker',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:2,parallelism:1});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Current fixture blocked; independent member still working'})
+  await f.controller.tick();assert.equal(run.tasks.length,1)
+  await f.controller.message('captain',task.id,'Keep the native execution hold','wait')
+  assert.equal(task.status,'blocked');assert.match(task.error,/Current fixture blocked/)
+  f.runtime.isRunning=async()=>false;await f.controller.tick()
+  assert.equal(run.tasks.length,2);assert.equal(task.executionActive,false)
+}))
+
+test('reporting a blocker cannot free a live execution slot during activity measurement',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',f.config);await f.controller.tick();run.config.parallelism=1;run.tasks[1].status='blocked'
+  let release;const gate=new Promise(r=>release=r);f.runtime.isRunning=async()=>gate
+  const report=f.controller.report(run.tasks[0].sessionId,{phase:'blocked',blocked:true,note:'Hold current execution'})
+  const rejected=assert.rejects(f.controller.message('captain',run.tasks[1].id,'Resume the other task'),/slot/i)
+  release(true);await Promise.all([report,rejected])
+}))
+
+test('a newer ready report survives an in-flight guidance delivery',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Old blocker'})
+  let release,entered;const gate=new Promise(r=>release=r),sending=new Promise(r=>entered=r);f.runtime.send=async()=>{entered();return gate}
+  const guidance=f.controller.message('captain',task.id,'Proceed with the verified new solution','resume')
+  await sending
+  await f.controller.report(task.sessionId,{phase:'review',ready:true,note:'New verification completed'})
+  release();await guidance;assert.equal(task.status,'ready');assert.equal(task.phase,'waiting')
+}))
+
+test('stop during a blocked activity read cannot notify or wake the captain',()=>fixture(async f=>{
+  f.provider.claim=async()=>{throw new Error('Missing claim prerequisite')}
+  await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick()
+  let release,entered;const ready=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+  f.runtime.isRunning=async()=>{entered();return gate}
+  const tick=f.controller.tick();await ready;const stop=f.controller.control('captain','stop');release(false)
+  await Promise.all([tick,stop]);assert.equal(f.messages.filter(m=>m.id==='captain').length,0)
+}))
+
+test('captain guidance cannot interrupt a task already owned by controller verification',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'review',ready:true})
+  await assert.rejects(f.controller.message('captain',task.id,'Wait for older evidence','wait'),/verification/i)
+  await f.controller.tick();assert.equal(task.status,'merged');assert.ok(task.closedAt)
+}))
+
+test('wait decisions for parked workers are recorded without sending another prompt',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'External prerequisite unchanged'})
+  await f.controller.control('captain','stop');await f.controller.control('captain','resume')
+  const q=await f.controller.question(task.sessionId,'Can execution resume?')
+  await f.controller.message('captain',task.id,'Keep the execution hold','wait')
+  await f.controller.answer('captain',q.id,'The prerequisite is still unavailable','wait');await f.controller.tick()
+  assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,0);assert.equal(task.status,'blocked');assert.ok(q.recordedAt);assert.ok(task.waitingDecision);assert.equal(task.resumeRequested,undefined);assert.equal(f.starts.length,1)
+  await f.controller.control('captain','stop');await f.controller.control('captain','resume')
+  await f.controller.message('captain',task.id,'Keep the execution hold','wait');await f.controller.tick()
+  assert.equal(task.status,'blocked');assert.equal(f.starts.length,1)
+  await f.controller.control('captain','stop');await f.controller.control('captain','resume')
+  await f.controller.answer('captain',q.id,'The prerequisite is still unavailable','wait');await f.controller.tick()
+  assert.equal(task.status,'blocked');assert.equal(f.starts.length,1)
+}))
 test('empty continuous queue stays running and picks up newly eligible tickets',()=>fixture(async f=>{
   f.setTickets([]);await f.controller.start('captain',f.config);await f.controller.tick();assert.equal(f.starts.length,0)
   f.setTickets([ticket('10')]);await f.controller.tick();assert.equal(f.starts.length,1)

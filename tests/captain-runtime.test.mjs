@@ -69,7 +69,7 @@ function host() {
       rename: async req=>{calls.push(['rename',req]);agents.get(req.sessionId).title=req.title},
       create: async req => { calls.push(['create', req]);const cwd=req.cwd??[...workspaces.values()].find(w=>w.id===req.workspaceId)?.path; if (!agents.has(req.sessionId)) agents.set(req.sessionId, { id: req.sessionId, status: 'idle', session: { id: req.sessionId, header: { cwd } }, ctx: { on: (name, fn) => hooks.push([name, fn]) }, cancel: () => calls.push(['cancel']), whenIdle: async () => calls.push(['idle']) }); return { sessionId: req.sessionId } },
       resolveAgent: async id => ({ agent: agents.get(id) }),
-      prompt: async req => { calls.push(['prompt', req]); agents.get(req.sessionId).status = 'running'; return { accepted: true } },
+      prompt: async req => { const agent=agents.get(req.sessionId);if(agent.events?.some(e=>e.type==='user/message'&&e.data.source?.rpcId===req.requestId))return {accepted:true};calls.push(['prompt', req]);agent.events??=[];agent.events.push({type:'user/message',data:{content:req.content,source:{kind:'user',rpcId:req.requestId}}});agent.status = 'running'; return { accepted: true } },
     },
   }
   return { ctx, calls, hooks, agents, workspaces }
@@ -131,6 +131,52 @@ test('captain notifications recover an ordinary session through the controller',
   await h.ctx.sessionController.create({ sessionId: 'captain', cwd: '/captain' })
   await rt.send('captain', 'Question from worker')
   assert.equal(h.calls.at(-1)[1].content[0].text, 'Question from worker')
+})
+
+test('assignment text renders ticket newlines and recovery never repeats the full ticket',async()=>{
+  const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker'});item.ticket.body='Acceptance line one\r\nAcceptance line two'
+  await rt.start(item,{config});const first=h.calls.find(c=>c[0]==='prompt')[1]
+  assert.match(first.content[0].text,/Acceptance line one\nAcceptance line two/)
+  assert.equal(first.content[0].text.includes('\\r\\n'),false)
+  h.agents.get(item.sessionId).status='idle';item.lastWakeAt='recovery-1'
+  await rt.start(item,{config});const second=h.calls.filter(c=>c[0]==='prompt').at(-1)[1]
+  assert.notEqual(second.requestId,first.requestId);assert.match(second.content[0].text,/darkingdoom.resume/)
+  assert.equal(second.content[0].text.includes('Acceptance line one'),false)
+  delete item.assignmentDelivered;h.agents.get(item.sessionId).status='idle';item.lastWakeAt='recovery-2'
+  await runtime.createRuntime(h.ctx).start(item,{config})
+  assert.equal(h.calls.filter(c=>c[0]==='prompt'&&c[1].content[0].text.includes('Acceptance line one')).length,1)
+})
+
+test('blocked-worker guidance requires actual scoped main-session original team and completed delegated diagnostics',async t=>{
+  const root=await repo(t),h=host(),rt=runtime.createRuntime(h.ctx),run={id:'diagnostic-run',captainSessionId:'captain',config:{...config,workspace:root}}
+  await assert.rejects(rt.assertCaptainDiagnostics(run),/ORIGINAL AgentTeams/)
+  const team=await seedTeam(root,h,task({id:run.id,sessionId:'captain',worktree:root}))
+  team.description+=' DarKingDoom diagnostics'
+  const file=join(root,'.agent-teams','archive',team.id,'team.json')
+  await writeFile(file,JSON.stringify(team));await rt.assertCaptainDiagnostics(run)
+  const memberId=team.members[0].id;team.members[0].id='';await writeFile(file,JSON.stringify(team))
+  await assert.rejects(rt.assertCaptainDiagnostics(run),/completed diagnostic/)
+  team.members[0].id=memberId
+  team.tasks[0].status='pending';await writeFile(file,JSON.stringify(team))
+  await assert.rejects(rt.assertCaptainDiagnostics(run),/completed diagnostic/)
+})
+
+test('diagnostic status exposes loaded code and archived team evidence without waking sessions',async t=>{
+  const root=await repo(t),h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:root})
+  await seedTeam(root,h,item,true);const before=h.calls.length
+  const evidence=await rt.evidence({config:{...config,workspace:root},tasks:[item]})
+  assert.match(evidence.host.moduleSha256,/^[a-f0-9]{64}$/);assert.equal(evidence.workers[0].team.state,'archived')
+  assert.equal(evidence.workers[0].team.id,'original-team');assert.equal(evidence.workers[0].archiveCause,'Not recorded; do not infer a historical cause')
+  assert.equal(h.calls.length,before)
+})
+
+test('host shutdown quiesces workers while retaining the original active team graph',async t=>{
+  const root=await repo(t),h=host(),item=task({worktree:root});await seedTeam(root,h,item,false)
+  const rt=runtime.createRuntime(h.ctx);await rt.restore(item,{config:{...config,workspace:root}})
+  h.ctx.tools.execute=async()=>{throw new Error('Shutdown must not archive the retained team')}
+  await rt.stop(item.sessionId,'shutdown')
+  const evidence=await rt.evidence({config:{...config,workspace:root},tasks:[item]})
+  assert.equal(evidence.workers[0].team.state,'active');assert.ok(h.calls.some(c=>c[0]==='drain'))
 })
 test('idle root counts as active while owned descendants work', async () => {
   const h = host(); const rt = runtime.createRuntime(h.ctx)

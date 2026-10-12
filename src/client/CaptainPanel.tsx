@@ -180,7 +180,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
     try { await openSession(sessionId, childId) } catch (cause) { setError(`Could not open worker session: ${String(cause)}`) }
   }
   const merged = run?.tasks.filter(item => item.status === 'merged').length ?? 0
-  const working = run?.tasks.filter(item => !terminal(item)).length ?? 0
+  const working = run?.tasks.filter(item => ['starting','running','ready'].includes(item.status)||item.status==='blocked'&&item.executionActive).length ?? 0
   const blockers = run?.tasks.filter(item => item.error || item.status === 'blocked' || item.status === 'failed') ?? []
   const totalTaskTime = run?.tasks.reduce((sum, item) => sum + elapsedMs(item.startedAt, item.finishedAt, now), 0) ?? 0
   const eligibility = snapshot.eligibility ?? run?.tickets.map(ticket => {
@@ -226,7 +226,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
         <main hidden={view!=='monitor'} className={css.monitor}>
           <div className={css.metrics}>
             <div><span>Wall time</span><strong>{run ? duration(elapsedMs(run.createdAt, run.status === 'stopped' ? run.updatedAt : undefined, now)) : '—'}</strong><small>Includes waiting & pauses</small></div>
-            <div><span>Working / parallel limit</span><strong>{working}<em> / {run?.config.parallelism ?? config.parallelism}</em></strong><small>{merged} merged · {run?.tickets.length ?? 0} discovered</small></div>
+            <div><span>Active tasks / parallel limit</span><strong>{working}<em> / {run?.config.parallelism ?? config.parallelism}</em></strong><small>{merged} merged · {run?.tasks.filter(item=>item.status==='blocked').length??0} blocked</small></div>
             <div><span>Task elapsed, summed</span><strong>{run ? duration(totalTaskTime) : '—'}</strong><small>Overlaps; includes waiting</small></div>
             <div><span>Active agent effort</span><strong className={css.unmeasured}>Not measured</strong><small>No runtime effort telemetry</small></div>
           </div>
@@ -254,7 +254,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession }: Cap
           </section>}
           <div className={css.lowerGrid}>
             <section className={css.card}><div className={css.sectionTitle}><h2>Eligibility</h2><span>{eligibility.length} tickets</span></div><ul className={css.records}>{eligibility.map(row => <li key={row.ticketId}><code>{row.ticketId}</code><span className={css.status} data-status={row.eligible ? 'ready' : 'waiting'}>{row.eligible ? 'Eligible' : 'Held'}</span><p>{row.reason}</p></li>)}</ul>{!eligibility.length && <p className={css.placeholder}>Discovery decisions will appear here.</p>}</section>
-            <section className={css.card}><div className={css.sectionTitle}><h2>Blockers & decisions</h2><span>Orchestrator managed</span></div><ul className={css.records}>{blockers.map(item => <li key={item.id}><strong>{item.ticket.id} · {item.status}</strong><p>{item.error ?? 'Waiting for the captain to resolve this blocker.'}</p></li>)}{run?.questions.map(question => <li key={question.id}><small>{question.taskId} · {new Date(question.createdAt).toLocaleTimeString()}</small><strong>{question.question}</strong><p className={question.answer ? css.answer : css.muted}>{question.answer ?? 'Orchestrator is preparing an automatic answer…'}</p>{question.answer && <small>{question.deliveredAt ? 'Delivered to worker' : 'Answer queued for delivery'}</small>}</li>)}</ul>{!blockers.length && !run?.questions.length && <p className={css.placeholder}>No blockers or worker questions recorded.</p>}</section>
+            <section className={css.card}><div className={css.sectionTitle}><h2>Blockers & decisions</h2><span>Orchestrator managed</span></div><ul className={css.records}>{blockers.map(item => <li key={item.id}><strong>{item.ticket.id} · {item.status}</strong><p>{item.error ?? 'Waiting for the captain to resolve this blocker.'}</p></li>)}{run?.questions.map(question => <li key={question.id}><small>{question.taskId} · {new Date(question.createdAt).toLocaleTimeString()}</small><strong>{question.question}</strong><p className={question.answer ? css.answer : css.muted}>{question.answer ?? 'Orchestrator is preparing an automatic answer…'}</p>{question.answer && <small>{question.recordedAt ? 'Waiting decision recorded; worker not woken' : question.deliveredAt ? 'Delivered to worker' : 'Answer queued for delivery'}</small>}</li>)}</ul>{!blockers.length && !run?.questions.length && <p className={css.placeholder}>No blockers or worker questions recorded.</p>}</section>
           </div>
           <footer className={css.footer}><span className={css.liveDot} />Refreshes every 3 seconds while open<span>{run ? `Run ${run.id}` : 'Automation is disabled'}</span></footer>
         </main>

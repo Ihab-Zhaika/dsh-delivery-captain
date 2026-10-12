@@ -30,11 +30,12 @@ export declare class CaptainController {
         note?: string;
     }): Promise<Task>;
     question(sessionId: string, question: string): Promise<Question>;
-    answer(sessionId: string, questionId: string, answer: string): Promise<Question>;
+    answer(sessionId: string, questionId: string, answer: string, action?: 'resume' | 'wait'): Promise<Question>;
     private deliverAnswer;
-    message(sessionId: string, taskId: string, text: string): Promise<void>;
+    message(sessionId: string, taskId: string, text: string, action?: 'resume' | 'wait'): Promise<void>;
     followup(sessionId: string, input: FollowupInput): Promise<string>;
     private activeCount;
+    private notifyBlocker;
     announce(run: Run, text: string): Promise<void>;
     private notify;
     private notifyQuestion;

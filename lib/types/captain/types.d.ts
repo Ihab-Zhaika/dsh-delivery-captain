@@ -57,8 +57,10 @@ export interface Question {
     question: string;
     createdAt: string;
     answer?: string;
+    action?: 'resume' | 'wait';
     answeredAt?: string;
     deliveredAt?: string;
+    recordedAt?: string;
     notifiedAt?: string;
     lastNotifyAttemptAt?: string;
 }
@@ -87,6 +89,15 @@ export interface Task {
     recoveryAttempts?: number;
     resumeRequested?: boolean;
     closedAt?: string;
+    assignmentDelivered?: boolean;
+    executionActive?: boolean;
+    idleCheckpointAt?: string;
+    transitionVersion?: number;
+    waitingDecision?: string;
+    blockerFingerprint?: string;
+    blockerNotifiedAt?: string;
+    lastBlockerNotifyAttemptAt?: string;
+    lastGuidanceHash?: string;
     reviewHistory?: Array<ReviewResult & {
         at: string;
     }>;
@@ -140,13 +151,15 @@ export interface ReviewResult {
     findings: string[];
 }
 export interface WorkerRuntime {
+    evidence?(run: Run): Promise<unknown>;
+    assertCaptainDiagnostics?(run: Run): Promise<void>;
     registerWorkspace?(task: Task, run: Run): Promise<void>;
     restore?(task: Task, run: Run): Promise<void>;
     preflight(config: RunConfig): Promise<void>;
     prepare(task: Task, config: RunConfig): Promise<void>;
     start(task: Task, run: Run): Promise<void>;
-    send(sessionId: string, text: string): Promise<void>;
-    stop(sessionId: string): Promise<void>;
+    send(sessionId: string, text: string, deliveryKey?: string): Promise<void>;
+    stop(sessionId: string, reason?: 'stop' | 'shutdown'): Promise<void>;
     isRunning(sessionId: string): Promise<boolean>;
     review(task: Task, config: RunConfig, onPhase?: (phase: Phase) => Promise<void>): Promise<ReviewResult>;
     isReviewCurrent?(task: Task, config: RunConfig, review: ReviewResult): Promise<boolean>;
