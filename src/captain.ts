@@ -43,6 +43,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     const active = controller.all().filter(r => r.status !== 'stopped' && Date.now() >= (due.get(r.id) ?? 0))
     if (!active.length) return
     for (const r of active) due.set(r.id, Date.now() + r.config.pollSeconds * 1000)
+    void controller.recoverOwned(active.map(r=>r.id)).catch(error=>console.error('darkingdoom: owned recovery failed',error))
     try { await controller.tick(active.map(r=>r.id)) } catch (error) { console.error('darkingdoom: scheduler failed', error) }
   }
   ctx.effect(() => {

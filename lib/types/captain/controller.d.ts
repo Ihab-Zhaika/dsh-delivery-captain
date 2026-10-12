@@ -13,6 +13,9 @@ export declare class CaptainController {
     private readonly stoppingRuns;
     private ticking?;
     private readonly runTicks;
+    private readonly ownedTicks;
+    private readonly ownedProviders;
+    private readonly idleRecoveries;
     private readonly resumeDispatches;
     private readonly resumingTasks;
     private readonly dependencyQuiescences;
@@ -134,8 +137,11 @@ export declare class CaptainController {
     private notifyQuestion;
     /** Deduplicated timer entry. No model polling is required for queue discovery. */
     tick(runIds?: readonly string[]): Promise<void>;
+    /** Independent of an already-running full catalog scan; no new claims. */
+    recoverOwned(runIds?: readonly string[]): Promise<void>;
     /** Already-owned idle recovery is local; the full intake catalog can be slow. */
     private recoverIdleTask;
+    private recoverIdleTaskRun;
     private tickRun;
     private launch;
     private integrate;

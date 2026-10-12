@@ -926,3 +926,31 @@ test('startup rejection rolls back an unadmitted idle checkpoint',()=>fixture(as
  f.runtime.isRunning=async()=>false;task.lastWakeAt=new Date(Date.now()-61000).toISOString();f.runtime.start=async()=>{throw new Error('Native worker request was not admitted')}
  await f.controller.tick();assert.equal(task.idleCheckpointAt,undefined);assert.equal(task.recoveryAttempts,0)
 }))
+test('owned maintenance runs while a paused-started intake scan remains in flight',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ await f.controller.report(task.sessionId,{phase:'waiting'});f.runtime.isRunning=async()=>false;task.lastWakeAt=new Date(Date.now()-61000).toISOString();await f.controller.control('captain','pause')
+ let entered,release;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+ f.provider.discover=async()=>{entered();await gate;return[ticket('1')]};const intake=f.controller.tick();await started
+ try{await f.controller.control('captain','resume');await f.controller.recoverOwned();assert.equal(task.status,'blocked');assert.equal(f.starts.length,1)}finally{release();await intake}
+}))
+
+test('concurrent owned and intake maintenance share a single idle recovery operation',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0];task.lastWakeAt=new Date(Date.now()-61000).toISOString()
+ let entered,release;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r);let first=true
+ f.runtime.isRunning=async()=>{if(first){first=false;entered();await gate};return false}
+ const intake=f.controller.tick();await started
+ let owned;try{owned=f.controller.recoverOwned()}finally{release();await intake;if(owned)await owned}
+ assert.equal(f.starts.length,2);assert.equal(task.recoveryAttempts,1)
+}))
+
+for(const action of ['stop','dispose'])test(`${action} cancels an in-flight owned dependency proof before awaiting recovery`,()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ f.runtime.isRunning=async()=>false;task.lastWakeAt=new Date(Date.now()-61000).toISOString()
+ let entered,release,cancelled=0;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+ f.provider.verifyDependencies=async()=>{entered();await gate;throw new Error('Provider cancelled')}
+ f.provider.cancel=()=>{cancelled++;release()}
+ const recovery=f.controller.recoverOwned();await started
+ const shutdown=action==='stop'?f.controller.control('captain','stop'):f.controller.dispose()
+ try{await new Promise(r=>setImmediate(r));assert.equal(cancelled,1)}finally{release();await recovery;await shutdown}
+ assert.equal(f.starts.length,1);assert.equal(task.idleCheckpointAt,undefined)
+}))

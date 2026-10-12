@@ -22,6 +22,9 @@ export class CaptainController {
   private readonly stoppingRuns = new Set<string>()
   private ticking?: Promise<void>
   private readonly runTicks = new Map<string, Promise<void>>()
+  private readonly ownedTicks = new Map<string,Promise<void>>()
+  private readonly ownedProviders = new Map<string,TicketProvider>()
+  private readonly idleRecoveries = new Map<string,Promise<void>>()
   private readonly resumeDispatches = new Map<string, Promise<void>>()
   private readonly resumingTasks = new Set<string>()
   private readonly dependencyQuiescences = new Map<string, Promise<void>>()
@@ -161,10 +164,12 @@ export class CaptainController {
       run.status = 'stopped'
       await this.endLoop(run)
       this.activeProviders.get(run.id)?.cancel?.()
+      this.ownedProviders.get(run.id)?.cancel?.()
       // Commit revocation before awaiting cancellation: late worker reports cannot mutate delivery.
       await this.save(run)
       await this.drainWorkers(run, false)
       await this.resumeDispatches.get(run.id)
+      await this.ownedTicks.get(run.id)
       // A worker may still be inside create/start. Drain that operation before cancelling the final roster.
       await this.runTicks.get(run.id)
       const shutdownErrors = await this.drainWorkers(run, true)
@@ -502,8 +507,29 @@ export class CaptainController {
     return this.ticking
   }
 
+  /** Independent of an already-running full catalog scan; no new claims. */
+  recoverOwned(runIds?:readonly string[]):Promise<void> {
+    if(this.disposed)return Promise.resolve()
+    for(const run of this.runs.values()) {
+      if(!['running','draining'].includes(run.status)||run.recoveryPending||this.startingSessions.has(run.captainSessionId)||runIds&&!runIds.includes(run.id)||this.ownedTicks.has(run.id))continue
+      const work=(async()=>{
+        const provider=this.providerFactory(run.config)
+        this.ownedProviders.set(run.id,provider)
+        for(const task of run.tasks)await this.recoverIdleTask(run,task,provider)
+        await this.dispatchResumes(run)
+      })().catch(async error=>{if(!isStopped(run)&&!this.disposed){run.error=`Owned recovery deferred: ${String(error)}`;await this.save(run)}}).finally(()=>{this.ownedProviders.delete(run.id);this.ownedTicks.delete(run.id)})
+      this.ownedTicks.set(run.id,work)
+    }
+    return Promise.all([...this.ownedTicks.values()]).then(()=>{})
+  }
   /** Already-owned idle recovery is local; the full intake catalog can be slow. */
-  private async recoverIdleTask(run:Run,task:Task,provider:TicketProvider):Promise<void> {
+  private recoverIdleTask(run:Run,task:Task,provider:TicketProvider):Promise<void> {
+    const existing=this.idleRecoveries.get(task.id)
+    if(existing)return existing
+    const work=this.recoverIdleTaskRun(run,task,provider).finally(()=>this.idleRecoveries.delete(task.id))
+    this.idleRecoveries.set(task.id,work);return work
+  }
+  private async recoverIdleTaskRun(run:Run,task:Task,provider:TicketProvider):Promise<void> {
     if(this.disposed||!['running','draining'].includes(run.status)||run.recoveryPending||task.status!=='running'||!task.baseSha||this.resumingTasks.has(task.id)||task.parkingError)return
     if(task.prUrl&&task.headSha&&task.reviewHistory?.some(review=>review.passed&&review.headSha===task.headSha))return
     if(task.dependencyBlocked||dependencyBlocker(run.tickets.find(t=>t.id===task.ticket.id)??task.ticket,run.tickets,run.tasks))return
@@ -744,9 +770,11 @@ export class CaptainController {
     for(const run of this.runs.values())run.coordinatorRevision=(run.coordinatorRevision??0)+1
     for(const run of this.runs.values())try{await this.runtime.coordinatorLoop?.(run,'shutdown')}catch(error){run.coordinatorLoopError=String(error)}
     for (const provider of this.activeProviders.values()) provider.cancel?.()
+    for (const provider of this.ownedProviders.values()) provider.cancel?.()
     for (const run of this.runs.values()) await this.drainWorkers(run, false,'shutdown')
     await this.ticking
     await Promise.all([...this.resumeDispatches.values()])
+    await Promise.all([...this.ownedTicks.values()])
     // Preserve run status for cold recovery; stop writers before releasing leases.
     const errors: string[] = []
     for (const run of this.runs.values()) errors.push(...await this.drainWorkers(run, false,'shutdown'))
