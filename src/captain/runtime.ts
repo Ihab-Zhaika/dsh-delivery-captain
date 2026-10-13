@@ -342,7 +342,8 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       // The default whole-team check and recovery settlement stay strict.
       if(task&&run.tasks.some(owned=>owned===task)&&['blocked','parked'].includes(task.status)&&!team.halted&&!team.escalated&&team.phase!=='staged'){
         const since=Date.parse(task.blockedSince??task.startedAt)
-        const scoped=team.tasks.some(report=>report.status==='completed'&&report.output?.includes(task.id)
+        const scoped=team.tasks.some(report=>report.status==='completed'&&!!report.output?.trim()
+          &&(report.output.includes(task.id)||report.description?.includes(task.id)||report.coverageOf?.includes(task.id))
           &&Number.isFinite(since)&&report.updatedAt>=since
           &&team.members.some(member=>member.id!==''&&member.name===report.assignee))
         if(scoped)return

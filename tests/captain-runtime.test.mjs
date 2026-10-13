@@ -330,6 +330,16 @@ test('fresh exact-ticket diagnostic guidance does not wait for unrelated origina
  await assert.rejects(rt.assertCaptainDiagnostics(run,item),/completed diagnostic/)
 })
 
+test('completed diagnostics use their exact declared target even when the report does not repeat the UUID',async t=>{
+ const root=await repo(t),h=host(),rt=runtime.createRuntime(h.ctx),item=task({id:'blocked-ticket-uuid',status:'blocked',blockedSince:'2026-10-13T07:00:00Z'}),run={id:'diagnostic-run',captainSessionId:'captain',config:{...config,workspace:root},tasks:[item]}
+ const team=await seedTeam(root,h,task({id:run.id,sessionId:'captain',worktree:root}));team.description+=' DarKingDoom diagnostics';team.members[0].status='working'
+ Object.assign(team.tasks[0],{description:`Diagnose the CI route for exact assignment ${item.id}`,output:'Completed: the existing workflow is manually disabled; native acceptance is not waived.',updatedAt:Date.parse('2026-10-13T07:10:00Z')})
+ const file=join(root,'.agent-teams','archive',team.id,'team.json');await writeFile(file,JSON.stringify(team))
+ await rt.assertCaptainDiagnostics(run,item)
+ team.tasks[0].description='Different assignment';team.tasks[0].coverageOf=[item.id];await writeFile(file,JSON.stringify(team));await rt.assertCaptainDiagnostics(run,item)
+ team.tasks[0].coverageOf=['other-task'];await writeFile(file,JSON.stringify(team));await assert.rejects(rt.assertCaptainDiagnostics(run,item),/completed diagnostic/)
+})
+
 test('diagnostic status exposes loaded code and archived team evidence without waking sessions',async t=>{
   const root=await repo(t),h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:root})
   await seedTeam(root,h,item,true);const before=h.calls.length
