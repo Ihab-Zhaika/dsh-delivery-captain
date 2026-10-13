@@ -147,6 +147,81 @@ test('a short human retry reason is accepted for an idle waiting worker and rema
   assert.equal(task.pendingHumanRetry.previousBlocker,'Prior wait')
 }))
 
+for(const action of ['wait','resume'])test(`human task resumption supersedes only the older pending answered ${action} intent`,()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,maxTickets:2});await f.controller.tick();const task=run.tasks[0],other=run.tasks[1]
+ await f.runtime.stop(task.sessionId);await f.controller.report(task.sessionId,{phase:'blocked',note:'Original hold'})
+ f.runtime.assertCaptainDiagnostics=async()=>{throw Error('Genuine diagnostics not yet complete')}
+ const q=await f.controller.question(task.sessionId,'Older question'),unanswered=await f.controller.question(task.sessionId,'Unanswered question')
+ await assert.rejects(f.controller.answer('captain',q.id,'Older decision',action),/diagnostics/)
+ await f.runtime.stop(other.sessionId);await f.controller.report(other.sessionId,{phase:'blocked',note:'Other owner hold'});const foreign=await f.controller.question(other.sessionId,'Other owner question')
+ await assert.rejects(f.controller.answer('captain',foreign.id,'Other pending intent','wait'),/diagnostics/)
+ const before={answer:q.answer,action:q.action,answeredAt:q.answeredAt},identity=[task.id,task.sessionId,task.worktree,task.attempt]
+ f.runtime.assertCaptainDiagnostics=async()=>{};await f.controller.resumeTask('captain',task.id,'Human authorizes one normal same-owner retry',true)
+ assert.ok(q.supersededAt);assert.ok(q.recordedAt);assert.match(q.supersededReason,/human.*resum/i);assert.deepEqual({answer:q.answer,action:q.action,answeredAt:q.answeredAt},before)
+ assert.equal(unanswered.answer,undefined);assert.equal(unanswered.recordedAt,undefined);assert.equal(foreign.supersededAt,undefined);assert.equal(foreign.recordedAt,undefined)
+ await f.controller.tick();assert.equal(f.messages.some(m=>m.id===task.sessionId&&m.text.includes(`Captain answer to ${q.id}`)),false)
+ assert.deepEqual([task.id,task.sessionId,task.worktree,task.attempt],identity)
+ const count=f.messages.length;await f.controller.answer('captain',q.id,'Older decision',action);assert.equal(f.messages.length,count,'Idempotent superseded answer must not replay')
+}))
+
+test('a fresh answer after human supersession can reassert WAIT without rewriting old answer evidence',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ await f.runtime.stop(task.sessionId);await f.controller.report(task.sessionId,{phase:'blocked',note:'Prior hold'});const q=await f.controller.question(task.sessionId,'Older budget question')
+ f.runtime.assertCaptainDiagnostics=async()=>{throw Error('Diagnostics incomplete')};await assert.rejects(f.controller.answer('captain',q.id,'Old WAIT','wait'),/Diagnostics/)
+ f.runtime.assertCaptainDiagnostics=async()=>{};await f.controller.resumeTask('captain',task.id,'New explicit human retry',true)
+ const oldVersion=q.answerVersion;await f.controller.answer('captain',q.id,'NEW WAIT: acceptance prerequisite still unmet','wait')
+ assert.equal(q.supersededAt,undefined);assert.equal(q.supersededReason,undefined);assert.ok(q.answerVersion>oldVersion);assert.ok(q.deliveredAt)
+ assert.ok(f.messages.some(m=>m.id===task.sessionId&&m.text.includes('NEW WAIT')));assert.equal(task.phase,'waiting')
+ assert.equal(q.supersededAnswers[0].answer,'Old WAIT');assert.equal(q.supersededAnswers[0].action,'wait');assert.equal(q.supersededAnswers[0].answerVersion,oldVersion)
+}))
+
+test('superseded idempotent WAIT cannot cancel a queued human retry but a genuinely new WAIT can',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,maxTickets:2});await f.controller.tick();const task=run.tasks[0]
+ await f.runtime.stop(task.sessionId);await f.controller.report(task.sessionId,{phase:'blocked',note:'Prior hold'});const q=await f.controller.question(task.sessionId,'Old capacity question')
+ f.runtime.assertCaptainDiagnostics=async()=>{throw Error('Diagnostics incomplete')};await assert.rejects(f.controller.answer('captain',q.id,'Old WAIT','wait'),/Diagnostics/)
+ run.config.parallelism=1;await f.controller.resumeTask('captain',task.id,'Explicit human retry queued behind other owner',true)
+ assert.equal(task.resumeRequested,true);const budget=task.budgetStartedAt;await f.controller.answer('captain',q.id,'Old WAIT','wait');assert.equal(task.resumeRequested,true)
+ await assert.rejects(f.controller.answer('captain',q.id,'New WAIT: prerequisite is still unavailable','wait'),/Diagnostics/)
+ assert.equal(task.resumeRequested,undefined);assert.equal(task.budgetStartedAt,budget);assert.equal(q.supersededAt,undefined);assert.equal(task.status,'blocked')
+}))
+
+test('a newer WAIT arriving during human resumption validation is not superseded',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ await f.runtime.stop(task.sessionId);await f.controller.report(task.sessionId,{phase:'blocked',note:'Prior hold'});const q=await f.controller.question(task.sessionId,'Same question')
+ f.runtime.assertCaptainDiagnostics=async()=>{throw Error('Diagnostics incomplete')};await assert.rejects(f.controller.answer('captain',q.id,'Old WAIT','wait'),/Diagnostics/)
+ let once=false;const running=f.runtime.isRunning;f.runtime.isRunning=async id=>{if(!once&&id===task.sessionId){once=true;await assert.rejects(f.controller.answer('captain',q.id,'Newer WAIT during validation','wait'),/Diagnostics/);return false}return running(id)}
+ await assert.rejects(f.controller.resumeTask('captain',task.id,'Human request predates the newer WAIT',true),/changed/i)
+ assert.equal(q.answer,'Newer WAIT during validation');assert.equal(q.supersededAt,undefined);assert.equal(task.pendingHumanRetry,undefined);assert.equal(task.budgetStartedAt,undefined)
+}))
+
+test('in-flight old diagnostic answer cannot replay after explicit human resumption',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ await f.runtime.stop(task.sessionId);await f.controller.report(task.sessionId,{phase:'blocked',note:'Prior hold'});const q=await f.controller.question(task.sessionId,'Delayed answer')
+ let release,enter;const gate=new Promise(r=>release=r),entered=new Promise(r=>enter=r);f.runtime.assertCaptainDiagnostics=async()=>{enter();await gate}
+ const old=f.controller.answer('captain',q.id,'Obsolete delayed WAIT','wait');await entered
+ try{await f.controller.resumeTask('captain',task.id,'Explicit human continuation',true)}finally{release();await old}
+ await f.controller.tick();assert.equal(f.messages.some(m=>m.id===task.sessionId&&m.text.includes('Obsolete delayed WAIT')),false);assert.ok(q.supersededAt);assert.equal(q.deliveredAt,undefined)
+}))
+
+test('human supersession revokes an old answer waiting at native transport admission',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ await f.controller.report(task.sessionId,{phase:'waiting',note:'Idle original owner'});await f.runtime.stop(task.sessionId);const q=await f.controller.question(task.sessionId,'Delayed transport question')
+ let release,enter;const gate=new Promise(r=>release=r),entered=new Promise(r=>enter=r),send=f.runtime.send
+ f.runtime.send=async(id,text,key,permitted)=>{if(text.includes('Obsolete transport WAIT')){enter();await gate;if(permitted&&!permitted())return false}return send(id,text,key,permitted)}
+ const old=f.controller.answer('captain',q.id,'Obsolete transport WAIT','wait');await entered
+ try{await f.controller.resumeTask('captain',task.id,'Explicit normal human resumption',true)}finally{release();await old}
+ assert.equal(f.messages.some(m=>m.id===task.sessionId&&m.text.includes('Obsolete transport WAIT')),false);assert.ok(q.supersededAt);assert.equal(q.deliveredAt,undefined);assert.equal(task.status,'running')
+}))
+
+test('human retry clears only the current stale budget error after preserving its blocker history',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick();const task=run.tasks[0]
+ await f.runtime.stop(task.sessionId);await f.controller.report(task.sessionId,{phase:'blocked',note:'Task time budget exhausted'});const history=structuredClone(task.phases),identity=[task.id,task.sessionId,task.startedAt]
+ await f.controller.resumeTask('captain',task.id,'Human approved one normal bounded retry',true)
+ assert.equal(task.error,undefined);assert.equal(task.pendingHumanRetry.previousBlocker,'Task time budget exhausted');assert.deepEqual(task.phases.slice(0,history.length),history);assert.deepEqual([task.id,task.sessionId,task.startedAt],identity);assert.equal(task.assignmentConfig.maxTaskMinutes,480)
+ await f.runtime.stop(task.sessionId);await f.controller.report(task.sessionId,{phase:'blocked',note:'Unresolved genuine CI failure'});await f.controller.resumeTask('captain',task.id,'Explicit retry with unchanged final gates',true)
+ assert.equal(task.error,'Unresolved genuine CI failure','Other current failures must not be cleared by the budget projection fix')
+}))
+
 test('human resume dispatch is independent of an already pending discovery request',()=>fixture(async f=>{
   const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick()
   const task=run.tasks[0];await f.controller.report(task.sessionId,{phase:'blocked',blocked:true,note:'Prerequisite'})

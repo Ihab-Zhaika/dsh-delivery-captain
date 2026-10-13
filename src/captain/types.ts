@@ -28,7 +28,15 @@ export interface RepositoryContext {
   milestoneCatalog: string[];
 }
 export interface PhaseEvent { phase: Phase; at: string; note?: string }
-export interface Question { id: string; taskId: string; question: string; createdAt: string; answer?: string; action?: 'resume' | 'wait'; answeredAt?: string; deliveredAt?: string; recordedAt?: string; deliveryError?: string; notifiedAt?: string; lastNotifyAttemptAt?: string }
+export interface Question {
+  id: string; taskId: string; question: string; createdAt: string;
+  answer?: string; action?: 'resume' | 'wait'; answeredAt?: string; answerVersion?: number;
+  deliveredAt?: string; recordedAt?: string; deliveryError?: string;
+  notifiedAt?: string; lastNotifyAttemptAt?: string;
+  supersededAt?: string; supersededReason?: string;
+  /** Retained older pending answers; a fresh answer clears only the current marker. */
+  supersededAnswers?: Array<{answerVersion:number;answer:string;action?:'resume'|'wait';answeredAt?:string;at:string;reason:string}>;
+}
 export interface Task {
   kind?:'recovery';
   maintenanceHandoff?:RecoveryMaintenance;

@@ -16,7 +16,7 @@ const loadModule=async name=>import(pathToFileURL(requireBase.resolve('@deepseek
 const model={provider:'local-policy-test',id:'fixture',name:'Fixture',context:{contextWindow:262144},defaultMaxTokens:8192}
 const chunks=[{type:'block-start',index:0,blockType:'text'},{type:'text-delta',index:0,text:'done'},{type:'block-end',index:0,block:{type:'text',text:'done'}},{type:'usage',usage:{inputTokens:10,outputTokens:1}},{type:'finish',reason:{kind:'stop'}}]
 const frozenPersona='You are reviewer. MANDATORY independent OCR --max-tokens-budget 1000000. Preserve role, source scope and original attempts.'
-async function fixture(t,{complete=false,persistence=false,returnHook,iterationHook,responseChunks=chunks}={}){
+async function fixture(t,{complete=false,persistence=false,returnHook,iterationHook,responseChunks=chunks,initialStatus='running',promoteDuringAssembly=false,initialDecision}={}){
   const dir=await mkdtemp(join(tmpdir(),'captain-policy-host-')),host=new Context(),fibers=[],handles=[],requests=[],errors=[],journal=[]
   t.after(async()=>{for(const handle of handles.reverse())await handle.dispose();for(const fiber of fibers.reverse())await fiber.dispose();await rm(dir,{recursive:true,force:true})})
   async function mount(name,config){const m=await loadModule(name),fiber=host.plugin(m.default,config);fibers.push(fiber);await fiber.await()}
@@ -37,7 +37,7 @@ async function fixture(t,{complete=false,persistence=false,returnHook,iterationH
   const rootHandle=await host.agents.create({sessionId:'policy-root',meta:{cwd:dir},agentOptions:{provider:model.provider,model:model.id}});handles.push(rootHandle)
   const root=rootHandle.agent,at=Date.now()
   const config={provider:'github',repository:'test/repo',workspace:dir,milestones:['M1'],remote:'origin',targetBranch:'main',parallelism:1,maxTeamMembers:2,pollSeconds:30,maxTickets:0,maxRepairRounds:3,maxTaskMinutes:480,verifyCommands:['node --version'],workerPreset:'standard',requireBrowser:false,requireMemory:false,reviewBackend:'agent',ocrAdditionalCheck:false,ocrMaxTokensBudget:5_000_000}
-  const task={id:'delivery-task',attempt:'delivery-attempt',sessionId:root.id,branch:'test',worktree:dir,baseSha:'a'.repeat(40),status:'running',phase:'analysis',phases:[],startedAt:new Date().toISOString(),reviewRounds:0,followups:[],assignmentConfig:config,ticket:{id:'1',title:'Test',body:'Test',url:'',milestone:'',predecessors:[],state:'open',merged:false,priority:1,createdAt:'',labels:[]}}
+  const task={id:'delivery-task',attempt:'delivery-attempt',sessionId:root.id,branch:'test',worktree:dir,baseSha:'a'.repeat(40),status:initialStatus,waitingDecision:initialDecision,phase:'analysis',phases:[],startedAt:new Date().toISOString(),reviewRounds:0,followups:[],assignmentConfig:config,ticket:{id:'1',title:'Test',body:'Test',url:'',milestone:'',predecessors:[],state:'open',merged:false,priority:1,createdAt:'',labels:[]}}
   const run={id:'policy-run',captainSessionId:'coordinator',config,status:'running',coordinatorRevision:1,tasks:[task],tickets:[task.ticket],questions:[],createdAt:'',updatedAt:''}
   root.session.append('tool/call',{callId:'create-team',name:'agent_teams_create',arguments:JSON.stringify({name:'policy-team',approval:'automatic',description:'Delivery task delivery-task'})})
   const callSeq=root.session.seq-1
@@ -52,6 +52,7 @@ async function fixture(t,{complete=false,persistence=false,returnHook,iterationH
   let policyEnabled=true
   const install=ctx=>{if(policyEnabled)runtime.installDeliveryPolicy?.(ctx,()=>[run])}
   let policyFiber=host.plugin({inject:['agents','systemPrompt','subagents','sessionController'],apply(ctx){install(ctx)}});fibers.push(policyFiber);await policyFiber.await()
+  if(promoteDuringAssembly)host.on('system-prompt/assemble',async(assembly,context,next)=>{const result=await next();if(context.agent?.id==='policy-child')task.status='running';return result})
   if(returnHook||iterationHook)host.on('llm/stream',(options,next)=>{
     const iterator=next()[Symbol.asyncIterator]();let index=0
     return {[Symbol.asyncIterator](){return this},async next(){await iterationHook?.(index++);return iterator.next()},async return(value){journal.push({ownedReturn:true,session:options.sessionId});await returnHook?.();return await iterator.return?.(value)??{done:true,value:undefined}}}
@@ -62,6 +63,22 @@ async function fixture(t,{complete=false,persistence=false,returnHook,iterationH
   async function drive(agent=child){agent.followup(createUserMessage({source:{kind:'user'},content:[{type:'text',text:'Review the assigned source; preserve history.'}]}));await agent.whenIdle()}
   return{host,run,task,root,get child(){return child},team,teamFile,requests,errors,journal,drive,setPrepareHook:fn=>prepareHook=fn,setStreamHook:fn=>streamHook=fn,setLookupHook:fn=>lookupHook=fn,setCatalog:rows=>catalog=rows,setInheritedReceipt:()=>inheritedReceipt=true,async discardChild(){await childHandle.dispose()},async unloadPolicy(){policyEnabled=false;await policyFiber.dispose()},async coldResume(){await childHandle.dispose();const resumed=await host.agents.resume({resumeSessionId:'policy-child',parentAgent:root,agentOptions:{provider:model.provider,model:model.id},setup(ctx){applyChildComposition(ctx,root,{persona:descriptor.persona,toolFilter:descriptor.toolFilter})}});handles.push(resumed);child=resumed.agent;return child},async remount(){await policyFiber.dispose();policyFiber=host.plugin({inject:['agents','systemPrompt','subagents','sessionController'],apply(ctx){install(ctx)}});fibers.push(policyFiber);await policyFiber.await()},saveTeam:()=>writeFile(teamFile,JSON.stringify(team))}
 }
+
+test('authorized startup promotion preserves assembly and real native model execution',async t=>{
+  const f=await fixture(t,{initialStatus:'starting',promoteDuringAssembly:true});await f.drive()
+  assert.equal(f.errors.length,0,JSON.stringify(f.errors));assert.equal(f.child.session.snapshotEvents().filter(e=>e.type==='assistant/message').length,1)
+})
+
+test('a changed authorized execution window still revokes an active native stream',async t=>{
+  const f=await fixture(t);f.setStreamHook(async index=>{if(index===1)f.task.budgetStartedAt=new Date().toISOString()})
+  await f.drive();assert.ok(f.errors.some(e=>/policy|ownership/i.test(e)));assert.equal(f.child.session.snapshotEvents().filter(e=>e.type==='assistant/message').length,0)
+})
+
+test('clearing delivered decision display metadata does not revoke ongoing authorized member work',async t=>{
+  const f=await fixture(t,{initialDecision:'Explicit human normal resumption recorded'})
+  f.setPrepareHook(async()=>{delete f.task.waitingDecision})
+  await f.drive();assert.equal(f.errors.length,0,JSON.stringify(f.errors));assert.equal(f.child.session.snapshotEvents().filter(e=>e.type==='assistant/message').length,1)
+})
 
 for (const boundary of ['prepare','stream']) test(`informational root progress at ${boundary} does not revoke unchanged member authority`,async t=>{
   const f=await fixture(t)

@@ -11,7 +11,7 @@ const sha = n => n.repeat(40)
 async function fixture(t, options = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'captain-agent-review-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
-  const paths = await Promise.all(['src/a.ts', 'tests/a.test.mjs', 'docs/a.md'].map(async (path, i) => {
+  const paths = await Promise.all((options.pathNames ?? ['src/a.ts', 'tests/a.test.mjs', 'docs/a.md']).map(async (path, i) => {
     const snapshotPath = join(dir, `snapshot-${i}.txt`), content = `Path: ${path}\n-context\n+new behavior\n`
     await writeFile(snapshotPath, content)
     return { path, snapshotPath, fingerprint: createHash('sha256').update(content).digest('hex') }
@@ -57,6 +57,31 @@ test('fresh native review validates every selected snapshot read and canonical s
   assert.deepEqual(f.modes, ['native'])
   assert.equal(f.disposed[0], 'run'); assert.ok(f.disposed.includes('guard'))
   assert.ok([...f.listeners.values()].every(entries => entries.size === 0))
+})
+
+test('fresh review provides complete native page plans and reads generated bulk after source contracts',async t=>{
+  const f=await fixture(t,{pathNames:['lib/client.js.map','src/captain/runtime.ts','tests/a.test.mjs','docs/a.md']})
+  await runAgentReview(f.ctx,f.parent,f.input,new AbortController().signal)
+  const text=f.calls[0].request.prompt[0].text
+  assert.match(text,/batch.*native read/i)
+  const marker='Native read plan (data):\n';assert.ok(text.includes(marker))
+  const plan=JSON.parse(text.slice(text.indexOf(marker)+marker.length))
+  assert.equal(plan.length,f.input.paths.length)
+  assert.equal(plan[0].path,'src/captain/runtime.ts');assert.equal(plan.at(-1).path,'lib/client.js.map')
+  assert.deepEqual(new Set(plan.map(p=>p.snapshotPath)),new Set(f.input.paths.map(p=>p.snapshotPath)))
+  for(const page of plan){assert.equal(page.offset,1);assert.equal(page.limit,3);assert.ok(page.bytes<=45*1024)}
+})
+
+test('native page plan covers large Unicode snapshots and empty files within byte and line bounds',async t=>{
+  const f=await fixture(t,{pathNames:['src/unicode.ts','docs/empty.md'],startError:true})
+  const contents=[Array.from({length:90},()=>'界'.repeat(1000)).join('\r\n')+'\r\n','']
+  for(const [index,path]of f.input.paths.entries()){await writeFile(path.snapshotPath,contents[index]);path.fingerprint=createHash('sha256').update(contents[index]).digest('hex')}
+  await assert.rejects(runAgentReview(f.ctx,f.parent,f.input,new AbortController().signal),/capacity/)
+  const text=f.calls[0].request.prompt[0].text,marker='Native read plan (data):\n',plan=JSON.parse(text.slice(text.indexOf(marker)+marker.length))
+  const pages=plan.filter(p=>p.path==='src/unicode.ts');assert.ok(pages.length>1)
+  let next=1;for(const page of pages){assert.equal(page.offset,next);assert.ok(page.limit>0&&page.limit<=2000);assert.ok(page.bytes<=45*1024);next+=page.limit}
+  assert.equal(next,91);assert.deepEqual(plan.filter(p=>p.path==='docs/empty.md').map(p=>[p.offset,p.limit,p.bytes]),[[1,1,0]])
+  assert.equal(f.disposed.includes('run'),false,'Planning never invents a native review after capacity rejection')
 })
 
 test('child guard blocks scoped mutation, shell, transport and messaging tools, while permitting source reads', async t => {

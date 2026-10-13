@@ -66,11 +66,23 @@ export interface Question {
     answer?: string;
     action?: 'resume' | 'wait';
     answeredAt?: string;
+    answerVersion?: number;
     deliveredAt?: string;
     recordedAt?: string;
     deliveryError?: string;
     notifiedAt?: string;
     lastNotifyAttemptAt?: string;
+    supersededAt?: string;
+    supersededReason?: string;
+    /** Retained older pending answers; a fresh answer clears only the current marker. */
+    supersededAnswers?: Array<{
+        answerVersion: number;
+        answer: string;
+        action?: 'resume' | 'wait';
+        answeredAt?: string;
+        at: string;
+        reason: string;
+    }>;
 }
 export interface Task {
     kind?: 'recovery';

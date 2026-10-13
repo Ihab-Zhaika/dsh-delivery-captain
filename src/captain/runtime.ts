@@ -123,7 +123,11 @@ function identityStamp(run: Run, task: Task, agent: Agent, member: unknown = nul
   // transitionVersion orders controller callbacks, including informational
   // phase reports. Execution authority is the actual status/hold/attempt/policy
   // tuple below; a progress receipt must not cancel unchanged member work.
-  return createHash('sha256').update(JSON.stringify({run:run.id,captain:run.captainSessionId,status:run.status,revision:run.coordinatorRevision,taskId:task.id,attempt:task.attempt,root:task.sessionId,worktree:task.worktree,statusTask:task.status,hold:task.holdRevision,dependency:task.dependencyBlocked,decision:task.waitingDecision,policy:taskDeliveryConfig(task,run.config),agentId:agent.id,options:agent.options,header:agent.session.header,member})).digest('hex')
+  // Publishing an admitted request promotes starting to running while system
+  // assembly may still be awaited. Both authorize this same execution window;
+  // holds and terminal states remain distinct, as does a new window anchor.
+  const executionStatus=task.status==='starting'||task.status==='running'?'active':task.status
+  return createHash('sha256').update(JSON.stringify({run:run.id,captain:run.captainSessionId,status:run.status,revision:run.coordinatorRevision,taskId:task.id,attempt:task.attempt,root:task.sessionId,worktree:task.worktree,statusTask:executionStatus,window:task.budgetStartedAt??task.startedAt,hold:task.holdRevision,dependency:task.dependencyBlocked,policy:taskDeliveryConfig(task,run.config),agentId:agent.id,options:agent.options,header:agent.session.header,member})).digest('hex')
 }
 /** Only current authority belongs to a generation identity, not unrelated team progress or result timestamps. */
 function memberAuthority(team: TeamState, agentId: string, label: string) {

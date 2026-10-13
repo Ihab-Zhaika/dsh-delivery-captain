@@ -10,6 +10,7 @@ const TERMINAL = new Set<Task['status']>(['merged', 'failed', 'cancelled'])
 const PHASES: Phase[] = ['setup','analysis','implementation','testing','review','repair','integration','waiting','blocked','complete']
 const now = (): string => new Date().toISOString()
 const isStopped = (run: Run): boolean => run.status === 'stopped'
+const questionIntent = (q: Question): string => JSON.stringify([q.answerVersion??0,q.answer,q.action,q.answeredAt])
 class DiagnosticAnswerDeferred extends Error {}
 export const repositoryKey = (c: RunConfig): string => JSON.stringify([c.provider, c.organization?.toLowerCase(), c.project?.toLowerCase(), c.repository.toLowerCase()])
 
@@ -336,39 +337,53 @@ export class CaptainController {
     if (!q || !answer.trim() || answer.length > 30000) throw new Error('Invalid question or answer')
     if (action !== 'resume' && action !== 'wait') throw new Error('Invalid answer action')
     if (q.answer === answer && q.action === action && (q.deliveredAt||q.recordedAt)) {
+      if(q.supersededAt)return q
       const task=this.findTask(run,q.taskId)
       if(action==='wait'&&task?.status==='blocked'&&task.resumeRequested){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;await this.save(run)}
       return q
     }
-    q.answer = answer; q.action = action; q.answeredAt = now(); delete q.deliveredAt; delete q.recordedAt; delete q.deliveryError; await this.save(run)
-    if(action==='wait'){const task=this.findTask(run,q.taskId);if(task){task.holdRevision=(task.holdRevision??0)+1;await this.save(run)}}
+    q.answer = answer; q.action = action; q.answeredAt = now();q.answerVersion=(q.answerVersion??0)+1
+    delete q.deliveredAt;delete q.recordedAt;delete q.deliveryError;delete q.supersededAt;delete q.supersededReason
+    const intent=questionIntent(q);await this.save(run)
+    if(q.supersededAt||questionIntent(q)!==intent)return q
+    if(action==='wait'){const task=this.findTask(run,q.taskId);if(task){task.holdRevision=(task.holdRevision??0)+1;if(task.status==='blocked'&&task.resumeRequested){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1};await this.save(run)}}
+    if(q.supersededAt||questionIntent(q)!==intent)return q
     await this.deliverAnswer(run, q)
     return q
   }
 
   private async deliverAnswer(run: Run, q: Question): Promise<void> {
+    if(!q.answer||q.supersededAt||q.deliveredAt||q.recordedAt)return
+    const intent=questionIntent(q),answer=q.answer,action=q.action,answerVersion=q.answerVersion??0
+    const current=()=>!q.supersededAt&&!q.deliveredAt&&!q.recordedAt&&questionIntent(q)===intent
     const task = this.findTask(run,q.taskId)
     if (!task || TERMINAL.has(task.status) || isStopped(run)) return
     if(task.status==='ready')return
     if(task.status==='parked') { q.recordedAt=now(); delete q.deliveryError; task.waitingDecision=q.answer; await this.save(run); return }
-    if(q.action!=='wait'&&await this.heldDependencyWake(run,task)){q.recordedAt=now();delete q.deliveryError;task.waitingDecision=q.answer;await this.save(run);return}
+    if(action!=='wait'){
+      const held=await this.heldDependencyWake(run,task);if(!current())return
+      if(held){q.recordedAt=now();delete q.deliveryError;task.waitingDecision=answer;await this.save(run);return}
+    }
     const diagnosticVersion=task.transitionVersion
     if(task.status==='blocked')try{await this.diagnostics(run,task)}catch(error){
+      if(!current())return
       q.deliveryError=(error instanceof Error?error.message:String(error)).slice(0,4000);await this.save(run)
       throw new DiagnosticAnswerDeferred(q.deliveryError)
     }
-    if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready','parked'].includes(task.status)||task.transitionVersion!==diagnosticVersion||this.dependencyQuiescences.has(task.id)||task.dependencyBlocked&&task.parkingError)return
-    if(q.action==='wait'&&task.status==='blocked'){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;task.waitingDecision=q.answer;q.recordedAt=now();delete q.deliveryError;await this.save(run);return}
+    if(!current()||isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready','parked'].includes(task.status)||task.transitionVersion!==diagnosticVersion||this.dependencyQuiescences.has(task.id)||task.dependencyBlocked&&task.parkingError)return
+    if(action==='wait'&&task.status==='blocked'){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;task.waitingDecision=answer;q.recordedAt=now();delete q.deliveryError;await this.save(run);return}
     if (task.status === 'blocked' && !task.executionActive && this.activeCount(run) >= run.config.parallelism) return
     delete task.resumeRequested
     const previousStatus=task.status
     const version=task.transitionVersion=(task.transitionVersion??0)+1
     task.status = 'running'; await this.save(run)
-    if(this.dependencyQuiescences.has(task.id)||task.dependencyBlocked&&task.parkingError)return
-    await this.runtime.send(task.sessionId, `Captain answer to ${q.id}: ${q.answer}${q.action==='wait'?'\nDecision: wait. Preserve the existing team and execution holds; do not retry unchanged work. Report waiting/blocked and yield when no independent safe work remains.':''}`,`answer:${q.id}:${createHash('sha256').update(JSON.stringify([q.answer,q.action])).digest('hex')}`)
+    const permitted=()=>current()&&!isStopped(run)&&!this.disposed&&task.transitionVersion===version&&task.status==='running'&&!this.dependencyQuiescences.has(task.id)&&!(task.dependencyBlocked&&task.parkingError)
+    if(!permitted())return
+    const admitted=await this.runtime.send(task.sessionId, `Captain answer to ${q.id}: ${answer}${action==='wait'?'\nDecision: wait. Preserve the existing team and execution holds; do not retry unchanged work. Report waiting/blocked and yield when no independent safe work remains.':''}`,`answer:${q.id}:${answerVersion}:${createHash('sha256').update(JSON.stringify([answer,action])).digest('hex')}`,permitted)
     if (isStopped(run) || this.disposed) { await this.runtime.stop(task.sessionId); return }
+    if(!current()||admitted===false)return
     if(!TERMINAL.has(task.status)&&task.transitionVersion===version){
-      if(q.action==='wait'){task.status=previousStatus;task.executionActive=true;if(previousStatus!=='blocked')this.phase(task,'waiting')}
+      if(action==='wait'){task.status=previousStatus;task.executionActive=true;if(previousStatus!=='blocked')this.phase(task,'waiting')}
     else {this.phase(task,'analysis');delete task.blockedSince;delete task.error;delete task.idleCheckpointAt;delete task.waitingDecision}
     }
     q.deliveredAt = now(); delete q.deliveryError; task.lastWakeAt = now(); await this.save(run)
@@ -424,13 +439,26 @@ export class CaptainController {
     if(task.parkingError||task.status==='parked'&&task.executionActive)throw new Error('Parking has not safely quiesced the worker')
     if(!human&&task.resumeRequested&&task.waitingDecision===evidence.trim())return task
     const version=task.transitionVersion
+    const hold=task.holdRevision??0
+    const pendingAnswers=human?run.questions.filter(q=>q.taskId===task.id&&q.answer&&!q.deliveredAt&&!q.recordedAt&&!q.supersededAt).map(q=>({q,intent:questionIntent(q)})):[]
     const previousStatus=task.status
     if(task.status!=='parked'&&await this.runtime.isRunning(task.sessionId))throw new Error('Worker is already executing; retry was not duplicated')
     if(!human&&!verifiedRecovery)await this.diagnostics(run,task)
-    if(isStopped(run)||this.disposed||run.status!=='running'||task.status!==previousStatus||task.transitionVersion!==version||expectedHold!==undefined&&(task.holdRevision??0)!==expectedHold||task.parkingError||this.dependencyQuiescences.has(task.id))throw new Error('Task changed during resumption validation or has not quiesced')
+    const newerWait=human&&run.questions.some(q=>q.taskId===task.id&&q.answer&&q.action==='wait'&&!q.supersededAt&&!q.deliveredAt&&!q.recordedAt&&!pendingAnswers.some(old=>old.q===q&&old.intent===questionIntent(q)))
+    if(isStopped(run)||this.disposed||run.status!=='running'||task.status!==previousStatus||task.transitionVersion!==version||(task.holdRevision??0)!==hold||newerWait||expectedHold!==undefined&&(task.holdRevision??0)!==expectedHold||task.parkingError||this.dependencyQuiescences.has(task.id))throw new Error('Task changed during resumption validation or has not quiesced')
     task.transitionVersion=(task.transitionVersion??0)+1
     if(budgetFailure){task.phases.push({phase:task.phase,at:now(),note:`Human-authorized continuation of the same assignment after budget failure at ${task.finishedAt}; original start ${task.startedAt} and prior elapsed history retained.`});delete task.finishedAt}
-    if(human){task.pendingHumanRetry={at:now(),reason:evidence.trim(),previousBlocker:task.error??task.phases.at(-1)?.note};task.budgetStartedAt=now();task.phases.push({phase:task.phase,at:now(),note:'Explicit human task Resume authorizes one normal retry and starts a fresh bounded execution window; original elapsed/history and gate policies retained.'})}
+    if(human){
+      const at=now();task.pendingHumanRetry={at,reason:evidence.trim(),previousBlocker:task.error??task.phases.at(-1)?.note};task.budgetStartedAt=at
+      for(const old of pendingAnswers){
+        const q=old.q;if(!q.answer||q.deliveredAt||q.recordedAt||q.supersededAt||questionIntent(q)!==old.intent)continue
+        const reason=`Explicit human task resumption supersedes this older pending answer: ${evidence.trim()}`
+        ;(q.supersededAnswers??=[]).push({answerVersion:q.answerVersion??0,answer:q.answer,action:q.action,answeredAt:q.answeredAt,at,reason})
+        q.supersededAt=at;q.supersededReason=reason;q.recordedAt=at
+      }
+      if(task.error==='Task time budget exhausted'){task.phases.push({phase:task.phase,at,note:`Historical blocker retained by explicit human resumption: ${task.error}`});delete task.error}
+      task.phases.push({phase:task.phase,at,note:'Explicit human task Resume authorizes one normal retry and starts a fresh bounded execution window; original elapsed/history and gate policies retained.'})
+    }
     if(teamMemberLimit!==undefined) {
       task.assignmentConfig={...structuredClone(task.assignmentConfig??run.config),maxTeamMembers:teamMemberLimit}
       task.phases.push({phase:task.phase,at:now(),note:`Human resource override: team member limit ${originalConfig.maxTeamMembers} → ${teamMemberLimit}; verification, acceptance and other assignment policies unchanged.`})
