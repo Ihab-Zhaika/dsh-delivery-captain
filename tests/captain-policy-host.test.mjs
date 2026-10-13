@@ -27,9 +27,12 @@ async function fixture(t,{complete=false,persistence=false}={}){
   class Adapter extends LlmAdapter{
     async listModels(){return[model]}
     async resolveModel(provider,id){if(prepareHook)await prepareHook();return{...model,provider,id}}
-    async *stream(options){requests.push({json:JSON.stringify(options),marked:isAgentLoopRequest(options),frozen:Object.isFrozen(options),session:options.sessionId});for(let index=0;index<chunks.length;index++){if(streamHook)await streamHook(index);yield chunks[index]}}
+    async *stream(options){requests.push({json:JSON.stringify(options),marked:isAgentLoopRequest(options),frozen:Object.isFrozen(options),session:options.sessionId});try{for(let index=0;index<chunks.length;index++){if(streamHook)await streamHook(index);yield chunks[index]}}finally{journal.push({streamClosed:true,session:options.sessionId})}}
   }
   host.llm.registerAdapter(['local-policy-test'],new Adapter())
+  // A native downstream observer registered before policy consumes only
+  // chunks that escape the policy wrapper, not the adapter's private output.
+  host.on('llm/stream',async function*(_options,next){for await(const item of next()){journal.push({delivered:true,item});yield item}})
   host.tools.register({name:'read',description:'Read-only synthetic fixture tool',parameters:{},output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]},async execute(){return'fixture'}})
   const rootHandle=await host.agents.create({sessionId:'policy-root',meta:{cwd:dir},agentOptions:{provider:model.provider,model:model.id}});handles.push(rootHandle)
   const root=rootHandle.agent,at=Date.now()
@@ -62,6 +65,17 @@ for(const boundary of ['lookup','stream'])test(`A-R1 unrelated teammate progress
  if(boundary==='lookup')f.setLookupHook(async()=>{if(updates<2)await progress()})
  else f.setStreamHook(async index=>{if(index===1)await progress()})
  await f.drive();assert.ok(updates>0);assert.equal(f.requests.length,1,JSON.stringify(f.errors));assert.equal(f.errors.length,0,JSON.stringify(f.errors));assert.equal(f.team.tasks[0].attemptId,'member-attempt');assert.equal(f.run.coordinatorRevision,1);assert.match(f.requests[0].json,/PRIMARY/);assert.equal(f.child.session.snapshotEvents().filter(e=>e.type==='assistant/message').length,1)
+})
+for(const change of ['scope','halt','WAIT','policy'])test(`F1 authority revoked inside awaited native stream ${change} cannot reach the consumer`,{timeout:20000},async t=>{
+ const f=await fixture(t);f.setStreamHook(async index=>{if(index!==1)return
+  if(change==='scope')f.team.tasks[0].inScope=['revoked/']
+  if(change==='halt')f.team.halted=true
+  if(change==='WAIT')f.task.holdRevision=(f.task.holdRevision??0)+1
+  if(change==='policy')f.run.coordinatorRevision++
+  await f.saveTeam()
+ });await f.drive();assert.equal(f.requests.length,1);assert.ok(f.errors.some(e=>/policy|ownership|model|scope/i.test(e)),JSON.stringify(f.errors))
+ assert.equal(f.journal.some(e=>e.delivered&&e.item.type==='text-delta'&&e.item.text==='done'),false,'The text returned by a revoked awaited iteration must not reach the native consumer')
+ assert.ok(f.journal.some(e=>e.streamClosed&&e.session===f.child.id),'The exact owned iterator must be closed')
 })
 for(const change of ['attempt','role','model','tools','scope','halt','WAIT','policy'])test(`A-R1 equivalent actual stream own ${change} change still rejects`,{timeout:20000},async t=>{
  const f=await fixture(t);f.setStreamHook(async index=>{if(index!==1)return
