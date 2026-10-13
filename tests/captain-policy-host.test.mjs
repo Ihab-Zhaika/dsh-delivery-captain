@@ -23,11 +23,11 @@ async function fixture(t,{complete=false,persistence=false}={}){
   await mount('session');await mount('session-projection');await mount('agent');await mount('llm',{});await mount('system-prompt',{includeHarnessIdentity:false});await mount('tools',{mode:'native'});if(persistence)await mount('session-persistence-jsonl',{root:join(dir,'private-sessions'),compression:'none'});await mount('agent-loop',{agents:[],maxParallelToolCalls:1})
   host.on('agent/error',payload=>errors.push(String(payload.error)))
   host.on('session/event',(session,event)=>journal.push({id:session.id,event}))
-  let prepareHook
+  let prepareHook,streamHook,lookupHook
   class Adapter extends LlmAdapter{
     async listModels(){return[model]}
     async resolveModel(provider,id){if(prepareHook)await prepareHook();return{...model,provider,id}}
-    async *stream(options){requests.push({json:JSON.stringify(options),marked:isAgentLoopRequest(options),frozen:Object.isFrozen(options),session:options.sessionId});yield*chunks}
+    async *stream(options){requests.push({json:JSON.stringify(options),marked:isAgentLoopRequest(options),frozen:Object.isFrozen(options),session:options.sessionId});for(let index=0;index<chunks.length;index++){if(streamHook)await streamHook(index);yield chunks[index]}}
   }
   host.llm.registerAdapter(['local-policy-test'],new Adapter())
   host.tools.register({name:'read',description:'Read-only synthetic fixture tool',parameters:{},output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]},async execute(){return'fixture'}})
@@ -44,7 +44,7 @@ async function fixture(t,{complete=false,persistence=false}={}){
   let catalog=[{id:'policy-child',mode:'continuable',label:'agent-teams:policy-team:reviewer',createdAt:at}]
   host.provide('subagents',{listChildren:async()=>catalog,listDescendants:async()=>catalog.map(row=>({kind:'child',...row,parentId:root.id,depth:1,activity:'inactive',hasChildren:false}))})
   let inheritedReceipt=false
-  host.provide('sessionController',{inspect:async id=>{const agent=host.agents.get(id);return{meta:agent.session.header,inheritedEventCount:inheritedReceipt?agent.session.seq:agent.session.inheritedEventCount,events:agent.session.snapshotEvents()}}})
+  host.provide('sessionController',{inspect:async id=>{const agent=host.agents.get(id);if(lookupHook)await lookupHook();return{meta:agent.session.header,inheritedEventCount:inheritedReceipt?agent.session.seq:agent.session.inheritedEventCount,events:agent.session.snapshotEvents()}}})
   // Baseline has no installer: exercise its real unchanged host behavior rather than counting missing exports as causal policy RED.
   let policyEnabled=true
   const install=ctx=>{if(policyEnabled)runtime.installDeliveryPolicy?.(ctx,()=>[run])}
@@ -53,8 +53,29 @@ async function fixture(t,{complete=false,persistence=false}={}){
   const childHandle=await host.agents.create({sessionId:'policy-child',parentAgent:root,meta:{cwd:dir,parentSession:root.id,origin:'subagent',delegationDepth:1},agentOptions:{provider:model.provider,model:model.id},setup(ctx,agent){applyChildComposition(ctx,root,{persona:frozenPersona,toolFilter:{allow:['read']}});if(complete)ctx.systemPrompt.section({name:'negative-complete',order:0,text:frozenPersona,complete:true});agent.session.append('subagent/descriptor',descriptor)}});handles.push(childHandle)
   let child=childHandle.agent
   async function drive(agent=child){agent.followup(createUserMessage({source:{kind:'user'},content:[{type:'text',text:'Review the assigned source; preserve history.'}]}));await agent.whenIdle()}
-  return{host,run,task,root,get child(){return child},team,teamFile,requests,errors,journal,drive,setPrepareHook:fn=>prepareHook=fn,setCatalog:rows=>catalog=rows,setInheritedReceipt:()=>inheritedReceipt=true,async discardChild(){await childHandle.dispose()},async unloadPolicy(){policyEnabled=false;await policyFiber.dispose()},async coldResume(){await childHandle.dispose();const resumed=await host.agents.resume({resumeSessionId:'policy-child',parentAgent:root,agentOptions:{provider:model.provider,model:model.id},setup(ctx){applyChildComposition(ctx,root,{persona:descriptor.persona,toolFilter:descriptor.toolFilter})}});handles.push(resumed);child=resumed.agent;return child},async remount(){await policyFiber.dispose();policyFiber=host.plugin({inject:['agents','systemPrompt','subagents','sessionController'],apply(ctx){install(ctx)}});fibers.push(policyFiber);await policyFiber.await()},saveTeam:()=>writeFile(teamFile,JSON.stringify(team))}
+  return{host,run,task,root,get child(){return child},team,teamFile,requests,errors,journal,drive,setPrepareHook:fn=>prepareHook=fn,setStreamHook:fn=>streamHook=fn,setLookupHook:fn=>lookupHook=fn,setCatalog:rows=>catalog=rows,setInheritedReceipt:()=>inheritedReceipt=true,async discardChild(){await childHandle.dispose()},async unloadPolicy(){policyEnabled=false;await policyFiber.dispose()},async coldResume(){await childHandle.dispose();const resumed=await host.agents.resume({resumeSessionId:'policy-child',parentAgent:root,agentOptions:{provider:model.provider,model:model.id},setup(ctx){applyChildComposition(ctx,root,{persona:descriptor.persona,toolFilter:descriptor.toolFilter})}});handles.push(resumed);child=resumed.agent;return child},async remount(){await policyFiber.dispose();policyFiber=host.plugin({inject:['agents','systemPrompt','subagents','sessionController'],apply(ctx){install(ctx)}});fibers.push(policyFiber);await policyFiber.await()},saveTeam:()=>writeFile(teamFile,JSON.stringify(team))}
 }
+
+for(const boundary of ['lookup','stream'])test(`A-R1 unrelated teammate progress at ${boundary} preserves unchanged actual owner response`,{timeout:20000},async t=>{
+ const f=await fixture(t);let updates=0
+ const progress=async()=>{updates++;f.team.tasks.push({id:`other-${updates}`,subject:'Unrelated completed work',assignee:'teammate',status:'completed',dependencies:[],output:'Actual teammate report',createdAt:Date.now(),updatedAt:Date.now()});f.team.taskSeq++;f.team.members[0].status='working';f.team.tasks[0].updatedAt=Date.now();await f.saveTeam()}
+ if(boundary==='lookup')f.setLookupHook(async()=>{if(updates<2)await progress()})
+ else f.setStreamHook(async index=>{if(index===1)await progress()})
+ await f.drive();assert.ok(updates>0);assert.equal(f.requests.length,1,JSON.stringify(f.errors));assert.equal(f.errors.length,0,JSON.stringify(f.errors));assert.equal(f.team.tasks[0].attemptId,'member-attempt');assert.equal(f.run.coordinatorRevision,1);assert.match(f.requests[0].json,/PRIMARY/);assert.equal(f.child.session.snapshotEvents().filter(e=>e.type==='assistant/message').length,1)
+})
+for(const change of ['attempt','role','model','tools','scope','halt','WAIT','policy'])test(`A-R1 equivalent actual stream own ${change} change still rejects`,{timeout:20000},async t=>{
+ const f=await fixture(t);f.setStreamHook(async index=>{if(index!==1)return
+  if(change==='attempt')f.team.tasks[0].attemptId='changed'
+  if(change==='role')f.team.members[0].role='different role'
+  if(change==='model')f.team.members[0].model='different model'
+  if(change==='tools')f.team.members[0].toolFilter={allow:['read']}
+  if(change==='scope')f.team.tasks[0].inScope=['changed-source/']
+  if(change==='halt')f.team.halted=true
+  if(change==='WAIT')f.task.holdRevision=(f.task.holdRevision??0)+1
+  if(change==='policy')f.run.coordinatorRevision++
+  await f.saveTeam()
+ });await f.drive();assert.equal(f.requests.length,1);assert.ok(f.errors.some(e=>/policy|ownership|model|scope/i.test(e)),JSON.stringify(f.errors))
+})
 
 test('A real rc2 loop serializes owned member current SYSTEM policy without changing frozen role or model',{timeout:20000},async t=>{
   const f=await fixture(t);await f.drive()
