@@ -59,6 +59,8 @@ export interface Task {
   blockedSince?: string; parkedAt?: string; parkReason?: string; parkingError?: string;
   dependencyBlocked?:boolean;
   blockerFingerprint?: string; blockerNotifiedAt?: string; lastBlockerNotifyAttemptAt?: string; lastGuidanceHash?: string;
+  /** Exact existing native inbox batch that was re-armed once after an idle root. */
+  pendingInputWake?: { fingerprint: string; at: string };
   reviewHistory?: Array<ReviewResult & { at: string }>;
 }
 export interface Run {
@@ -96,6 +98,7 @@ export interface TicketProvider {
 export interface ReviewResult { passed: boolean; headSha: string; baseSha?: string; report: string; findings: string[];backend?:'agent'|'ocr';policyStamp?:string;reviewerSessionId?:string;failureKind?: 'team-evidence' | 'infrastructure' | 'findings' }
 export interface MaintenanceReviewRecord {id:string;baseSha:string;headSha:string;budget:number;policy:string;startedAt:string;finishedAt?:string;result?:ReviewResult&{treeSha?:string;directory?:string}}
 export interface RecoveryMaintenance {worktree:string;repository:string;branch:string;baseSha:string;headSha:string;treeSha:string;incorporated:boolean;loaded:boolean}
+export type QueuedInputWake = {kind:'woke'|'queued'|'already-attempted'|'busy'|'empty'|'changed'|'failed'|'unknown';fingerprint?:string};
 export interface WorkerRuntime {
   coordinatorLoop?(run:Run,action:CoordinatorLoopAction):Promise<void>;
   coordinatorLoopState?(run:Run):CoordinatorLoopState;
@@ -117,6 +120,8 @@ export interface WorkerRuntime {
   start(task: Task, run: Run): Promise<void|boolean>;
   send(sessionId: string, text: string, deliveryKey?: string,permitted?:()=>boolean): Promise<void|boolean>;
   stop(sessionId: string,reason?: 'stop'|'shutdown'): Promise<void>;
+  /** Re-arm one exact existing idle-root inbox item without inserting new prompt content. */
+  wakeQueuedInput?(sessionId:string,previousFingerprint?:string,allowWake?:boolean):Promise<QueuedInputWake>;
   /**
    * Exact owned activity check. `ignoreWaitingCaptain` is reserved for the
    * controller's long-idle `phase === 'waiting'` capacity check: it excludes
@@ -124,7 +129,7 @@ export interface WorkerRuntime {
    * proven to have no active or dependency-ready work. Inbox, member, job,
    * review and unreadable-evidence checks remain fail-closed.
    */
-  isRunning(sessionId: string, options?: {ignoreWaitingCaptain?:boolean}): Promise<boolean>;
+  isRunning(sessionId: string, options?: {ignoreWaitingCaptain?:boolean;ignoreQueuedInputFingerprint?:string}): Promise<boolean>;
   review(task: Task, config: RunConfig, onPhase?: (phase: Phase) => Promise<void>): Promise<ReviewResult>;
   isReviewCurrent?(task: Task, config: RunConfig, review: ReviewResult): Promise<boolean>;
   head(task: Task): Promise<string>;

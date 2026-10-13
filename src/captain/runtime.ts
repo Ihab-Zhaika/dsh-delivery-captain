@@ -15,7 +15,7 @@ import { auditTeamWorkspace } from '../workspace-audit.ts'
 import { runCommand } from './commands.ts'
 import { prepareWorktree, resolveHead } from './worktrees.ts'
 import { isReviewCurrent, ocrTokensBudget, reviewTask } from './review.ts'
-import type { CommandRunner, Run, RunConfig, Task, WorkerRuntime } from './types.ts'
+import type { CommandRunner, QueuedInputWake, Run, RunConfig, Task, WorkerRuntime } from './types.ts'
 import { originalTeamReceipt } from './team-receipt.ts'
 import { taskDeliveryConfig } from './scheduler.ts'
 import { CoordinatorLoop } from './coordinator-loop.ts'
@@ -96,6 +96,18 @@ ${recoveryFacts(run)}`
 function promptIdentity(key: string): SessionRequestId {
   const hex = createHash('sha256').update(key).digest('hex')
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-4${hex.slice(13,16)}-a${hex.slice(17,20)}-${hex.slice(20,32)}` as SessionRequestId
+}
+/** Opaque fingerprint for pending inbox identity/content; never persist or expose message text. */
+function queuedInboxFingerprint(agent:Agent):string|undefined {
+  try {
+    const nextStep=agent.inbox.nextStep,nextTurn=agent.inbox.nextTurn
+    if(!nextStep.length&&!nextTurn.length)return
+    const messages=(target:'next-step'|'next-turn',items:readonly unknown[])=>items.map(value=>{
+      const message=value as {id?:unknown;source?:unknown;content?:unknown}
+      return [target,message.id,message.source,message.content]
+    })
+    return createHash('sha256').update(JSON.stringify([...messages('next-step',nextStep),...messages('next-turn',nextTurn)])).digest('hex')
+  } catch { return }
 }
 export function incorporationInstructions(config: RunConfig): string {
   return `Safely merge that target commit into your EXISTING assigned branch; no rebase, reset or history rewrite. Preserve intended source, teams/history and artifacts. Inspect dirty work first; do not discard/stash blindly or bypass hooks. Resolve conflicts and rerun affected verification and complete current exact-head independent review. The controller requires target-ancestor proof before final review/merge.\n${reviewInstructions(config)}`
@@ -319,7 +331,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
     }
     return false
   }
-  async function hasNativeActivity(sessionId:string,activityOptions:{ignoreWaitingCaptain?:boolean}={}):Promise<boolean> {
+  async function hasNativeActivity(sessionId:string,activityOptions:{ignoreWaitingCaptain?:boolean;ignoreQueuedInputFingerprint?:string}={}):Promise<boolean> {
     if(reviews.has(sessionId))return true
     if(activityOptions.ignoreWaitingCaptain&&await hasRunnableOriginalTeamWork(sessionId))return true
     const owners = new Set<string>([sessionId])
@@ -332,7 +344,10 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
         seen.add(agent)
         owners.add(agent.id)
         if (agent.status === 'running'&&!(activityOptions.ignoreWaitingCaptain&&agent.id===sessionId)) return true
-        if(agent.inbox.nextTurn.length||agent.inbox.nextStep.length)return true
+        if(agent.inbox.nextTurn.length||agent.inbox.nextStep.length){
+          const sameIdleRootInput=agent.id===sessionId&&agent.status==='idle'&&!!activityOptions.ignoreQueuedInputFingerprint&&queuedInboxFingerprint(agent)===activityOptions.ignoreQueuedInputFingerprint
+          if(!sameIdleRootInput)return true
+        }
         pending.push(...ctx.agents.list().filter(candidate => ctx.agents.isOwnedBy(candidate.id, agent)))
       }
       return false
@@ -358,6 +373,63 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       }
     }
     return liveActivity()
+  }
+  async function wakeQueuedInput(sessionId:string,previousFingerprint?:string,allowWake=true):Promise<QueuedInputWake>{
+    if(reviews.has(sessionId))return{kind:'busy'}
+    const agent=ctx.agents.get(sessionId as SessionId)
+    if(!agent||agent.session.id!==sessionId||ctx.agents.get(sessionId as SessionId)!==agent)return{kind:'unknown'}
+    if(agent.status!=='idle')return{kind:'busy'}
+    const fingerprint=queuedInboxFingerprint(agent)
+    const jobs=ctx.get('jobs') as {list(owner:SessionId):readonly {owner?:string;status:string}[]} | undefined
+    if(!jobs||typeof jobs.list!=='function'||typeof ctx.subagents?.listDescendants!=='function')return{kind:'unknown',fingerprint}
+    const owners=new Set<string>([sessionId])
+    let descendants:Awaited<ReturnType<typeof ctx.subagents.listDescendants>>
+    try{descendants=await ctx.subagents.listDescendants(sessionId as SessionId)}catch{return{kind:'unknown',fingerprint}}
+    for(const child of descendants){
+      if(child.kind==='diagnostic'&&child.reason!=='unsupported')return{kind:'unknown',fingerprint}
+      owners.add(child.id)
+    }
+    for(const candidate of ctx.agents.list()){
+      if(candidate.id===sessionId||!ctx.agents.isOwnedBy(candidate.id,agent))continue
+      owners.add(candidate.id)
+      if(candidate.status==='running'||candidate.inbox.nextStep.length||candidate.inbox.nextTurn.length)return{kind:'busy',fingerprint}
+    }
+    for(const owner of owners)for(const job of jobs.list(owner as SessionId)){
+      if(job.owner!==owner)continue
+      if(job.status==='running'||job.status==='stopping')return{kind:'busy',fingerprint}
+      if(!['completed','failed','killed'].includes(job.status))return{kind:'unknown',fingerprint}
+    }
+    const currentFingerprint=queuedInboxFingerprint(agent)
+    if(!currentFingerprint)return{kind:'empty'}
+    if(!fingerprint||currentFingerprint!==fingerprint)return{kind:'changed',fingerprint:currentFingerprint}
+    if(currentFingerprint===previousFingerprint)return{kind:'already-attempted',fingerprint:currentFingerprint}
+    if(ctx.agents.get(sessionId as SessionId)!==agent||agent.status!=='idle')return{kind:'busy',fingerprint}
+    if(!allowWake)return{kind:'queued',fingerprint:currentFingerprint}
+    try{
+      return await agent.runMaintenance(async signal=>{
+        if(signal.aborted||ctx.agents.get(sessionId as SessionId)!==agent||agent.status!=='idle')return{kind:'busy',fingerprint} as const
+        const current=queuedInboxFingerprint(agent)
+        if(!current)return{kind:'empty'} as const
+        if(current!==fingerprint)return{kind:'changed',fingerprint:current} as const
+        if(current===previousFingerprint)return{kind:'already-attempted',fingerprint:current} as const
+        // Keep target and content unchanged. Re-appending the last message to its
+        // own queue preserves FIFO order while wakeup=true restarts the idle driver.
+        const target=agent.inbox.nextStep.length?'next-step':'next-turn'
+        const queue=target==='next-step'?agent.inbox.nextStep:agent.inbox.nextTurn
+        const index=queue.length-1,message=queue[index]
+        if(!message)return{kind:'empty'} as const
+        const removed=agent.inbox.splice(target,index,1,[])
+        if(removed.length!==1||removed[0]!==message){if(removed.length)agent.inbox.splice(target,index,0,[...removed]);return{kind:'changed',fingerprint:queuedInboxFingerprint(agent)} as const}
+        try{
+          agent.send(message,target,true)
+          return{kind:'woke',fingerprint:queuedInboxFingerprint(agent)??current} as const
+        }catch{
+          const currentQueue=target==='next-step'?agent.inbox.nextStep:agent.inbox.nextTurn
+          if(!currentQueue.some(item=>item.id===message.id))agent.inbox.splice(target,index,0,[message])
+          return{kind:'failed',fingerprint:queuedInboxFingerprint(agent)??current} as const
+        }
+      })
+    }catch{return ctx.agents.get(sessionId as SessionId)?.status==='running'?{kind:'busy',fingerprint:queuedInboxFingerprint(agent)??fingerprint}:{kind:'failed',fingerprint}}
   }
   async function checkTools(config: RunConfig, agent?: Agent): Promise<void> {
     for (const name of ['agent_teams_create', 'agent_teams_status', 'agent_teams_add_member', 'agent_teams_create_task', 'agent_teams_send_message', 'agent_teams_delete']) {
@@ -643,6 +715,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       if(failures.length)throw new AggregateError(failures,`Worker shutdown incomplete: ${failures.map(String).join('; ')}`)
     },
     async isRunning(sessionId,activityOptions) { return hasNativeActivity(sessionId,activityOptions) },
+    wakeQueuedInput,
     async review(task, config, onPhase) {
       if (reviews.has(task.sessionId)) throw new Error('A review is already running for this worker')
       const controller = new AbortController()

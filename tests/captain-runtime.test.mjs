@@ -131,7 +131,7 @@ function host() {
     sessionController: {
       inspect: async id=>({meta:{id},inheritedEventCount:0,events:[...agents.get(id)?.events??[],...agents.get(id)?.title?[{type:'session/title',data:{title:agents.get(id).title,source:{kind:'user'}}}]:[]]}),
       rename: async req=>{calls.push(['rename',req]);agents.get(req.sessionId).title=req.title},
-      create: async req => { calls.push(['create', req]);const cwd=req.cwd??[...workspaces.values()].find(w=>w.id===req.workspaceId)?.path; if (!agents.has(req.sessionId)) agents.set(req.sessionId, { id: req.sessionId, status: 'idle', inbox:{nextTurn:[],nextStep:[]},session: { id: req.sessionId, header: { cwd } }, ctx: { on: (name, fn) => hooks.push([name, fn]) }, cancel: () => calls.push(['cancel']), whenIdle: async () => calls.push(['idle']) }); return { sessionId: req.sessionId } },
+      create: async req => { calls.push(['create', req]);const cwd=req.cwd??[...workspaces.values()].find(w=>w.id===req.workspaceId)?.path; if (!agents.has(req.sessionId)) { const agent={id:req.sessionId,status:'idle',inbox:{nextTurn:[],nextStep:[],splice(target,start,deleteCount,inserted){const key=target==='next-step'?'nextStep':'nextTurn';return this[key].splice(start,deleteCount,...inserted)},remove(id){for(const target of ['nextStep','nextTurn']){const index=this[target].findIndex(message=>message.id===id);if(index>=0){this[target].splice(index,1);return true}}return false}},session:{id:req.sessionId,header:{cwd}},ctx:{on:(name,fn)=>hooks.push([name,fn])},runMaintenance:async fn=>{calls.push(['maintenance',req.sessionId]);return fn(new AbortController().signal)},send(message,target,wakeup){calls.push(['send-existing',req.sessionId,target,wakeup,message.id]);this.inbox[target==='next-step'?'nextStep':'nextTurn'].push(message);if(wakeup)this.status='running'},followup(message){calls.push(['followup',req.sessionId,message.id]);this.inbox.nextTurn.push(message);this.status='running'},steer(message){calls.push(['steer',req.sessionId,message.id]);this.inbox.nextStep.unshift(message);this.status='running'},cancel:()=>calls.push(['cancel']),whenIdle:async()=>calls.push(['idle'])};agents.set(req.sessionId,agent)} return { sessionId: req.sessionId } },
       resolveAgent: async id => ({ agent: agents.get(id) }),
       prompt: async req => { const agent=agents.get(req.sessionId);if(agent.events?.some(e=>e.type==='user/message'&&e.data.source?.rpcId===req.requestId))return {accepted:true};calls.push(['prompt', req]);agent.events??=[];agent.events.push({type:'user/message',data:{content:req.content,source:{kind:'user',rpcId:req.requestId}}});agent.status = 'running'; return { accepted: true } },
     },
@@ -621,6 +621,59 @@ test('pending native inbox input reserves activity and unreadable inboxes never 
  assert.equal(await rt.isRunning(root.id),true)
  Object.defineProperty(root.inbox,'nextTurn',{get(){throw new Error('Inbox unreadable')}})
  await assert.rejects(rt.isRunning(root.id),/Inbox unreadable/)
+})
+
+test('idle recovery re-arms the exact queued message without inserting a new user prompt',async()=>{
+ const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker'});await rt.start(item,{config});const root=h.agents.get(item.sessionId)
+ h.ctx.subagents.listDescendants=async()=>[];h.ctx.jobs={list:()=>[]};root.status='idle'
+ const earlier={id:'earlier-message-id',source:{kind:'user'},content:[{type:'text',text:'Earlier authorized input'}]}
+ const pending={id:'existing-message-id',source:{kind:'user'},content:[{type:'text',text:'Decision: wait. Preserve the current hold.'}]}
+ root.inbox.nextStep.push(earlier,pending)
+ const before=h.calls.filter(call=>call[0]==='prompt').length,eventCount=root.events.length
+ const wake=await rt.wakeQueuedInput(item.sessionId)
+ assert.equal(wake.kind,'woke');assert.equal(wake.fingerprint.length,64)
+ assert.equal(root.status,'running');assert.deepEqual(root.inbox.nextStep,[earlier,pending]);assert.deepEqual(root.inbox.nextTurn,[])
+ assert.equal(h.calls.filter(call=>call[0]==='prompt').length,before,'waking reuses the existing message and adds no new prompt')
+ assert.equal(root.events.length,eventCount,'re-arming does not append or rewrite a user message event')
+ assert.deepEqual(h.calls.filter(call=>call[0]==='send-existing').map(call=>call.slice(1)),[[item.sessionId,'next-step',true,pending.id]])
+ assert.doesNotMatch(JSON.stringify(wake),/Existing authorized input/)
+ root.status='idle'
+ const repeated=await rt.wakeQueuedInput(item.sessionId,wake.fingerprint)
+ assert.deepEqual(repeated,{kind:'already-attempted',fingerprint:wake.fingerprint})
+ assert.equal(h.calls.filter(call=>call[0]==='send-existing').length,1,'the same unconsumed input cannot create a wake loop')
+ root.status='idle';root.inbox.nextStep=[];const followup={id:'existing-turn-message',source:{kind:'user'},content:[{type:'text',text:'Existing next-turn input'}]};root.inbox.nextTurn.push(followup)
+ const nextTurnWake=await rt.wakeQueuedInput(item.sessionId)
+ assert.equal(nextTurnWake.kind,'woke');assert.deepEqual(root.inbox.nextTurn,[followup]);assert.deepEqual(h.calls.filter(call=>call[0]==='send-existing').at(-1).slice(1),[item.sessionId,'next-turn',true,followup.id])
+})
+
+test('idle recovery leaves the inbox untouched when an owned native job is still running',async()=>{
+ const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker'});await rt.start(item,{config});const root=h.agents.get(item.sessionId)
+ h.ctx.subagents.listDescendants=async()=>[];h.ctx.jobs={list:owner=>owner===item.sessionId?[{owner,status:'running'}]:[]};root.status='idle'
+ const pending={id:'existing-message-id',source:{kind:'user'},content:[{type:'text',text:'Existing authorized input'}]};root.inbox.nextStep.push(pending)
+ const result=await rt.wakeQueuedInput(item.sessionId)
+ assert.deepEqual(result,{kind:'busy',fingerprint:result.fingerprint});assert.equal(root.status,'idle');assert.deepEqual(root.inbox.nextStep,[pending])
+ assert.equal(h.calls.some(call=>call[0]==='send-existing'),false);assert.equal(h.calls.filter(call=>call[0]==='prompt').length,1)
+ assert.equal(await rt.isRunning(root.id,{ignoreQueuedInputFingerprint:result.fingerprint}),true,'a queued-inbox exemption cannot hide an owned native job')
+ root.inbox.nextStep=[]
+ assert.equal((await rt.wakeQueuedInput(item.sessionId,result.fingerprint)).kind,'busy','an idle inbox must not hide a separately owned running job')
+ h.ctx.jobs={list:()=>[]}
+ assert.equal(await rt.isRunning(root.id,{ignoreQueuedInputFingerprint:result.fingerprint}),false,'only the exact already-attempted idle inbox can release reserved capacity')
+ root.inbox.nextStep[0]={...pending,content:[{type:'text',text:'Newer input with same message id'}]}
+ assert.equal(await rt.isRunning(root.id,{ignoreQueuedInputFingerprint:result.fingerprint}),true,'edited input cannot inherit the old wake exemption')
+ const queued=await rt.wakeQueuedInput(item.sessionId,result.fingerprint,false)
+ assert.equal(queued.kind,'queued');assert.equal(h.calls.some(call=>call[0]==='maintenance'),false,'capacity wait inspects but never wakes the queued input')
+})
+
+test('a failed native wake restores the original queue once even if transport inserted before rejecting',async()=>{
+ for(const afterInsert of [false,true]){
+  const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker'});await rt.start(item,{config});const root=h.agents.get(item.sessionId)
+  h.ctx.subagents.listDescendants=async()=>[];h.ctx.jobs={list:()=>[]};root.status='idle'
+  const pending={id:`existing-message-${afterInsert}`,source:{kind:'user'},content:[{type:'text',text:'Preserve this exact input'}]};root.inbox.nextStep.push(pending)
+  root.send=function(message,target,wakeup){if(afterInsert)this.inbox.nextStep.push(message);throw new Error('Native wake rejected')}
+  const result=await rt.wakeQueuedInput(item.sessionId)
+  assert.equal(result.kind,'failed');assert.deepEqual(root.inbox.nextStep,[pending]);assert.equal(root.inbox.nextStep.filter(message=>message.id===pending.id).length,1)
+  assert.equal(h.calls.filter(call=>call[0]==='prompt').length,1)
+ }
 })
 
 test('capacity can ignore only a waiting captain turn when its original team has no runnable work',async t=>{

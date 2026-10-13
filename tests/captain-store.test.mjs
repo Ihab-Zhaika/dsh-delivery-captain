@@ -10,7 +10,7 @@ test('atomic run persistence, cross-instance exclusive repository lease, and saf
   try {
     await a.acquire('repo')
     await assert.rejects(b.acquire('repo'), /owned/)
-    const run = { version: 1, id: 'run1', captainSessionId: 'session', status: 'running', config: {}, tasks: [], tickets: [], questions: [] }
+    const run = { version: 1, id: 'run1', captainSessionId: 'session', status: 'running', config: {}, tasks: [{id:'task',pendingInputWake:{fingerprint:'a'.repeat(64),at:'2026-10-14T00:00:00.000Z'}}], tickets: [], questions: [] }
     await a.save(run)
     assert.deepEqual(await b.loadAll(), [run])
     await b.release('repo')
