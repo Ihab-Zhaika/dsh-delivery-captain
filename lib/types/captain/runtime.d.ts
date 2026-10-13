@@ -13,6 +13,7 @@ interface DeliveryOwner {
     task: Task;
     agent: Agent;
     stamp: string;
+    fences: Record<string, string>;
 }
 /** Resolve only an exact registered root or its direct original continuable member. Never adopt by cwd/ancestor. */
 export declare function deliveryOwner(ctx: Context, runs: readonly Run[], agent: Agent, stateDir?: string): Promise<DeliveryOwner | undefined>;

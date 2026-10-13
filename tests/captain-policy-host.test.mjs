@@ -80,6 +80,19 @@ test('clearing delivered decision display metadata does not revoke ongoing autho
   await f.drive();assert.equal(f.errors.length,0,JSON.stringify(f.errors));assert.equal(f.child.session.snapshotEvents().filter(e=>e.type==='assistant/message').length,1)
 })
 
+for(const [fence,mutate,sentinel] of [
+  ['task.attempt',f=>{f.task.attempt='private-attempt-sentinel'},'private-attempt-sentinel'],
+  ['run.coordinatorRevision',f=>{f.run.coordinatorRevision=731},'731'],
+  ['task.deliveryPolicy',f=>{f.task.assignmentConfig={...f.task.assignmentConfig,reviewBackend:'ocr'}},'ocr'],
+])test(`a revoked admission names only the changed ${fence} fence, never its value`,async t=>{
+  const f=await fixture(t)
+  f.setPrepareHook(async()=>mutate(f))
+  await f.drive()
+  const error=f.errors.find(value=>/Stale owned delivery policy admission/.test(value))
+  assert.match(error,new RegExp(`execution fences changed \\(${fence.replaceAll('.','\\.')}\\)`))
+  assert.doesNotMatch(error,new RegExp(sentinel))
+})
+
 for (const boundary of ['prepare','stream']) test(`informational root progress at ${boundary} does not revoke unchanged member authority`,async t=>{
   const f=await fixture(t)
   const report=async()=>{f.task.transitionVersion=(f.task.transitionVersion??0)+1;f.task.phase='waiting';f.task.phases.push({phase:'waiting',at:new Date().toISOString(),note:'Original members are still working'})}

@@ -109,7 +109,7 @@ export function workerResumePrompt(task: Task, config = task.assignmentConfig): 
   return `## DarKingDoom recovery checkpoint\n\n\`\`\`json\n${JSON.stringify({type:'darkingdoom.resume',taskId:task.id,ticketId:task.ticket.id,phase:task.phase,teamMemberLimit:task.assignmentConfig?.maxTeamMembers,worktree:task.worktree,branch:task.branch,reason:(task.waitingDecision??task.error)?.slice(0,1200)??'Check the current original team and collect outstanding reports'},null,2)}\n\`\`\`\n\nThe assignment and acceptance are already in this session; they are not being replayed. Preserve existing captain decisions and execution holds. Use original agent_teams_status, retain the active team, and collect real member/job reports. A missing team needs a concrete captain recovery decision; never recreate teams in a timer loop. Continue safe independent work, or report waiting/blocked and yield. Ask once only when evidence changed. This controller checkpoint is not a new human instruction or permission to bypass a hold.`
 }
 
-interface DeliveryOwner { run: Run; task: Task; agent: Agent; stamp: string }
+interface DeliveryOwner { run: Run; task: Task; agent: Agent; stamp: string; fences: Record<string,string> }
 function ownedTasks(run: Run): Task[] {
   const tasks: Task[] = [], ids = new Map<string, string>(), sessions = new Map<string, string>()
   for(const task of [...run.tasks,...run.recoveryCampaign?[run.recoveryCampaign.task]:[]]) {
@@ -119,7 +119,7 @@ function ownedTasks(run: Run): Task[] {
   }
   return tasks
 }
-function identityStamp(run: Run, task: Task, agent: Agent, member: unknown = null): string {
+function identityPayload(run: Run, task: Task, agent: Agent, member: unknown = null) {
   // transitionVersion orders controller callbacks, including informational
   // phase reports. Execution authority is the actual status/hold/attempt/policy
   // tuple below; a progress receipt must not cancel unchanged member work.
@@ -127,7 +127,25 @@ function identityStamp(run: Run, task: Task, agent: Agent, member: unknown = nul
   // assembly may still be awaited. Both authorize this same execution window;
   // holds and terminal states remain distinct, as does a new window anchor.
   const executionStatus=task.status==='starting'||task.status==='running'?'active':task.status
-  return createHash('sha256').update(JSON.stringify({run:run.id,captain:run.captainSessionId,status:run.status,revision:run.coordinatorRevision,taskId:task.id,attempt:task.attempt,root:task.sessionId,worktree:task.worktree,statusTask:executionStatus,window:task.budgetStartedAt??task.startedAt,hold:task.holdRevision,dependency:task.dependencyBlocked,policy:taskDeliveryConfig(task,run.config),agentId:agent.id,options:agent.options,header:agent.session.header,member})).digest('hex')
+  return {run:run.id,captain:run.captainSessionId,status:run.status,revision:run.coordinatorRevision,taskId:task.id,attempt:task.attempt,root:task.sessionId,worktree:task.worktree,statusTask:executionStatus,window:task.budgetStartedAt??task.startedAt,hold:task.holdRevision,dependency:task.dependencyBlocked,policy:taskDeliveryConfig(task,run.config),agentId:agent.id,options:agent.options,header:agent.session.header,member}
+}
+function identityFences(payload: ReturnType<typeof identityPayload>): Record<string,string> {
+  const names:Record<keyof typeof payload,string>={run:'run.id',captain:'run.captainSessionId',status:'run.status',revision:'run.coordinatorRevision',taskId:'task.id',attempt:'task.attempt',root:'task.sessionId',worktree:'task.worktree',statusTask:'task.status',window:'task.executionWindow',hold:'task.holdRevision',dependency:'task.dependencyBlocked',policy:'task.deliveryPolicy',agentId:'agent.id',options:'agent.options',header:'agent.session.header',member:'agent.originalAuthority'}
+  return Object.fromEntries(Object.entries(payload).map(([field,value])=>[names[field as keyof typeof payload],createHash('sha256').update(JSON.stringify(value)??'undefined').digest('hex')]))
+}
+function changedFenceNames(before: Record<string,string>,after: Record<string,string>): string[] {
+  return [...new Set([...Object.keys(before),...Object.keys(after)])].filter(field=>before[field]!==after[field]).sort()
+}
+function identityStamp(payload: ReturnType<typeof identityPayload>): string {
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex')
+}
+function changedAuthorityNames(before: ReturnType<typeof memberAuthority>,after: ReturnType<typeof memberAuthority>): string[] {
+  const changed:string[]=[]
+  for(const section of ['team','member','attempt'] as const) {
+    const prior=before[section] as Record<string,unknown>,current=after[section] as Record<string,unknown>
+    for(const field of new Set([...Object.keys(prior),...Object.keys(current)]))if(JSON.stringify(prior[field])!==JSON.stringify(current[field]))changed.push(`${section}.${field}`)
+  }
+  return changed.sort()
 }
 /** Only current authority belongs to a generation identity, not unrelated team progress or result timestamps. */
 function memberAuthority(team: TeamState, agentId: string, label: string) {
@@ -159,8 +177,8 @@ export async function deliveryOwner(ctx: Context, runs: readonly Run[], agent: A
   if(!run.id||!task.attempt||!task.id||!task.worktree||!run.captainSessionId)throw new Error('Delivery assignment identity is incomplete')
   if(!root||root.session.id!==task.sessionId||root.session.header.cwd!==task.worktree)throw new Error('Delivery root ownership unavailable')
   validateConfig(taskDeliveryConfig(task,run.config))
-  const initial=identityStamp(run,task,agent)
-  if(agent===root)return{run,task,agent,stamp:initial}
+  const initialPayload=identityPayload(run,task,agent),initial=identityStamp(initialPayload),initialFences=identityFences(initialPayload)
+  if(agent===root)return{run,task,agent,stamp:initial,fences:initialFences}
   if(!ctx.agents.isOwnedBy(agent.id,root)||agent.session.header.cwd!==task.worktree)throw new Error('Delivery member is not owned by its declared root')
   const descriptor=foldSubagentDescriptor(agent.session.ownEvents())
   if(descriptor?.mode!=='continuable'||!descriptor.label.startsWith('agent-teams:'))throw new Error('Delivery member descriptor is unavailable')
@@ -179,8 +197,13 @@ export async function deliveryOwner(ctx: Context, runs: readonly Run[], agent: A
   const record={...authority,descriptor}
   // Original's writer lock is not ours: repeat only authority consistency after the actual read.
   const current=await readTeam(join(task.worktree,stateDir),receipt.id)
-  if(!current||JSON.stringify(memberAuthority(current,agent.id,descriptor.label))!==JSON.stringify(authority)||ctx.agents.get(agent.id)!==agent||ctx.agents.get(root.id)!==root||initial!==identityStamp(run,task,agent))throw new Error('Stale delivery ownership during lookup')
-  return{run,task,agent,stamp:identityStamp(run,task,agent,record)}
+  if(!current)throw new Error('Stale delivery ownership during lookup: original team disappeared')
+  const currentAuthority=memberAuthority(current,agent.id,descriptor.label),authorityChanges=changedAuthorityNames(authority,currentAuthority)
+  if(authorityChanges.length)throw new Error(`Stale delivery ownership during lookup: original authority changed (${authorityChanges.join(', ')})`)
+  if(ctx.agents.get(agent.id)!==agent||ctx.agents.get(root.id)!==root)throw new Error('Stale delivery ownership during lookup: runtime agent registration changed')
+  const currentPayload=identityPayload(run,task,agent),currentStamp=identityStamp(currentPayload),currentFences=identityFences(currentPayload)
+  if(initial!==currentStamp)throw new Error(`Stale delivery ownership during lookup: execution fences changed (${changedFenceNames(initialFences,currentFences).join(', ')||'unclassified'})`)
+  return{run,task,agent,stamp:identityStamp(identityPayload(run,task,agent,record)),fences:identityFences(identityPayload(run,task,agent,record))}
 }
 /** Host-owned dynamic instruction integration. No prompts, model selection, state edits or worker wakes. */
 export function installDeliveryPolicy(ctx: Context, runs: () => readonly Run[]): void {
@@ -190,7 +213,8 @@ export function installDeliveryPolicy(ctx: Context, runs: () => readonly Run[]):
   const check=async(agent:Agent)=>{
     const admission=admissions.get(agent),current=await deliveryOwner(ctx,runs(),agent)
     if(!current){if(admission)throw new Error('Delivery policy owner disappeared');return undefined}
-    if(!active||!admission||current.stamp!==admission.owner.stamp||['paused','stopped'].includes(current.run.status)||['blocked','parked','cancelled','failed','merged','ready'].includes(current.task.status)||current.task.dependencyBlocked)throw new Error('Stale owned delivery policy admission or execution hold')
+    if(!active||!admission)throw new Error('Stale owned delivery policy admission or execution hold: admission is unavailable')
+    if(current.stamp!==admission.owner.stamp||['paused','stopped'].includes(current.run.status)||['blocked','parked','cancelled','failed','merged','ready'].includes(current.task.status)||current.task.dependencyBlocked)throw new Error(`Stale owned delivery policy admission or execution hold: execution fences changed (${changedFenceNames(admission.owner.fences,current.fences).join(', ')||'unclassified'})`)
     return admission
   }
   ctx.systemPrompt.section({name:'darkingdoom:owned-policy',order:119,text:'',interpolate:false})
