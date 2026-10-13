@@ -17,6 +17,7 @@ export declare class CaptainController {
     private readonly ownedProviders;
     private readonly idleRecoveries;
     private readonly resumeDispatches;
+    private readonly resumeProviders;
     private readonly resumingTasks;
     private readonly dependencyQuiescences;
     private disposed;

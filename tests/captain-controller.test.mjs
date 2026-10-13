@@ -980,3 +980,50 @@ test('uncreated setup failures do not reserve slots as unknown job owners',()=>f
  f.runtime.isRunning=async(id)=>{if(id===first.sessionId)throw new Error('Session does not exist');return true}
  await f.controller.recoverOwned();assert.notEqual(first.executionActive,true);assert.equal(run.tasks.length,2)
 }))
+
+test('diagnosed blocked recovery queues before new intake without human budget reset',()=>fixture(async f=>{
+ f.setTickets([ticket('1'),ticket('2'),ticket('3')]);const run=await f.controller.start('captain',{...f.config,maxTickets:3});await f.controller.tick();const [retry,other]=run.tasks
+ await f.controller.report(retry.sessionId,{phase:'blocked',blocked:true,note:'Concrete repair pending'});retry.executionActive=false;run.config.parallelism=1
+ let otherActive=true,diagnoses=0;f.runtime.isRunning=async id=>id===other.sessionId&&otherActive;f.runtime.assertCaptainDiagnostics=async()=>{diagnoses++}
+ const budget=retry.budgetStartedAt,evidence='Completed original diagnosis: repair the owned invalidation regression'
+ await f.controller.resumeTask('captain',retry.id,evidence);assert.equal(retry.resumeRequested,true);assert.equal(f.starts.length,2);assert.equal(retry.budgetStartedAt,budget);assert.equal(retry.pendingHumanRetry,undefined);assert.equal(diagnoses,1)
+ const phases=retry.phases.length;await f.controller.resumeTask('captain',retry.id,evidence);assert.equal(retry.phases.length,phases);assert.equal(diagnoses,1)
+ await f.controller.report(other.sessionId,{phase:'blocked',blocked:true,note:'External hold'});otherActive=false;await f.controller.tick()
+ assert.equal(retry.status,'running');assert.equal(retry.resumeRequested,undefined);assert.equal(f.starts.length,3);assert.equal(run.tasks.length,2)
+}))
+
+test('autonomous blocked recovery requires completed diagnostics and known idle ownership',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ await f.controller.report(task.sessionId,{phase:'blocked',blocked:true});f.runtime.isRunning=async()=>false
+ f.runtime.assertCaptainDiagnostics=async()=>{throw new Error('Original diagnostic reports incomplete')}
+ await assert.rejects(f.controller.resumeTask('captain',task.id,'Concrete new repair'),/diagnostic reports incomplete/);assert.equal(task.resumeRequested,undefined)
+ f.runtime.assertCaptainDiagnostics=async()=>{};f.runtime.isRunning=async()=>{throw new Error('Job activity unreadable')}
+ await assert.rejects(f.controller.resumeTask('captain',task.id,'Concrete new repair'),/Job activity unreadable/);assert.equal(task.resumeRequested,undefined)
+ f.runtime.isRunning=async()=>true;await assert.rejects(f.controller.resumeTask('captain',task.id,'Concrete new repair'),/already executing/);assert.equal(f.starts.length,1)
+}))
+
+test('queued recovery checks newly declared dependencies even when cached scope was ready',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ await f.controller.report(task.sessionId,{phase:'blocked',blocked:true});f.runtime.isRunning=async()=>false
+ let checks=0;f.provider.verifyDependencies=async()=>{checks++;return 'New remote predecessor is not delivered'}
+ await f.controller.resumeTask('captain',task.id,'Completed diagnosis: owned repair');assert.equal(checks,1);assert.equal(task.dependencyBlocked,true);assert.equal(f.starts.length,1)
+}))
+
+test('a slot freed by integration serves queued recovery before new root admission',()=>fixture(async f=>{
+ f.setTickets([ticket('1'),ticket('2'),ticket('3')]);const run=await f.controller.start('captain',{...f.config,maxTickets:3});await f.controller.tick();const [retry,ready]=run.tasks
+ await f.controller.report(retry.sessionId,{phase:'blocked',blocked:true});retry.executionActive=false;f.runtime.isRunning=async id=>id===ready.sessionId;run.config.parallelism=1
+ await f.controller.resumeTask('captain',retry.id,'Completed diagnosis: owned repair');await f.controller.report(ready.sessionId,{phase:'review',ready:true});await f.controller.tick()
+ assert.equal(ready.status,'merged');assert.equal(retry.status,'running');assert.equal(run.tasks.length,2);assert.deepEqual(f.starts,[retry.id,ready.id,retry.id])
+}))
+
+test('Stop cancels a queued recovery dependency proof before waiting for dispatch',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ await f.controller.report(task.sessionId,{phase:'blocked',blocked:true});f.runtime.isRunning=async()=>false
+ let entered,release,cancelled=0;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+ f.provider.verifyDependencies=async()=>{entered();await gate;throw new Error('Provider cancelled')};f.provider.cancel=()=>{cancelled++;release()}
+ const retry=f.controller.resumeTask('captain',task.id,'Completed diagnosis: owned repair')
+ // A gate is only reached once the fresh-proof requirement is implemented.
+ await Promise.race([started,retry.then(()=>{throw new Error('Fresh proof was skipped')})])
+ const stop=f.controller.control('captain','stop');try{await new Promise(r=>setImmediate(r));assert.equal(cancelled,1)}finally{release();await retry;await stop}
+ assert.equal(f.starts.length,1)
+}))

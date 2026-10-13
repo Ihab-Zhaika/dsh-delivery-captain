@@ -26,6 +26,7 @@ export class CaptainController {
   private readonly ownedProviders = new Map<string,TicketProvider>()
   private readonly idleRecoveries = new Map<string,Promise<void>>()
   private readonly resumeDispatches = new Map<string, Promise<void>>()
+  private readonly resumeProviders = new Map<string, Set<TicketProvider>>()
   private readonly resumingTasks = new Set<string>()
   private readonly dependencyQuiescences = new Map<string, Promise<void>>()
   private disposed = false
@@ -165,6 +166,7 @@ export class CaptainController {
       await this.endLoop(run)
       this.activeProviders.get(run.id)?.cancel?.()
       this.ownedProviders.get(run.id)?.cancel?.()
+      for(const provider of this.resumeProviders.get(run.id)??[])provider.cancel?.()
       // Commit revocation before awaiting cancellation: late worker reports cannot mutate delivery.
       await this.save(run)
       await this.drainWorkers(run, false)
@@ -369,11 +371,12 @@ export class CaptainController {
 
   async resumeTask(sessionId: string, taskId: string, evidence: string, human = false, teamMemberLimit?:number): Promise<Task> {
     const run=this.captain(sessionId),task=run.tasks.find(t=>t.id===taskId)
-    if(isStopped(run)||run.status!=='running'||!task||!(task.status==='parked'||human&&(task.status==='blocked'||task.status==='running'&&task.phase==='waiting')))throw new Error('Resume requires a running coordinator and parked task, or an explicit human retry of an idle blocked/waiting worker')
+    if(isStopped(run)||run.status!=='running'||!task||!(task.status==='parked'||task.status==='blocked'||human&&task.status==='running'&&task.phase==='waiting'))throw new Error('Resume requires a running coordinator and an idle blocked/parked task, or an explicit human retry of a waiting worker')
     if(!evidence.trim()||evidence.length>30000)throw new Error('Describe the changed prerequisite or explicit human resumption')
     const originalConfig=taskDeliveryConfig(task,run.config)
     if(teamMemberLimit!==undefined&&(!human||!Number.isInteger(teamMemberLimit)||teamMemberLimit<originalConfig.maxTeamMembers||teamMemberLimit>run.config.maxTeamMembers))throw new Error('A team resource override requires human resumption and a raised member limit within the configured run cap')
     if(task.parkingError||task.status==='parked'&&task.executionActive)throw new Error('Parking has not safely quiesced the worker')
+    if(!human&&task.resumeRequested&&task.waitingDecision===evidence.trim())return task
     const version=task.transitionVersion
     const previousStatus=task.status
     if(task.status!=='parked'&&await this.runtime.isRunning(task.sessionId))throw new Error('Worker is already executing; retry was not duplicated')
@@ -421,10 +424,6 @@ export class CaptainController {
       // An uncertain reviewed PR must be reconciled before any writer is woken.
       // Incomplete initial setup still follows claim/fetch admission below.
       if(task.status!=='blocked'||!task.resumeRequested||!task.baseSha||task.parkingError||task.prUrl&&task.headSha&&task.reviewHistory?.some(r=>r.passed&&r.headSha===task.headSha))continue
-      const current=run.tickets.find(t=>t.id===task.ticket.id)??task.ticket
-      if(task.dependencyBlocked||dependencyBlocker(current,run.tickets,run.tasks)) {
-        if(await this.dependenciesBlocked(run,task,this.providerFactory(taskDeliveryConfig(task,run.config))))continue
-      }
       const version=task.transitionVersion
       const executing=await this.runtime.isRunning(task.sessionId)
       if(this.disposed||run.status!=='running')return
@@ -436,6 +435,12 @@ export class CaptainController {
         delete task.resumeRequested;task.status='failed';task.error='Task time budget exhausted';task.finishedAt=now();this.phase(task,'blocked',task.error);await this.save(run);return true
       }
       if(await expire())continue
+      const provider=this.providerFactory(taskDeliveryConfig(task,run.config))
+      const providers=this.resumeProviders.get(run.id)??new Set<TicketProvider>()
+      providers.add(provider);this.resumeProviders.set(run.id,providers)
+      let held:boolean
+      try{held=await this.dependenciesBlocked(run,task,provider)}finally{providers.delete(provider);if(!providers.size)this.resumeProviders.delete(run.id)}
+      if(held)continue
       if(this.disposed||run.status!=='running'||task.status!=='blocked'||task.transitionVersion!==version||this.activeCount(run)>=run.config.parallelism)continue
       task.status='starting';delete task.resumeRequested
       const revision=task.transitionVersion=(task.transitionVersion??0)+1
@@ -655,6 +660,8 @@ export class CaptainController {
     }
     if (run.status !== 'running' || this.disposed) { await this.save(run); return }
     while(true) {
+      // Integration or the preceding admission can free capacity or queue owned work.
+      await this.dispatchResumes(run)
       if (run.status !== 'running' || this.disposed || this.activeCount(run) >= run.config.parallelism || run.config.maxTickets > 0 && run.tasks.length >= run.config.maxTickets) break
       // Scope/order and task states can change while the previous launch awaits.
       const rows=eligibility(run.tickets,run.config.milestones,run.tasks,run.config)
@@ -775,6 +782,7 @@ export class CaptainController {
     for(const run of this.runs.values())try{await this.runtime.coordinatorLoop?.(run,'shutdown')}catch(error){run.coordinatorLoopError=String(error)}
     for (const provider of this.activeProviders.values()) provider.cancel?.()
     for (const provider of this.ownedProviders.values()) provider.cancel?.()
+    for(const providers of this.resumeProviders.values())for(const provider of providers)provider.cancel?.()
     for (const run of this.runs.values()) await this.drainWorkers(run, false,'shutdown')
     await this.ticking
     await Promise.all([...this.resumeDispatches.values()])
