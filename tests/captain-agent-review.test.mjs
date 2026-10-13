@@ -35,7 +35,8 @@ async function fixture(t, options = {}) {
   const ctx = { on, tools: { get: name => name === 'read' ? { name, parameters: { file_path: { type: 'string' }, offset: { type: 'integer' }, limit: { type: 'integer' } } } : undefined }, sessionController: { inspect: async () => inspection }, subagents: { getProvider: () => provider, start: async (name, request) => {
     calls.push({ name, request })
     if (options.startError) throw new Error('native capacity unavailable')
-    await emit('agent/created', { agent: child, source: 'create', signal: request.signal })
+    child.options = { ...request.agentOptions }
+    await emit('agent/created', { agent: child, source: 'create', signal: new AbortController().signal })
     const result = options.result ? options.result(request, { emit, child, events, structured, guards }) : Promise.resolve({ stopReason: options.stopReason ?? 'completed', structured, output: [] })
     return { id: 'review-child', localAgent: child, result, async dispose() { if (options.disposeWait) await options.disposeWait; disposed.push('run'); if (options.disposeError) throw new Error('native quiescence failed') } }
   } } }
