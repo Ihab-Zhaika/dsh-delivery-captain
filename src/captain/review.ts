@@ -56,6 +56,15 @@ export function parseOcrReport(text: string, head: string, base: string, changed
 }
 
 export type IndependentReviewRunner=(input:AgentReviewInput,signal:AbortSignal)=>Promise<{report:string;findings:string[];reviewerSessionId:string}>
+/** Preserve every source character while keeping native read's 2,000-char lines inspectable. */
+export function formatReviewSnapshot(content:string):string{
+  if(!content.split('\n').some(line=>line.length>1500))return content
+  const records:string[]=[]
+  // JSON escaping is at most six characters per UTF-16 unit. Even control-only
+  // input and split surrogate pairs fit comfortably inside the native line cap.
+  for(let offset=0;offset<content.length;offset+=200)records.push(JSON.stringify({offset,text:content.slice(offset,offset+200)}))
+  return `Immutable independent review snapshot\n${JSON.stringify({encoding:'darkingdoom.review-snapshot-json/v1',rawSha256:createHash('sha256').update(content).digest('hex'),rawUtf8Bytes:Buffer.byteLength(content,'utf8')})}\nRead EVERY record in order. Concatenate JSON-decoded text by its UTF-16 offset to recover the exact original snapshot, including Git hunk/source line numbers. No characters or paths are omitted. Use native read offset/limit to paginate; record lines are not source finding line numbers.\n${records.join('\n')}\n`
+}
 export async function reviewTask(task: Task, config: RunConfig, run: CommandRunner, onPhase?: (phase: Phase) => Promise<void>, signal?: AbortSignal,agentReview?:IndependentReviewRunner): Promise<ReviewResult> {
   let headSha = ''; let baseSha: string | undefined; let report = ''; const findings: string[] = []
   const directory = await mkdtemp(join(tmpdir(), 'darkingdoom-review-'))
@@ -95,7 +104,7 @@ export async function reviewTask(task: Task, config: RunConfig, run: CommandRunn
       const treeSha=(await bounded('git',['rev-parse',`${headSha}^{tree}`],{cwd:task.worktree})).trim(),snapshots:AgentReviewInput['paths']=[]
       for(const [index,path] of paths.entries()){
         const diff=await bounded('git',['--literal-pathspecs','diff','--no-ext-diff','--no-textconv','--no-renames','--binary','--unified=80',target,headSha,'--',path],{cwd:task.worktree})
-        const content=`Immutable independent review snapshot\n${JSON.stringify({path,baseSha:target,headSha,treeSha,worktree:task.worktree})}\n\nInspect every changed hunk and its surrounding context, and read relevant current source in the given worktree if needed. Binary/opaque changes require actual review evidence, never a waived path.\n\n${diff}`
+        const content=formatReviewSnapshot(`Immutable independent review snapshot\n${JSON.stringify({path,baseSha:target,headSha,treeSha,worktree:task.worktree})}\n\nInspect every changed hunk and its surrounding context, and read relevant current source in the given worktree if needed. Binary/opaque changes require actual review evidence, never a waived path.\n\n${diff}`)
         const snapshotPath=join(directory,`path-${index}.txt`);await writeFile(snapshotPath,content,'utf8');snapshots.push({path,snapshotPath,fingerprint:createHash('sha256').update(content).digest('hex')})
       }
       const result=await agentReview({baseSha:target,headSha,treeSha,worktree:task.worktree,businessContext:`${task.ticket.title}\n${task.ticket.body}`,maxTokensBudget:tokensBudget,timeoutMs:Math.ceil(remaining()),paths:snapshots},signal??new AbortController().signal)
