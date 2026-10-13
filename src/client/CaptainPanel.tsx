@@ -6,7 +6,7 @@ import css from './CaptainPanel.module.css'
 export interface CaptainOpenDetail { sessionId: string; workspace?: string }
 interface Eligibility { ticketId: string; eligible: boolean; reason: string; state?: string; predecessors?: string[]; scope?: 'milestone'|'unmilestoned'|'predecessor'; requiredFor?: string[] }
 interface Snapshot { run: Run | null; eligibility?: Eligibility[]; role?: 'idle'|'coordinator'|'worker'; coordinatorSessionId?: string | null; coordinatorLoop?:CoordinatorLoopState|null }
-type Action = 'pause' | 'resume' | 'drain' | 'stop' | 'parallelism' | 'loop' | 'save' | 'policy'
+type Action = 'pause' | 'resume' | 'drain' | 'stop' | 'parallelism' | 'loop' | 'save' | 'policy' | 'finish-existing' | 'allow-new-tickets'
 type IntakePolicy = { includeUnmilestoned: boolean; includeRequiredPredecessors: boolean; ocrMaxTokensBudget: number }
 const MAX_OCR_TOKENS_BUDGET = 10_000_000
 
@@ -355,12 +355,14 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
             <button disabled={!allowed.pause} onClick={() => void mutate('pause')}>Pause</button>
             <button disabled={!allowed.resume||dirty} onClick={() => void mutate('resume')} title={dirty?'Save configuration before resuming':undefined}>Resume</button>
             <button disabled={!allowed.drain} onClick={() => void mutate('drain')} title="Finish active work without taking more tickets">Drain</button>
+            <button disabled={!loaded||busy||!run} onClick={() => void mutate(run?.intakeMode==='existing-only'?'allow-new-tickets':'finish-existing')} title="Keep leadership and existing-task recovery running without admitting more tickets">{run?.intakeMode==='existing-only'?'Allow new tickets':'Finish existing tasks'}</button>
             <button className={css.danger} disabled={!allowed.stop} onClick={() => void mutate('stop')}>Stop</button>
             <label>Parallelism<input aria-label="Live parallelism" type="number" min={1} max={32} value={parallelism} disabled={!allowed.parallelism} onChange={event => setParallelism(Number(event.target.value))} /></label>
             <button disabled={!allowed.parallelism || !Number.isInteger(parallelism) || parallelism < 1 || parallelism > 32} onClick={() => void mutate('parallelism')}>Apply</button>
           </div>
           {dirty&&run?.status==='stopped'&&<p className={css.controlHint}>Save your configuration changes before resuming.</p>}
-          <p className={css.controlHint}>Pause holds new dispatch. Drain finishes active tickets. Stop cancels active work. Unresolved blockers park after one hour, preserving work and freeing capacity.</p>
+          <p className={css.controlHint}>Pause holds dispatch. Drain finishes active tickets. Finish existing tasks also keeps blocked/parked recovery available without new intake. Stop cancels active work. Unresolved blockers park after one hour, preserving work and freeing capacity.</p>
+          {run?.intakeMode==='existing-only'&&<p className={css.authorization}>Existing tasks only: {run.tasks.length} admitted tickets. New admissions and follow-up issues are disabled until you explicitly allow new tickets.</p>}
           {run && <section className={css.card} aria-label="Live intake policy"><div className={css.sectionTitle}><h2>Live intake & review policy</h2><span>{policyEditable?'Running or paused coordinator controls':'Policy changes require a running or paused run'}</span></div>
             <div className={css.fields}>
               <label className={css.check}><input aria-label="Live include tickets without a milestone" type="checkbox" disabled={!policyEditable} checked={policy.includeUnmilestoned} onChange={event=>setPolicyValue('includeUnmilestoned',event.target.checked)} />Include tickets without a milestone</label>

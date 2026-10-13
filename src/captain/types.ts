@@ -49,6 +49,7 @@ export interface Task {
 export interface Run {
   version: 1; id: string; captainSessionId: string; config: RunConfig;
   status: 'running' | 'paused' | 'draining' | 'stopped';
+  intakeMode?: 'existing-only' | 'new-tickets';
   createdAt: string; updatedAt: string; tasks: Task[]; tickets: Ticket[];
   questions: Question[]; error?: string; lastPollAt?: string;
   recoveryPending?: boolean;
@@ -70,7 +71,7 @@ export interface TicketProvider {
   inspectPullRequest(task: Task): Promise<PullRequest>;
   merge(task: Task, expectedHead: string): Promise<PullRequest>;
   close(task: Task): Promise<void>;
-  createFollowup(task: Task, input: FollowupInput): Promise<string>;
+  createFollowup(task: Task, input: FollowupInput, permitted?: () => boolean): Promise<string>;
 }
 export interface ReviewResult { passed: boolean; headSha: string; baseSha?: string; report: string; findings: string[]; failureKind?: 'team-evidence' | 'infrastructure' | 'findings' }
 export interface WorkerRuntime {

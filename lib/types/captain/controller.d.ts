@@ -46,6 +46,7 @@ export declare class CaptainController {
             captainSessionId: string;
             config: RunConfig;
             status: "running" | "paused" | "draining" | "stopped";
+            intakeMode?: "existing-only" | "new-tickets";
             createdAt: string;
             updatedAt: string;
             error?: string;
@@ -83,6 +84,7 @@ export declare class CaptainController {
             captainSessionId: string;
             config: RunConfig;
             status: "running" | "paused" | "draining" | "stopped";
+            intakeMode?: "existing-only" | "new-tickets";
             createdAt: string;
             updatedAt: string;
             error?: string;

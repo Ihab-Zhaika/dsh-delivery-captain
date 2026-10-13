@@ -1063,3 +1063,32 @@ test('recording a diagnostic deferral must not hide persistence failure or admit
  const save=f.controller.store.save;f.controller.store.save=async()=>{throw new Error('Persistence unavailable')};f.setTickets([ticket('1'),ticket('2')])
  try{await assert.rejects(f.controller.tick(),/Persistence unavailable/);assert.equal(f.starts.length,1);assert.equal(q.deliveredAt,undefined)}finally{f.controller.store.save=save;f.controller.ticking=undefined /* The test already observed this rejected drain. */}
 }))
+
+test('existing-only mode keeps owned recovery running and prevents new tickets and follow-ups',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',f.config);await f.controller.tick();const task=run.tasks[0],savedConfig=structuredClone(run.config)
+ await f.controller.control('captain','drain');await f.controller.control('captain','finish-existing');assert.equal(run.status,'running');assert.equal(run.intakeMode,'existing-only')
+ const revision=run.coordinatorRevision,notices=f.messages.length
+ await f.controller.control('captain','finish-existing');assert.equal(run.coordinatorRevision,revision);assert.equal(f.messages.length,notices)
+ f.setTickets([ticket('1'),ticket('2')]);await f.controller.tick();assert.equal(run.tasks.length,1)
+ await f.controller.report(task.sessionId,{phase:'blocked',note:'Concrete repair'});f.runtime.isRunning=async()=>false;await f.controller.resumeTask('captain',task.id,'Completed diagnosis: owned repair');assert.equal(f.starts.length,2);assert.equal(run.tasks.length,1)
+ await assert.rejects(f.controller.followup(task.sessionId,{title:'New issue',body:'Large unrelated follow-up',milestone:'M1',predecessors:[]}),/existing.only/i)
+ await f.controller.control('captain','pause');await f.controller.control('captain','resume');assert.equal(run.intakeMode,'existing-only');assert.deepEqual(run.config,savedConfig)
+ const persisted=(await f.controller.store.loadAll()).find(r=>r.id===run.id);assert.equal(persisted.intakeMode,'existing-only')
+ await f.controller.control('captain','allow-new-tickets');await f.controller.tick();assert.equal(run.tasks.length,2)
+}))
+
+test('existing-only fence applies during discovery and preserves paused lifecycle and trial bounds',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,maxTickets:1});let entered,release;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+ f.provider.discover=async()=>{entered();await gate;return[ticket('1'),ticket('2')]};const tick=f.controller.tick();await started
+ try{await f.controller.control('captain','finish-existing')}finally{release();await tick}
+ assert.equal(run.tasks.length,0);await f.controller.control('captain','pause');await f.controller.control('captain','allow-new-tickets');assert.equal(run.status,'paused')
+ await f.controller.control('captain','resume');await f.controller.tick();assert.equal(run.tasks.length,1);assert.equal(run.config.maxTickets,1)
+ await f.controller.control('captain','finish-existing');await f.controller.control('captain','allow-new-tickets');await f.controller.tick();assert.equal(run.tasks.length,1)
+}))
+
+test('existing-only control is coordinator-owned and does not freeze other repository runs',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const first=await f.controller.start('captain',f.config);await f.controller.tick()
+ await assert.rejects(f.controller.control(first.tasks[0].sessionId,'finish-existing'),/captain/i)
+ await f.controller.control('captain','finish-existing');const second=await f.controller.start('other',{...f.config,repository:'owner/other'});f.setTickets([ticket('1'),ticket('2')]);await f.controller.tick()
+ assert.equal(first.tasks.length,1);assert.equal(second.tasks.length,2);assert.equal(second.intakeMode,undefined)
+}))

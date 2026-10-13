@@ -22,6 +22,29 @@ function fake(respond) {
   return { calls, run }
 }
 test('provider factory exists', () => assert.equal(typeof mod.createProvider, 'function'))
+
+test('GitHub closes follow-up creation admission after asynchronous milestone lookup',async()=>{
+  let permitted=true
+  const f=fake((_file,a)=>{
+    if(a[1]==='repos/owner/repo/issues?state=all&per_page=100')return [[]]
+    if(a[1]==='repos/owner/repo/milestones?state=all&per_page=100'){permitted=false;return [[{title:'M1',number:1}]]}
+    if(a[1]==='repos/owner/repo/issues')return issue(8)
+    if(a[1]?.includes('/dependencies/'))return [[issue(1)]]
+  })
+  await assert.rejects(()=>mod.createProvider(config,f.run).createFollowup({...task,ticket:{...task.ticket,id:'1'}},{title:'Next',body:'Details',milestone:'M1',predecessors:[]},()=>permitted),/admission.*closed/i)
+  assert.equal(f.calls.some(c=>c.args[1]==='repos/owner/repo/issues'&&c.args.includes('POST')),false)
+})
+
+test('Azure closes follow-up creation admission after asynchronous marker lookup',async()=>{
+  let permitted=true
+  const f=fake((_file,a)=>{
+    if(a[1]==='query'){permitted=false;return []}
+    if(a[2]==='create')return {id:8}
+    if(a[2]==='show')return {id:8,relations:[{rel:'System.LinkTypes.Dependency-Reverse',url:'https://dev.azure.com/org/_apis/wit/workItems/1'}]}
+  })
+  await assert.rejects(()=>mod.createProvider(azureConfig,f.run).createFollowup(azureTask,{title:'Next',body:'Details',milestone:'M1',predecessors:[]},()=>permitted),/admission.*closed/i)
+  assert.equal(f.calls.some(c=>c.args[2]==='create'),false)
+})
 test('GitHub reads all issue pages and external native predecessors; closed is not merged', async () => {
   const f = fake((file, a) => {
     const ep = a[1]

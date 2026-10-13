@@ -588,7 +588,13 @@ test('owned background jobs reserve idle workers and prevent startup replays',as
  let state='running';h.ctx.jobs={list:owner=>[{id:'pwsh-331',owner:'reviewer',status:state},{id:'unowned',status:'running'},{id:'foreign',owner:'other',status:'running'}]}
  for(const status of ['running','stopping']){state=status;assert.equal(await rt.isRunning(item.sessionId),true);assert.equal(await rt.start(item,{config}),false)}
  assert.equal(h.calls.filter(c=>c[0]==='prompt').length,0)
+ const held={...item,status:'blocked',phase:'review',waitingDecision:'Settle old review'}
+ const active=await rt.evidence({config,tasks:[held]})
+ assert.equal(active.workers[0].execution.active,true);assert.equal(active.workers[0].coordination.heldIdle,false)
  for(const status of ['completed','failed','killed']){state=status;assert.equal(await rt.isRunning(item.sessionId),false)}
+ const idle=await rt.evidence({config,tasks:[held]})
+ assert.equal(idle.workers[0].execution.active,false);assert.equal(idle.workers[0].coordination.heldIdle,true)
+ assert.equal(idle.workers[0].coordination.decision,'Settle old review')
 })
 
 test('unreadable job or descendant evidence cannot prove worker idleness',async()=>{
@@ -599,6 +605,9 @@ test('unreadable job or descendant evidence cannot prove worker idleness',async(
  await assert.rejects(rt.isRunning('session-1'),/descendant.*unavailable/i)
  h.ctx.subagents.listDescendants=async()=>[];h.ctx.jobs.list=()=>[{owner:'session-1',id:'pwsh-x',status:'unknown'}]
  await assert.rejects(rt.isRunning('session-1'),/job.*status/i)
+ const unknown=await rt.evidence({config,tasks:[task({worktree:'/worker',status:'blocked',phase:'review'})]})
+ assert.equal(unknown.workers[0].execution.active,null);assert.match(unknown.workers[0].execution.error,/job.*status/i)
+ assert.equal(unknown.workers[0].coordination.heldIdle,false)
 })
 
 test('native input arriving during job ownership lookup still reserves activity',async()=>{

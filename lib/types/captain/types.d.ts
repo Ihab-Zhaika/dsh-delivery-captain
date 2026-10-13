@@ -125,6 +125,7 @@ export interface Run {
     captainSessionId: string;
     config: RunConfig;
     status: 'running' | 'paused' | 'draining' | 'stopped';
+    intakeMode?: 'existing-only' | 'new-tickets';
     createdAt: string;
     updatedAt: string;
     tasks: Task[];
@@ -179,7 +180,7 @@ export interface TicketProvider {
     inspectPullRequest(task: Task): Promise<PullRequest>;
     merge(task: Task, expectedHead: string): Promise<PullRequest>;
     close(task: Task): Promise<void>;
-    createFollowup(task: Task, input: FollowupInput): Promise<string>;
+    createFollowup(task: Task, input: FollowupInput, permitted?: () => boolean): Promise<string>;
 }
 export interface ReviewResult {
     passed: boolean;

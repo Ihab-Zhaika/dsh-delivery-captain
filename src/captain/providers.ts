@@ -85,7 +85,7 @@ abstract class Provider<Seed> implements TicketProvider {
   abstract inspectPullRequest(task: Task): Promise<PullRequest>
   abstract merge(task: Task, expectedHead: string): Promise<PullRequest>
   abstract close(task: Task): Promise<void>
-  abstract createFollowup(task: Task, input: FollowupInput): Promise<string>
+  abstract createFollowup(task: Task, input: FollowupInput, permitted?: () => boolean): Promise<string>
   protected async confirmMerge(task: Task, expected: string): Promise<PullRequest> {
     const pr = await this.inspectPullRequest(task)
     if (!pr.merged || !pr.mergeSha || pr.headSha !== expected) throw new Error('Merge is not yet confirmed at the expected head; reconciliation required')
@@ -237,7 +237,7 @@ class GithubProvider extends Provider<Row> {
     await this.confirmMerge(task, required(task.headSha, 'reviewed head'))
     await this.api(this.endpoint(`issues/${numberId(task.ticket.id)}`), ['--method', 'PATCH', '-f', 'state=closed', '-f', 'state_reason=completed'])
   }
-  async createFollowup(task: Task, input: FollowupInput): Promise<string> {
+  async createFollowup(task: Task, input: FollowupInput, permitted?: () => boolean): Promise<string> {
     if (!input.milestone && this.config.includeUnmilestoned !== true) throw new Error('Unmilestoned follow-ups are not enabled')
     const tag = marker(task, input)
     const existing = (await this.pages(this.endpoint('issues?state=all&per_page=100'))).filter(x => !x.pull_request && x.body?.includes(`<!-- ${tag} -->`))
@@ -250,7 +250,11 @@ class GithubProvider extends Provider<Row> {
       milestoneArgs.push('-F', `milestone=${numberId(milestone.number)}`)
     }
     const dependencies = unique([task.ticket.id, ...input.predecessors])
-    const issue = existing[0] ?? object(await this.api(this.endpoint('issues'), ['--method', 'POST', '-f', `title=${input.title}`, '-f', `body=${input.body}\n\nDepends on ${dependencies.map(x => '#' + x).join(', ')}\n<!-- ${tag} -->`, ...milestoneArgs]))
+    let issue = existing[0]
+    if (!issue) {
+      if (permitted && !permitted()) throw new Error('Follow-up creation admission is closed')
+      issue = object(await this.api(this.endpoint('issues'), ['--method', 'POST', '-f', `title=${input.title}`, '-f', `body=${input.body}\n\nDepends on ${dependencies.map(x => '#' + x).join(', ')}\n<!-- ${tag} -->`, ...milestoneArgs]))
+    }
     const id = numberId(issue.number)
     const linked = await this.pages(this.endpoint(`issues/${id}/dependencies/blocked_by?per_page=100`))
     for (const dep of dependencies) {
@@ -455,13 +459,17 @@ class AzureProvider extends Provider<string> {
     if (!completed) throw new Error('No completed state is configured for this work item type')
     await this.az(['boards', 'work-item', 'update', '--id', numberId(task.ticket.id), '--state', required(completed.name, 'completed state')], false)
   }
-  async createFollowup(task: Task, input: FollowupInput): Promise<string> {
+  async createFollowup(task: Task, input: FollowupInput, permitted?: () => boolean): Promise<string> {
     if (!input.milestone && this.config.includeUnmilestoned !== true) throw new Error('Unmilestoned follow-ups are not enabled')
     const tag = marker(task, input)
     const quote = (s: string) => s.replace(/'/g, "''")
     const matches = array((await this.az(['boards', 'query', '--wiql', `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${quote(this.config.project!)}' AND [System.Tags] CONTAINS '${tag}'`])) ?? [])
     if (matches.length > 1) throw new Error('Duplicate follow-up markers found')
-    const item = matches[0] ?? object(await this.az(['boards', 'work-item', 'create', '--type', 'Task', '--title', input.title, '--description', input.body, '--iteration', input.milestone || this.config.project!, '--fields', `System.Tags=${tag}`]))
+    let item = matches[0]
+    if (!item) {
+      if (permitted && !permitted()) throw new Error('Follow-up creation admission is closed')
+      item = object(await this.az(['boards', 'work-item', 'create', '--type', 'Task', '--title', input.title, '--description', input.body, '--iteration', input.milestone || this.config.project!, '--fields', `System.Tags=${tag}`]))
+    }
     const id = numberId(item.id)
     const full = object(await this.az(['boards', 'work-item', 'show', '--id', id, '--expand', 'relations'], false))
     const existing = array(full.relations ?? []).filter(x => x.rel === 'System.LinkTypes.Dependency-Reverse').map(x => /\/(\d+)$/.exec(x.url)?.[1])

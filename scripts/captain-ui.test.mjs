@@ -43,6 +43,7 @@ async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPa
   let requests=0,renderer,firstResponse
   const policyRequests=[]
   const configurationRequests=[]
+  const controlRequests=[]
   const server=createServer((req,res)=>{
     if(req.url.startsWith('/api/darkingdoom/state')) {
       if(++requests===1&&failFirst){if(deferFirst){firstResponse=res;return};res.writeHead(404,{'content-type':'text/plain'});res.end('Not Found')}
@@ -60,6 +61,12 @@ async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPa
         if(policyPass){const {sessionId,...patch}=policy;Object.assign(config,patch)}
         res.writeHead(policyPass?200:409,{'content-type':'application/json'});res.end(JSON.stringify(policyPass?{run}:{error:'Policy rejected by lifecycle guard'}))
       })
+    }else if(req.url==='/api/darkingdoom/control'){
+      let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+        const value=JSON.parse(body);controlRequests.push(value)
+        if(controlPass&&['finish-existing','allow-new-tickets'].includes(value.action))run.intakeMode=value.action==='finish-existing'?'existing-only':'new-tickets'
+        res.writeHead(controlPass?200:409,{'content-type':'application/json'});res.end(JSON.stringify(controlPass?{run}:{error:'Control rejected by lifecycle guard'}))
+      })
     }else{res.writeHead(controlPass?200:409,{'content-type':'application/json'});res.end(JSON.stringify(controlPass?{run}:{error:'Control rejected by lifecycle guard'}))}
   })
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve))
@@ -69,7 +76,7 @@ async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPa
   try {
     await act(async()=>{renderer=TestRenderer.create(createElement(ui.CaptainPanel,{sessionId:coordinator?'coordinator':'worker',onClose(){},openSession:async()=>{},initialSnapshot:snapshot}))})
     await settle()
-    await fn({renderer,settle,text:()=>JSON.stringify(renderer.toJSON()),requests:()=>requests,policyRequests,configurationRequests,failFirst:()=>{assert.ok(firstResponse);firstResponse.writeHead(404,{'content-type':'text/plain'});firstResponse.end('Not Found')}})
+    await fn({renderer,settle,text:()=>JSON.stringify(renderer.toJSON()),requests:()=>requests,policyRequests,configurationRequests,controlRequests,failFirst:()=>{assert.ok(firstResponse);firstResponse.writeHead(404,{'content-type':'text/plain'});firstResponse.end('Not Found')}})
   }finally{
     if(renderer)await act(async()=>renderer.unmount())
     globalThis.fetch=originalFetch;server.closeAllConnections();await new Promise(resolve=>server.close(resolve))
@@ -337,3 +344,11 @@ test('review history exposes commit, findings, safe text excerpt and downloadabl
   const structured = JSON.parse(ui.reviewExport(task, { ...task.reviewHistory[0], report: '{"manifest":{"schema_version":"ocr.run-manifest/v1"}}' }))
   assert.equal(structured.report.manifest.schema_version, 'ocr.run-manifest/v1')
 })
+
+test('coordinator can close new intake while keeping existing recovery and explicitly reopen later',()=>withPollingPanel(async p=>{
+ await act(async()=>p.renderer.root.findAllByType('button').find(b=>b.children.includes('Monitor')).props.onClick())
+ await act(async()=>p.renderer.root.findAllByType('button').find(b=>b.children.includes('Finish existing tasks')).props.onClick());await p.settle()
+ assert.deepEqual(p.controlRequests,[{sessionId:'coordinator',action:'finish-existing'}]);assert.match(p.text(),/Existing tasks only/)
+ await act(async()=>p.renderer.root.findAllByType('button').find(b=>b.children.includes('Allow new tickets')).props.onClick());await p.settle()
+ assert.deepEqual(p.controlRequests[1],{sessionId:'coordinator',action:'allow-new-tickets'});assert.doesNotMatch(p.text(),/Existing tasks only:/)
+},true,{controlPass:true,failFirst:false}))

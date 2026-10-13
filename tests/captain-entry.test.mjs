@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, readFile } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, name } from '../lib/captain.js'
@@ -22,9 +22,18 @@ test('installed captain stays inert, rejects ordinary tool use and authenticates
     inject(_keys, callback) { const dispose = callback(ctx); if (typeof dispose === 'function') disposers.push(dispose) },
   }
   try {
+    await writeFile(join(dir,'native-control.json'),JSON.stringify({version:1,id:'native-control',captainSessionId:'coordinator',status:'stopped',config:{provider:'github',repository:'owner/repo',workspace:dir,milestones:['M1'],remote:'origin',targetBranch:'main',verifyCommands:['npm test']},tasks:[],tickets:[],questions:[],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()}))
     await apply(ctx, { stateDirectory: dir })
     assert.equal(name, 'darkingdoom')
     assert.equal(tools.has('darkingdoom_start'), false)
+    assert.equal(tools.has('darkingdoom_control'), true)
+    assert.deepEqual(tools.get('darkingdoom_control').parameters.properties.action.enum,['finish-existing'])
+    await assert.rejects(tools.get('darkingdoom_control').execute({action:'finish-existing'},{agent:{id:'ordinary'}}), /captain|enabled/)
+    const closed=JSON.parse(await tools.get('darkingdoom_control').execute({action:'finish-existing'},{agent:{id:'coordinator'}}))
+    assert.equal(closed.intakeMode,'existing-only');assert.equal(closed.status,'stopped');assert.equal(closed.admittedTickets,0)
+    await assert.rejects(tools.get('darkingdoom_control').execute({action:'allow-new-tickets'},{agent:{id:'coordinator'}}),/finish-existing|human command/)
+    const saved=JSON.parse(await readFile(join(dir,'native-control.json'),'utf8'))
+    assert.equal(saved.intakeMode,'existing-only');assert.equal(saved.status,'stopped')
     assert.equal(tools.has('agent_teams_create'), false)
     assert.equal(sections[0].text({agent:{id:'ordinary'}}), '')
     await assert.rejects(tools.get('darkingdoom_report').execute({phase:'review',ready:true},{agent:{id:'ordinary'}}), /assigned worker/)
