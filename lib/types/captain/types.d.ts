@@ -161,6 +161,12 @@ export interface Run {
         lastAttemptAt?: string;
         lastSentFingerprint?: string;
         error?: string;
+        admissionFailure?: {
+            fingerprint: string;
+            coordinatorRevision: number;
+            at: string;
+            reason: string;
+        };
         settlement?: {
             kind: 'resolved' | 'external';
             at: string;

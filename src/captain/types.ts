@@ -66,7 +66,7 @@ export interface Run {
   status: 'running' | 'paused' | 'draining' | 'stopped';
   intakeMode?: 'existing-only' | 'new-tickets';
   backlogHold?:{since:string;parked:number;threshold:number;reason:string};
-  recoveryCampaign?:{task:Task;fingerprint:string;affectedTaskIds:string[];affectedHoldRevisions?:Record<string,number>;generation?:number;lastAttemptAt?:string;lastSentFingerprint?:string;error?:string;settlement?:{kind:'resolved'|'external';at:string;note:string;fingerprint:string}};
+  recoveryCampaign?:{task:Task;fingerprint:string;affectedTaskIds:string[];affectedHoldRevisions?:Record<string,number>;generation?:number;lastAttemptAt?:string;lastSentFingerprint?:string;error?:string;admissionFailure?:{fingerprint:string;coordinatorRevision:number;at:string;reason:string};settlement?:{kind:'resolved'|'external';at:string;note:string;fingerprint:string}};
   recoveryReleases?:Array<{taskId:string;sourceHead?:string;targetSha?:string;note:string;key:string;holdRevision?:number;queuedAt?:string;revokedAt?:string;error?:string}>;
   schedulerFailures?:{count:number;at:string;message:string};
   maintenanceReviewHistory?:MaintenanceReviewRecord[];

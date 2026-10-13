@@ -668,22 +668,40 @@ export class CaptainController {
     if(task.status==='running')await this.recoverIdleTask(run,task,provider)
     if(this.disposed||run.status!=='running'||task.assignmentDelivered&&await this.runtime.isRunning(task.sessionId))return
     if(task.assignmentDelivered&&campaign.lastSentFingerprint===fingerprint)return
-    if(campaign.error&&Date.now()-Date.parse(campaign.lastAttemptAt??'')<60000)return
+    if(campaign.admissionFailure?.fingerprint===fingerprint&&campaign.admissionFailure.coordinatorRevision===(run.coordinatorRevision??0))return
+    if(campaign.error&&Date.now()-Date.parse(campaign.lastAttemptAt??'')<60000&&!campaign.admissionFailure)return
+    const attemptRevision=run.coordinatorRevision??0,attemptVersion=task.transitionVersion??0
+    let scopeVersion:number|undefined
     campaign.lastAttemptAt=now();campaign.fingerprint=fingerprint;await this.save(run)
     try{
+      if(this.disposed||run.status!=='running'||(run.coordinatorRevision??0)!==attemptRevision||(task.transitionVersion??0)!==attemptVersion)return
       if(task.status==='merged'){
         if(!this.runtime.renewRecovery)throw new Error('Runtime cannot safely renew the same recovery worktree')
-        await this.runtime.renewRecovery(task,taskDeliveryConfig(task,run.config),(campaign.generation??0)+1);campaign.generation=(campaign.generation??0)+1;campaign.affectedTaskIds=[];await this.save(run)
+        await this.runtime.renewRecovery(task,taskDeliveryConfig(task,run.config),(campaign.generation??0)+1)
+        if(this.disposed||run.status!=='running'||(run.coordinatorRevision??0)!==attemptRevision||(task.transitionVersion??0)!==attemptVersion)return
+        campaign.generation=(campaign.generation??0)+1;campaign.affectedTaskIds=[];await this.save(run)
       }
       if(!task.baseSha){await this.runtime.prepare(task,taskDeliveryConfig(task,run.config));await this.save(run)}
-      if(this.disposed||run.status!=='running')return
-      task.transitionVersion=(task.transitionVersion??0)+1;const scopeVersion=task.transitionVersion;task.recoveryScopeAt=now();await this.save(run)
+      if(this.disposed||run.status!=='running'||(run.coordinatorRevision??0)!==attemptRevision||(task.transitionVersion??0)!==attemptVersion)return
+      scopeVersion=attemptVersion+1;task.transitionVersion=scopeVersion;task.recoveryScopeAt=now();await this.save(run)
       let admitted:boolean
       if(!task.assignmentDelivered||task.status==='merged')admitted=await this.runtime.start(task,run)!==false
-      else admitted=await this.runtime.send(task.sessionId,`Changed shared recovery evidence:\n${recoveryFacts(run)}\nReuse your existing original team, inspect actual changes and drive actionable recovery. No repeated unchanged retries or new ticket roots.`,`recovery-facts:${task.id}:${fingerprint}`,()=>!this.disposed&&run.status==='running')!==false
+      else admitted=await this.runtime.send(task.sessionId,`Changed shared recovery evidence:\n${recoveryFacts(run)}\nReuse your existing original team, inspect actual changes and drive actionable recovery. No repeated unchanged retries or new ticket roots.`,`recovery-facts:${task.id}:${fingerprint}`,()=>!this.disposed&&run.status==='running'&&(run.coordinatorRevision??0)===attemptRevision&&task.transitionVersion===scopeVersion)!==false
       if(this.disposed||isStopped(run)){await this.runtime.stop(task.sessionId,'shutdown');return}
-      if(admitted){task.assignmentDelivered=true;if(task.transitionVersion===scopeVersion){task.status='running';delete task.finishedAt;delete task.error;this.phase(task,'analysis')};task.lastWakeAt=now();campaign.lastSentFingerprint=fingerprint;delete campaign.error;delete campaign.settlement;await this.save(run);await this.notify(run,`Backlog safeguard is holding new intake (${parked} parked, threshold ${threshold}). Dedicated recovery session ${task.sessionId}, workspace ${task.worktree}, is investigating shared causes. Reuse this owner, prioritize existing recovery and preserve the human intake mode.`,`recovery-owner:${task.id}:${fingerprint}`)}
-    }catch(error){campaign.error=String(error);task.status='blocked';task.error=`Recovery startup/transport deferred: ${String(error)}`;task.blockedSince??=now();this.phase(task,'blocked',task.error);await this.save(run)}
+      if(run.status!=='running'||(run.coordinatorRevision??0)!==attemptRevision||task.transitionVersion!==scopeVersion){
+        if(admitted){task.assignmentDelivered=true;campaign.lastSentFingerprint=fingerprint;await this.save(run)}
+        return
+      }
+      if(admitted){task.assignmentDelivered=true;if(task.transitionVersion===scopeVersion){task.status='running';delete task.finishedAt;delete task.error;this.phase(task,'analysis')};task.lastWakeAt=now();campaign.lastSentFingerprint=fingerprint;delete campaign.error;delete campaign.admissionFailure;delete campaign.settlement;await this.save(run);await this.notify(run,`Backlog safeguard is holding new intake (${parked} parked, threshold ${threshold}). Dedicated recovery session ${task.sessionId}, workspace ${task.worktree}, is investigating shared causes. Reuse this owner, prioritize existing recovery and preserve the human intake mode.`,`recovery-owner:${task.id}:${fingerprint}`)}
+      else {
+        const reason='The existing native recovery session did not admit the changed-evidence request; preserve this owner and retry only after new evidence or an explicit coordinator wake.'
+        campaign.error=reason;campaign.admissionFailure={fingerprint,coordinatorRevision:attemptRevision,at:now(),reason};task.status='blocked';task.executionActive=false;task.error=reason;task.blockedSince??=now();this.phase(task,'blocked',reason);await this.save(run)
+        await this.notify(run,`Shared backlog recovery could not resume its existing native session: ${reason}`,`recovery-admission-failed:${task.id}:${fingerprint}:${attemptRevision}`)
+      }
+    }catch(error){
+      if(this.disposed||isStopped(run)||(run.coordinatorRevision??0)!==attemptRevision||(task.transitionVersion??0)!==(scopeVersion??attemptVersion))return
+      const reason=`Recovery startup/transport deferred: ${String(error)}`;campaign.error=reason;campaign.admissionFailure={fingerprint,coordinatorRevision:attemptRevision,at:now(),reason};task.status='blocked';task.executionActive=false;task.error=reason;task.blockedSince??=now();this.phase(task,'blocked',task.error);await this.save(run);await this.notify(run,`Shared backlog recovery is held: ${reason}`,`recovery-admission-failed:${task.id}:${fingerprint}:${attemptRevision}`)
+    }
   }
   private gradeRecovery(run:Run,task:Task):void{
     if(this.recoveryGrades.has(run.id)||this.disposed||!['running','draining'].includes(run.status))return

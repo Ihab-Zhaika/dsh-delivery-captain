@@ -1473,6 +1473,46 @@ test('a settled campaign stays quiet when unrelated existing work lowers the par
  assert.equal(run.tasks.filter(t=>t.status==='parked').length,3);assert.equal(f.starts.length,starts);assert.equal(root.status,'parked');assert.ok(run.recoveryCampaign.settlement)
 }))
 
+test('a refused changed-evidence recovery message is held until new evidence or an explicit coordinator wake',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId)
+ f.runtime.assertRecoveryDiagnostics=async()=>{};f.runtime.recoveryHasChanges=async()=>false
+ await f.controller.settleRecovery('captain','resolved','Completed diagnostics found no releasable ticket holds',[])
+ run.tasks[0].error='A newly parked prerequisite needs review';let attempts=0
+ f.runtime.send=async(id)=>{if(id===root.sessionId){attempts++;return false}}
+ await f.controller.tick();assert.equal(attempts,1);assert.equal(root.status,'blocked');assert.match(root.error,/did not admit/i)
+ await f.controller.tick();assert.equal(attempts,1,'the same refused message must not be retried on every coordinator tick')
+ f.runtime.send=async(id)=>{if(id===root.sessionId){attempts++;return true}}
+ await f.controller.control('captain','loop');await f.controller.tick()
+ assert.equal(attempts,2);assert.equal(root.status,'running');assert.equal(run.recoveryCampaign.settlement,undefined)
+}))
+
+test('a late refused recovery message cannot overwrite a newer ready report',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId)
+ f.runtime.assertRecoveryDiagnostics=async()=>{};f.runtime.recoveryHasChanges=async()=>false
+ await f.controller.settleRecovery('captain','resolved','Completed diagnostics found no releasable ticket holds',[])
+ root.status='running';root.phase='analysis';root.lastWakeAt=new Date().toISOString()
+ run.tasks[0].error='A newly parked prerequisite needs review';let release,enter
+ const entered=new Promise(resolve=>enter=resolve),gate=new Promise(resolve=>release=resolve)
+ f.runtime.send=async id=>{if(id===root.sessionId){enter();await gate;return false}}
+ const tick=f.controller.tick(),sent=await Promise.race([entered.then(()=>true),new Promise(resolve=>setTimeout(()=>resolve(false),1000))]);
+ if(!sent){release(false);await tick;assert.fail('changed recovery evidence was never submitted to its owner')}
+ await f.controller.report(root.sessionId,{phase:'review',ready:true,note:'Independent recovery review is complete'})
+ release();await tick
+ assert.equal(root.status,'ready');assert.match(root.phases.at(-1).note,/Queued for independent verification and merge/)
+}))
+
+test('a coordinator wake during a refused recovery send remains available for the next same-evidence attempt',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId)
+ f.runtime.assertRecoveryDiagnostics=async()=>{};f.runtime.recoveryHasChanges=async()=>false
+ await f.controller.settleRecovery('captain','resolved','Completed diagnostics found no releasable ticket holds',[])
+ run.tasks[0].error='A newly parked prerequisite needs review';let attempts=0,release,enter
+ const entered=new Promise(resolve=>enter=resolve),gate=new Promise(resolve=>release=resolve)
+ f.runtime.send=async id=>{if(id!==root.sessionId)return;attempts++;if(attempts===1){enter();await gate;return false}return true}
+ const tick=f.controller.tick();await entered;await f.controller.control('captain','loop');release();await tick
+ await f.controller.tick()
+ assert.equal(attempts,2);assert.equal(root.status,'running')
+}))
+
 test('explicit review backend policy updates existing assignments without waking workers or weakening CI',()=>fixture(async f=>{
  const run=await f.controller.start('captain',{...f.config,reviewBackend:'ocr'});await f.controller.tick();const task=run.tasks[0],before=f.starts.length,commands=[...task.assignmentConfig.verifyCommands]
  await f.controller.updatePolicy('captain',{reviewBackend:'agent',ocrAdditionalCheck:false})
