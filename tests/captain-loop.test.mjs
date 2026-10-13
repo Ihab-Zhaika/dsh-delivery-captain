@@ -16,6 +16,7 @@ test('Start creates a same-session native loop once and exposes its actual state
 })
 test('unrelated unfinished goals cannot be overwritten, paused or completed',async()=>{
   const h=host();h.views.set('main',{id:'foreign',revision:1,objective:'Other work',phase:'active',activation:'armed'})
+  h.run.coordinatorGoalId='owned';h.views.get('main').objective='DarKingDoom run run\nMatching words cannot transfer ownership'
   await assert.rejects(h.loop.control(h.run,'start'),/unrelated/i)
   await h.loop.control(h.run,'pause');await h.loop.control(h.run,'stop');assert.deepEqual(h.calls,[])
 })
@@ -53,4 +54,15 @@ test('Stop revokes cold-agent loop activation before resolution completes',async
   const pending=h.loop.control(h.run,'resume');await enteredGate
   h.run.status='stopped';h.run.coordinatorRevision=1;await h.loop.control(h.run,'stop');release()
   await assert.rejects(pending,/changed|stopped/i);assert.equal(h.views.size,0)
+})
+test('editing the owned goal objective preserves coordinator ownership across resume and shutdown',async()=>{
+ const h=host();await h.loop.control(h.run,'start')
+ const goal=h.views.get(h.run.captainSessionId)
+ goal.objective='Finish the existing assignments after explicit human scope change'
+ goal.phase='paused';goal.activation='disarmed';goal.revision++
+ assert.equal(h.loop.state(h.run).status,'paused')
+ await h.loop.control(h.run,'resume');assert.equal(h.loop.state(h.run).activation,'armed')
+ await h.loop.control(h.run,'shutdown');assert.equal(h.loop.state(h.run).activation,'disarmed')
+ await h.loop.control(h.run,'stop');assert.equal(h.loop.state(h.run).status,'complete')
+ assert.equal(h.calls.filter(c=>c==='create').length,1)
 })

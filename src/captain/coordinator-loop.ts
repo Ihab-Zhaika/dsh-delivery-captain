@@ -26,7 +26,9 @@ export class CoordinatorLoop {
     return goals
   }
   private owned(run:Run,goal:GoalView|undefined):boolean {
-    return !!goal&&goal.id===run.coordinatorGoalId&&goal.objective.includes(`DarKingDoom run ${run.id}\n`)
+    // The native service is queried in this exact coordinator session. Objective
+    // text is editable through goal_update; it is not an ownership identifier.
+    return !!goal&&goal.id===run.coordinatorGoalId
   }
   state(run:Run):CoordinatorLoopState {
     try {
