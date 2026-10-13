@@ -614,3 +614,19 @@ test('a newly resident idle child with a background job is checked after catalog
  h.ctx.subagents.listDescendants=async()=>{h.agents.set('new-member',{id:'new-member',status:'idle',inbox:{nextTurn:[],nextStep:[]}});return[]}
  assert.equal(await rt.isRunning(root.id),true)
 })
+
+test('automatic delivery permits original atomic edits only to owned never-started pending tasks',async t=>{
+ const root=await repo(t),h=host(),item=task({worktree:root}),rt=runtime.createRuntime(h.ctx),team=await seedTeam(root,h,item,false)
+ team.tasks.push({id:'t2',subject:'Repair',status:'pending',attempt:0,assignee:'implementer',dependencies:['t1'],createdAt:Date.now(),updatedAt:Date.now()});team.taskSeq=2
+ const path=join(root,'.agent-teams',team.id,'team.json');await writeFile(path,JSON.stringify(team));await rt.restore(item,{config})
+ const hook=h.hooks.find(([name])=>name==='tools/pre-execute')[1];let admitted=0
+ const call=operations=>hook({agent:h.agents.get(item.sessionId),name:'agent_teams_edit_plan',arguments:{operations}},async()=>{admitted++;return{kind:'allow'}})
+ assert.deepEqual(await call([{action:'update_task',task_id:'t2',dependencies:[]}]),{kind:'allow'});assert.equal(admitted,1)
+ for(const operations of [[],[{action:'update_task',task_id:'t1'}],[{action:'update_member',member_name:'implementer'}],[{action:'remove_task',task_id:'t2'}],[{action:'update_task',task_id:'t2'},{action:'add_task',subject:'Replace'}]])assert.equal((await call(operations)).kind,'deny')
+ team.tasks[1].attempt=1;await writeFile(path,JSON.stringify(team));assert.equal((await call([{action:'update_task',task_id:'t2'}])).kind,'deny')
+ team.tasks[1].attempt=0;team.phase='staged';await writeFile(path,JSON.stringify(team));assert.equal((await call([{action:'update_task',task_id:'t2'}])).kind,'deny');assert.equal(admitted,1)
+ team.phase='running';await writeFile(path,JSON.stringify(team));assert.equal((await hook({agent:{id:'other-session'},name:'agent_teams_edit_plan',arguments:{operations:[{action:'update_task',task_id:'t2'}]}},async()=>{admitted++})).kind,'deny')
+ assert.equal((await hook({agent:h.agents.get(item.sessionId),name:'agent_teams_edit_plan',signal:AbortSignal.abort(),arguments:{operations:[{action:'update_task',task_id:'t2'}]}},async()=>{admitted++})).kind,'deny')
+ team.tasks[1].reassigning=true;await writeFile(path,JSON.stringify(team));assert.equal((await call([{action:'update_task',task_id:'t2'}])).kind,'deny');assert.equal(admitted,1)
+ assert.equal((await hook({agent:h.agents.get(item.sessionId),name:'agent_teams_approve',arguments:{}},async()=>{admitted++})).kind,'deny')
+})
