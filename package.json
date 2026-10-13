@@ -92,7 +92,7 @@
     "verify:skill": "node scripts/sync-skill.mjs --check",
     "verify": "node --test tests/captain-*.test.mjs scripts/captain-ui.test.mjs && node scripts/git-artifacts.mjs",
     "prepublishOnly": "pnpm build && pnpm verify",
-    "verify:quality-gates": "node scripts/quality-gates-tdd.mjs && node --test scripts/quality-gates-repair-scope.test.mjs scripts/quality-gates-amend.test.mjs scripts/quality-gates-content-bound.test.mjs scripts/quality-gates-work-order.test.mjs scripts/quality-gates-repair-wiring.test.mjs scripts/quality-gates-excluded-scope.test.mjs scripts/quality-gates-cross-binding.test.mjs",
+    "verify:quality-gates": "node scripts/quality-gates-tdd.mjs && node --test scripts/quality-gates-repair-scope.test.mjs scripts/quality-gates-amend.test.mjs scripts/quality-gates-content-bound.test.mjs scripts/quality-gates-work-order.test.mjs scripts/quality-gates-repair-wiring.test.mjs scripts/quality-gates-excluded-scope.test.mjs scripts/quality-gates-cross-binding.test.mjs scripts/quality-gates-integration-binding.test.mjs",
     "verify:issue-203": "node --test scripts/issue-203-card.test.mjs",
     "verify:corrupt-state": "node --test scripts/corrupt-teamjson.test.mjs",
     "verify:web-routes": "node scripts/web-routes-verify.mjs",

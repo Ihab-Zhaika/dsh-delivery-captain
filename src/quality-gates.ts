@@ -1204,7 +1204,7 @@ export function bindReviewToRevision(team: TeamState, task: TeamTask, binding: R
  */
 export function verdictScopePatterns(team: TeamState, task: TeamTask): string[] {
   const lineage = verdictLineageTasks(team, task)
-  // Every implementation/repair this gate transitively judges: the original
+  // Every implementation/repair/integration this gate transitively judges: the original
   // source AND the repairs that followed it. A pre-planned review whose edge
   // was rewired to a re-verification must still bind the bytes the original
   // source changed, otherwise a later edit to the repair's target would have
@@ -1212,10 +1212,16 @@ export function verdictScopePatterns(team: TeamState, task: TeamTask): string[] 
   const changed = new Set<string>()
   for (const item of lineage) {
     const kind = taskKindOf(item)
-    if (kind !== 'implementation' && kind !== 'repair') continue
-    for (const path of item.changedPaths ?? []) {
+    if (kind !== 'implementation' && kind !== 'repair' && kind !== 'integration') continue
+    // Legacy integration completions may record only their contract scope.
+    // Upstream changed paths must not suppress that judged integration scope;
+    // the review's own writable evidence scope is deliberately not included.
+    const contractScope = item.changedPaths === undefined && kind === 'integration'
+    const paths = item.changedPaths ?? (contractScope ? item.inScope ?? [] : [])
+    for (const path of paths) {
       const normalized = normalizeWorkspacePath(path)
-      if (normalized !== undefined) changed.add(normalized)
+      // Keep directory/root contract markers for post-verdict new-file drift.
+      if (normalized !== undefined) changed.add(contractScope ? path : normalized)
     }
   }
   if (changed.size > 0) return [...changed]

@@ -115,6 +115,11 @@ function team(extraReview = {}) {
 test('#161 (original case): editing and deleting reviewed bytes after the pass must stop the deliverable claim', async () => {
   const root = workspace()
   try {
+    // Legacy completion times are integer milliseconds; NTFS can timestamp a
+    // preceding write fractionally later in that same millisecond. Establish
+    // real chronological completion instead of a flaky precondition.
+    const clockDeadline = performance.now() + 1000
+    while (Date.now() <= Math.max(...REVIEWED_PATHS.map(path => statSync(join(root, path)).mtimeMs))) { if (performance.now() > clockDeadline) throw new Error('Filesystem clock remained ahead of completion clock'); await pause(1) }
     const state = team()
     const before = canDeclareDelivery(state, { artifacts: readArtifacts(root, REVIEWED_PATHS) })
     assert.equal(before.ok, true, `precondition: the reviewed revision was deliverable: ${JSON.stringify(before)}`)
@@ -144,6 +149,8 @@ test('#161 (original case): editing and deleting reviewed bytes after the pass m
 test('#161 (original case): the loop banner must not stay green over changed bytes', async () => {
   const root = workspace()
   try {
+    const clockDeadline = performance.now() + 1000
+    while (Date.now() <= Math.max(...REVIEWED_PATHS.map(path => statSync(join(root, path)).mtimeMs))) { if (performance.now() > clockDeadline) throw new Error('Filesystem clock remained ahead of completion clock'); await pause(1) }
     const state = team()
     assert.equal(describeQualityLoop(state, { artifacts: readArtifacts(root, REVIEWED_PATHS) }).deliverable, true)
     await pause(10)
