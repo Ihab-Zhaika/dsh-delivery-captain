@@ -244,7 +244,7 @@ export interface WorkerRuntime {
     parentSession?(sessionId: string): Promise<string | null>;
     workspacePath?(sessionId: string): Promise<string | null>;
     evidence?(run: Run): Promise<unknown>;
-    assertCaptainDiagnostics?(run: Run): Promise<void>;
+    assertCaptainDiagnostics?(run: Run, task?: Task): Promise<void>;
     assertRecoveryDiagnostics?(run: Run): Promise<void>;
     containsTarget?(task: Task, sha: string): Promise<boolean>;
     renewRecovery?(task: Task, config: RunConfig, generation: number): Promise<void>;

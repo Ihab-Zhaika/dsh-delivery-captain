@@ -12,10 +12,12 @@
 
 **Validation plan:**
 
-- [ ] RED/GREEN tests for threshold boundary, admission fence during discovery, automatic dedicated session creation without claims/count changes, persisted identity and deduplication across concurrent scans/restarts, failed startup retry, Pause/Stop cancellation and separate runs.
-- [ ] Add recovery contracts/selection; reuse native worker permission/team/worktree transport with a recovery-specific prompt and coordinator-owned reporting.
-- [ ] Gate recovery PR creation without fake issue closure; preserve exact-head checks and repair flow.
-- [ ] Queue only affected idle assignments after validated recovery and fresh dependency proof; preserve all histories and require target-ancestor proof after a shared merge.
-- [ ] Add monitor recovery evidence and meaningful UI/provider/runtime regression checks.
-- [ ] Focused review, typechecks, regressions, build, package/artifact checks; commit and update draft PR.
-- [ ] Safely load, verify one dedicated recovery workspace/session and frozen ticket roster, update the heartbeat, and observe actual original-team recovery activity.
+- [x] RED/GREEN tests for threshold boundary, admission fence during discovery, automatic dedicated session creation without claims/count changes, persisted identity and deduplication across concurrent scans/restarts, failed startup retry, Pause/Stop cancellation and separate runs.
+- [x] Add recovery contracts/selection; reuse native worker permission/team/worktree transport with a recovery-specific prompt and coordinator-owned reporting.
+- [x] Gate recovery PR creation without fake issue closure; preserve exact-head checks and repair flow.
+- [x] Queue only affected idle assignments after validated recovery and fresh dependency proof; preserve all histories and require target-ancestor proof after a shared merge.
+- [x] Add monitor recovery evidence and meaningful UI/provider/runtime regression checks.
+- [x] Focused review, typechecks, regressions, build, package/artifact checks; commit and update draft PR.
+- [x] Safely load, verify one dedicated recovery workspace/session and frozen ticket roster, update the heartbeat, and observe actual original-team recovery activity.
+
+Live deployment: 364 regressions, typechecks, build, package and artifact checks pass. PID117504 loaded matching hashes. Same run is running/existing-only, agent primary and optional OCR disabled. Actual later human 5M per-review setting, four ticket slots, five members/team and 48-ticket roster were preserved. ONE recovery session f1654b97-7bd9-4609-9396-79b3c19b38e6 uses native workspace fefbee81-24b4-442e-840e-abf70b8a9b8d, worktree C:/Projects/.delivery-worktrees/8178295bc816/d3d8f272-57c5-4717-8f88-0e7ffc95c668, branch codex/recovery-d3d8f272. Its original team recovery-d3d8f272 has four active members/tasks. Initial hold was33parked above4. All243visible sessions were verifiedidle before hostreplacement, after original owned OCR cancellation/completion was honestly collected. Investigation/delivery remains active; installation is not evidence that every ticket is unblocked or that a live controller agent review has passed.
