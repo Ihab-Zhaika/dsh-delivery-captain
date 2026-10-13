@@ -265,7 +265,8 @@ export class CaptainController {
   async report(sessionId: string, report: { phase: Phase; ready?: boolean; blocked?: boolean; note?: string }): Promise<Task> {
     const { run, task } = this.worker(sessionId)
     if (!PHASES.includes(report.phase) || report.phase === 'complete' || report.phase === 'parked') throw new Error('Only the controller can complete or park a task')
-    if (report.ready && report.blocked) throw new Error('A task cannot be ready and blocked together')
+    const blocked=report.blocked||report.phase==='blocked'
+    if (report.ready && blocked) throw new Error('A task cannot be ready and blocked together')
     if(task.dependencyBlocked) {
       task.phases.push({phase:task.phase,at:now(),note:`Report retained during dependency hold; requested ${report.phase}${report.ready?' ready':''}: ${report.note??''}`});await this.save(run);return task
     }
@@ -274,10 +275,10 @@ export class CaptainController {
     delete task.idleCheckpointAt
     this.phase(task, report.phase, report.note)
     if (report.ready) { delete task.blockedSince; task.status = 'ready'; this.phase(task, 'waiting', 'Queued for independent verification and merge') }
-    else if (report.blocked) { task.blockedSince ??= now(); task.status = 'blocked'; task.error = report.note ?? 'Worker blocked'; task.lastWakeAt = now(); task.executionActive = true }
+    else if (blocked) { task.blockedSince ??= now(); task.status = 'blocked'; task.error = report.note ?? 'Worker blocked'; task.lastWakeAt = now(); task.executionActive = true }
     else if (!['blocked','waiting'].includes(report.phase)) { task.status = 'running'; delete task.blockedSince }
     await this.save(run)
-    if (report.blocked) await this.notifyBlocker(run, task)
+    if (blocked) await this.notifyBlocker(run, task)
     return task
   }
 
@@ -549,9 +550,14 @@ export class CaptainController {
     let executing:boolean
     try{executing=await this.runtime.isRunning(task.sessionId)}catch{return}
     if(this.disposed||!['running','draining'].includes(run.status)||task.transitionVersion!==version||task.status!=='running'||task.phase!==phase||executing)return
-    if(phase==='waiting') {
-      task.transitionVersion=(task.transitionVersion??0)+1;task.status='blocked';task.blockedSince=now();task.executionActive=false
-      task.error??='Worker and owned members are idle while waiting; diagnose unmet work or prerequisites before resumption'
+    if(phase==='waiting'||phase==='blocked') {
+      let blockedAt=now()
+      if(phase==='blocked')for(const entry of [...task.phases].reverse()){
+        if(entry.phase!=='blocked')break
+        if(Number.isFinite(Date.parse(entry.at))&&Date.parse(entry.at)<=Date.parse(blockedAt))blockedAt=entry.at
+      }
+      task.transitionVersion=(task.transitionVersion??0)+1;task.status='blocked';task.blockedSince=phase==='waiting'?blockedAt:task.blockedSince??blockedAt;task.executionActive=false
+      task.error??=phase==='blocked'?(task.phases.at(-1)?.note??'Worker reported a blocked phase'):'Worker and owned members are idle while waiting; diagnose unmet work or prerequisites before resumption'
       this.phase(task,'blocked',task.error);await this.save(run);await this.notifyBlocker(run,task);return
     }
     if(task.idleCheckpointAt){task.status='blocked';task.blockedSince??=now();task.error??='Worker is idle after one recovery checkpoint; diagnose its team and pending work';this.phase(task,'blocked',task.error);await this.save(run);await this.notifyBlocker(run,task);return}

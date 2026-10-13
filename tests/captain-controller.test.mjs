@@ -1027,3 +1027,24 @@ test('Stop cancels a queued recovery dependency proof before waiting for dispatc
  const stop=f.controller.control('captain','stop');try{await new Promise(r=>setImmediate(r));assert.equal(cancelled,1)}finally{release();await retry;await stop}
  assert.equal(f.starts.length,1)
 }))
+
+test('blocked phase alone records a durable hold and never becomes an idle retry',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ await f.controller.report(task.sessionId,{phase:'blocked',note:'Configured CI failed; no safe work remains'});assert.equal(task.status,'blocked');assert.ok(task.blockedSince);const since=task.blockedSince
+ f.runtime.isRunning=async()=>false;task.lastWakeAt=new Date(Date.now()-61000).toISOString();await f.controller.recoverOwned();await f.controller.report(task.sessionId,{phase:'blocked',note:'Configured CI failed; no safe work remains'})
+ assert.equal(task.blockedSince,since);assert.equal(f.starts.length,1);assert.equal(f.messages.filter(m=>m.id==='captain').length,1)
+ await assert.rejects(f.controller.report(task.sessionId,{phase:'blocked',ready:true}),/ready and blocked/);assert.equal(task.status,'blocked')
+}))
+
+test('legacy running blocked-phase records are normalized without replaying a worker',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ task.phase='blocked';task.phases.push({phase:'blocked',at:new Date().toISOString(),note:'Explicit verification hold'});task.status='running';delete task.blockedSince
+ f.runtime.isRunning=async()=>false;task.lastWakeAt=new Date(Date.now()-61000).toISOString();await f.controller.recoverOwned()
+ assert.equal(task.status,'blocked');assert.equal(f.starts.length,1);assert.equal(task.idleCheckpointAt,undefined);assert.match(task.error,/Explicit verification hold/)
+}))
+
+test('new idle waiting observation replaces a stale pre-resumption blocker clock',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ task.phase='waiting';task.status='running';task.blockedSince=new Date(Date.now()-3601000).toISOString();task.lastWakeAt=new Date(Date.now()-61000).toISOString();f.runtime.isRunning=async()=>false
+ const observed=Date.now();await f.controller.recoverOwned();assert.equal(task.status,'blocked');assert.ok(Date.parse(task.blockedSince)>=observed);await f.controller.tick();assert.equal(task.status,'blocked')
+}))
