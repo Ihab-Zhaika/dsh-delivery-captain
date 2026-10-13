@@ -555,6 +555,42 @@ test('idle waiting teams enter a single hold without resending assignments',()=>
   await f.controller.tick();await f.controller.tick();assert.equal(f.starts.length,1);assert.equal(task.phase,'blocked');assert.equal(f.messages.filter(m=>m.id==='captain').length,1)
 }))
 
+test('idle captain wait releases a slot for a queued existing assignment in existing-only mode',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:2,parallelism:1});await f.controller.tick()
+  const waiting=run.tasks[0],ticket=run.tickets.find(item=>item.id==='2')
+  await f.controller.report(waiting.sessionId,{phase:'waiting',note:'Captain is waiting on original members'})
+  waiting.lastWakeAt='2000-01-01'
+  const queued={...structuredClone(waiting),id:'existing-task-2',sessionId:'existing-session-2',ticket,branch:'captain/2',worktree:join(f.dir,'existing-2'),baseSha:'base',status:'blocked',phase:'blocked',phases:[{phase:'blocked',at:'2000-01-01'}],error:undefined,executionActive:false,resumeRequested:true,waitingDecision:'The already-admitted predecessor is now complete'}
+  run.tasks.push(queued);run.intakeMode='existing-only'
+  f.runtime.isRunning=async(id,options)=>id===waiting.sessionId?options?.ignoreWaitingCaptain!==true:f.runtime.running?.has(id)??false
+  await f.controller.tick()
+  assert.equal(waiting.status,'blocked');assert.equal(waiting.executionActive,false)
+  assert.equal(queued.status,'running');assert.ok(f.starts.includes(queued.id));assert.equal(run.tasks.length,2)
+}))
+
+test('waiting ticket keeps its slot while an owned original member is still active',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:2,parallelism:1});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'waiting',note:'Original member is still performing scoped work'})
+  task.lastWakeAt='2000-01-01'
+  f.runtime.isRunning=async(_id,options)=>options?.ignoreWaitingCaptain===true
+  await f.controller.tick()
+  assert.equal(task.status,'running');assert.equal(run.tasks.length,1);assert.equal(f.starts.length,1)
+}))
+
+test('changed evidence steers an idle waiting root instead of duplicating its session',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1,parallelism:1});await f.controller.tick();const task=run.tasks[0]
+  await f.controller.report(task.sessionId,{phase:'waiting',note:'Captain is waiting on original members'})
+  task.lastWakeAt='2000-01-01'
+  f.runtime.isRunning=async(_id,options)=>options?.ignoreWaitingCaptain!==true
+  await f.controller.tick();assert.equal(task.status,'blocked');assert.equal(task.executionActive,false)
+  const starts=f.starts.length
+  await f.controller.resumeTask('captain',task.id,'A changed prerequisite is now verified',true)
+  assert.equal(f.starts.length,starts,'the existing worker session is reused')
+  assert.equal(task.status,'running');assert.equal(task.phase,'analysis')
+  assert.equal(task.pendingHumanRetry,undefined,'the bounded human continuation is consumed by the admitted steer')
+  assert.ok(f.messages.some(message=>message.id===task.sessionId&&message.text.includes('A changed prerequisite is now verified')))
+}))
+
 test('acknowledged questions and delivered answers are not repeatedly sent',()=>fixture(async f=>{
   const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
   const q=await f.controller.question(task.sessionId,'Which safe source-only task can proceed?')

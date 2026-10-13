@@ -623,6 +623,28 @@ test('pending native inbox input reserves activity and unreadable inboxes never 
  await assert.rejects(rt.isRunning(root.id),/Inbox unreadable/)
 })
 
+test('capacity can ignore only a waiting captain turn when its original team has no runnable work',async t=>{
+ const root=await repo(t),h=host(),item=task({worktree:root,phase:'waiting'}),rt=runtime.createRuntime(h.ctx),cfg={...config,workspace:root}
+ await rt.start(item,{config:cfg})
+ const team=await seedTeam(root,h,item,false),agent=h.agents.get(item.sessionId)
+ agent.status='running';agent.inbox.nextTurn=[];agent.inbox.nextStep=[]
+ h.ctx.jobs={list:()=>[]};h.ctx.subagents.listDescendants=async()=>[]
+ assert.equal(await rt.isRunning(item.sessionId),true,'ordinary lifecycle checks still see the captain turn')
+ assert.equal(await rt.isRunning(item.sessionId,{ignoreWaitingCaptain:true}),false,'capacity may be released when the team has no runnable work')
+
+ const ready={...team,tasks:[...team.tasks,{id:'t2',subject:'Independent work',status:'pending',assignee:'implementer',dependencies:[],createdAt:Date.now(),updatedAt:Date.now()}]}
+ await writeFile(join(root,'.agent-teams',team.id,'team.json'),JSON.stringify(ready))
+ assert.equal(await rt.isRunning(item.sessionId,{ignoreWaitingCaptain:true}),true,'ready original-team work still reserves its ticket slot')
+})
+
+test('waiting-captain capacity release fails closed without job-registry evidence',async t=>{
+ const root=await repo(t),h=host(),item=task({worktree:root,phase:'waiting'}),rt=runtime.createRuntime(h.ctx),cfg={...config,workspace:root}
+ await rt.start(item,{config:cfg});await seedTeam(root,h,item,false)
+ const agent=h.agents.get(item.sessionId);agent.status='running';agent.inbox.nextTurn=[];agent.inbox.nextStep=[]
+ h.ctx.subagents.listDescendants=async()=>[]
+ await assert.rejects(rt.isRunning(item.sessionId,{ignoreWaitingCaptain:true}),/job registry became unavailable/i)
+})
+
 test('startup does not replay scope or recovery over native input queued during inspection',async()=>{
  const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker',assignmentDelivered:true})
  await rt.restore(item,{config});const root=h.agents.get(item.sessionId),inspect=h.ctx.sessionController.inspect

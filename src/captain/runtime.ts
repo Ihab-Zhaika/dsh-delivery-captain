@@ -269,8 +269,35 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
     return `## Current OCR policy\nCurrent independent review budget: ${budget}, not shared across sessions. This explicit current policy supersedes older ad hoc 100K/120K guidance. ${reviewInstructions(worker.task.assignmentConfig??worker.config)}\n\n${text}`
   }
   let observedJobs = false
-  async function hasNativeActivity(sessionId:string):Promise<boolean> {
+  async function hasRunnableOriginalTeamWork(sessionId:string):Promise<boolean> {
+    const worker=workers.get(sessionId)
+    if(!worker)throw new Error('Cannot distinguish an idle captain wait without its owned delivery task')
+    if(worker.task.phase!=='waiting'&&worker.task.error!=='Worker and owned members are idle while waiting; diagnose unmet work or prerequisites before resumption')throw new Error('Waiting-captain capacity check requires a recorded waiting task')
+    const inspection=await ctx.sessionController.inspect(sessionId as SessionId)
+    const receipt=originalTeamReceipt(inspection,sessionId,worker.task.id)
+    if(!receipt)throw new Error('Cannot distinguish an idle captain wait without original-team creation evidence')
+    const stateRoot=join(worker.task.worktree,options.teamStateDir??'.agent-teams')
+    const activeTeam=await findTeamByCaptain(stateRoot,sessionId)
+    const team=activeTeam??await readArchivedTeam(stateRoot,receipt.id)
+    if(!team||team.id!==receipt.id||team.captainSessionId!==sessionId||team.name!==receipt.name)throw new Error('Cannot distinguish an idle captain wait without the exact original-team state')
+    // A waiting captain turn is not useful ticket work once every member/task is
+    // idle. Keep the slot for claimed/in-progress work and pending tasks whose
+    // dependencies are already complete; leave unresolved DAG edges parked.
+    if(team.members.some(member=>member.status==='working'))return true
+    if(team.tasks.some(item=>item.reassigning||item.status==='claimed'||item.status==='in_progress'))return true
+    if(!activeTeam||team.halted)return false
+    const completed=new Set(team.tasks.filter(item=>item.status==='completed').map(item=>item.id))
+    for(const item of team.tasks){
+      if(item.status==='pending'){
+        if(item.dependencies.some(id=>!team.tasks.some(candidate=>candidate.id===id)))throw new Error(`Original-team task ${item.id} has an unknown dependency`)
+        if(item.dependencies.every(id=>completed.has(id))&&!team.halted)return true
+      }
+    }
+    return false
+  }
+  async function hasNativeActivity(sessionId:string,activityOptions:{ignoreWaitingCaptain?:boolean}={}):Promise<boolean> {
     if(reviews.has(sessionId))return true
+    if(activityOptions.ignoreWaitingCaptain&&await hasRunnableOriginalTeamWork(sessionId))return true
     const owners = new Set<string>([sessionId])
     const liveActivity = ():boolean => {
       const root = ctx.agents.get(sessionId as SessionId)
@@ -280,7 +307,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
         if (seen.has(agent)) continue
         seen.add(agent)
         owners.add(agent.id)
-        if (agent.status === 'running') return true
+        if (agent.status === 'running'&&!(activityOptions.ignoreWaitingCaptain&&agent.id===sessionId)) return true
         if(agent.inbox.nextTurn.length||agent.inbox.nextStep.length)return true
         pending.push(...ctx.agents.list().filter(candidate => ctx.agents.isOwnedBy(candidate.id, agent)))
       }
@@ -288,7 +315,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
     }
     if(liveActivity())return true
     const jobs=ctx.get('jobs') as {list(owner:SessionId):readonly {owner?:string;status:string}[]} | undefined
-    if(!jobs){if(observedJobs)throw new Error('Native job registry became unavailable');return false}
+    if(!jobs){if(observedJobs||activityOptions.ignoreWaitingCaptain)throw new Error('Native job registry became unavailable for owned activity proof');return false}
     observedJobs=true
     // Durable ownership includes members whose resident Agent is already idle/released.
     const descendants=await ctx.subagents.listDescendants(sessionId as SessionId)
@@ -591,7 +618,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       }
       if(failures.length)throw new AggregateError(failures,`Worker shutdown incomplete: ${failures.map(String).join('; ')}`)
     },
-    async isRunning(sessionId) { return hasNativeActivity(sessionId) },
+    async isRunning(sessionId,activityOptions) { return hasNativeActivity(sessionId,activityOptions) },
     async review(task, config, onPhase) {
       if (reviews.has(task.sessionId)) throw new Error('A review is already running for this worker')
       const controller = new AbortController()

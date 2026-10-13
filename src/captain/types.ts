@@ -117,7 +117,14 @@ export interface WorkerRuntime {
   start(task: Task, run: Run): Promise<void|boolean>;
   send(sessionId: string, text: string, deliveryKey?: string,permitted?:()=>boolean): Promise<void|boolean>;
   stop(sessionId: string,reason?: 'stop'|'shutdown'): Promise<void>;
-  isRunning(sessionId: string): Promise<boolean>;
+  /**
+   * Exact owned activity check. `ignoreWaitingCaptain` is reserved for the
+   * controller's long-idle `phase === 'waiting'` capacity check: it excludes
+   * only the ticket captain's wait turn after the exact Original team is
+   * proven to have no active or dependency-ready work. Inbox, member, job,
+   * review and unreadable-evidence checks remain fail-closed.
+   */
+  isRunning(sessionId: string, options?: {ignoreWaitingCaptain?:boolean}): Promise<boolean>;
   review(task: Task, config: RunConfig, onPhase?: (phase: Phase) => Promise<void>): Promise<ReviewResult>;
   isReviewCurrent?(task: Task, config: RunConfig, review: ReviewResult): Promise<boolean>;
   head(task: Task): Promise<string>;
