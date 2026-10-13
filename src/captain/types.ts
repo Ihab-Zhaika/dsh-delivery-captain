@@ -26,7 +26,7 @@ export interface RepositoryContext {
   milestoneCatalog: string[];
 }
 export interface PhaseEvent { phase: Phase; at: string; note?: string }
-export interface Question { id: string; taskId: string; question: string; createdAt: string; answer?: string; action?: 'resume' | 'wait'; answeredAt?: string; deliveredAt?: string; recordedAt?: string; notifiedAt?: string; lastNotifyAttemptAt?: string }
+export interface Question { id: string; taskId: string; question: string; createdAt: string; answer?: string; action?: 'resume' | 'wait'; answeredAt?: string; deliveredAt?: string; recordedAt?: string; deliveryError?: string; notifiedAt?: string; lastNotifyAttemptAt?: string }
 export interface Task {
   assignmentConfig?:RunConfig;
   budgetStartedAt?:string;

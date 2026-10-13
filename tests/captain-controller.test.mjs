@@ -1048,3 +1048,18 @@ test('new idle waiting observation replaces a stale pre-resumption blocker clock
  task.phase='waiting';task.status='running';task.blockedSince=new Date(Date.now()-3601000).toISOString();task.lastWakeAt=new Date(Date.now()-61000).toISOString();f.runtime.isRunning=async()=>false
  const observed=Date.now();await f.controller.recoverOwned();assert.equal(task.status,'blocked');assert.ok(Date.parse(task.blockedSince)>=observed);await f.controller.tick();assert.equal(task.status,'blocked')
 }))
+
+test('a diagnostic-deferred answer cannot abort independent ticket intake',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:2});await f.controller.tick();const task=run.tasks[0],q=await f.controller.question(task.sessionId,'How should I repair this?')
+ await f.controller.report(task.sessionId,{phase:'blocked',note:'Diagnosis pending'});f.runtime.isRunning=async()=>false;f.runtime.assertCaptainDiagnostics=async()=>{throw new Error('Original diagnostic team is still working')}
+ await assert.rejects(f.controller.answer('captain',q.id,'Concrete recorded decision'),/diagnostic team is still working/)
+ f.setTickets([ticket('1'),ticket('2')]);await f.controller.tick();assert.equal(run.tasks.length,2);assert.equal(f.starts.length,2);assert.equal(task.status,'blocked');assert.equal(q.deliveredAt,undefined);assert.match(q.deliveryError,/diagnostic team is still working/)
+ f.runtime.assertCaptainDiagnostics=async()=>{};await f.controller.tick();assert.ok(q.deliveredAt);assert.equal(q.deliveryError,undefined);assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,1)
+}))
+
+test('recording a diagnostic deferral must not hide persistence failure or admit more work',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:2});await f.controller.tick();const task=run.tasks[0],q=await f.controller.question(task.sessionId,'Repair choice?')
+ await f.controller.report(task.sessionId,{phase:'blocked',note:'Diagnosis pending'});f.runtime.isRunning=async()=>false;f.runtime.assertCaptainDiagnostics=async()=>{throw new Error('Diagnostic incomplete')};q.answer='Recorded decision';q.action='resume'
+ const save=f.controller.store.save;f.controller.store.save=async()=>{throw new Error('Persistence unavailable')};f.setTickets([ticket('1'),ticket('2')])
+ try{await assert.rejects(f.controller.tick(),/Persistence unavailable/);assert.equal(f.starts.length,1);assert.equal(q.deliveredAt,undefined)}finally{f.controller.store.save=save;f.controller.ticking=undefined /* The test already observed this rejected drain. */}
+}))

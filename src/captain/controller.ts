@@ -8,6 +8,7 @@ const TERMINAL = new Set<Task['status']>(['merged', 'failed', 'cancelled'])
 const PHASES: Phase[] = ['setup','analysis','implementation','testing','review','repair','integration','waiting','blocked','complete']
 const now = (): string => new Date().toISOString()
 const isStopped = (run: Run): boolean => run.status === 'stopped'
+class DiagnosticAnswerDeferred extends Error {}
 export const repositoryKey = (c: RunConfig): string => JSON.stringify([c.provider, c.organization?.toLowerCase(), c.project?.toLowerCase(), c.repository.toLowerCase()])
 
 /** Durable orchestration; timers call tick, models only report and answer questions. */
@@ -304,7 +305,7 @@ export class CaptainController {
       if(action==='wait'&&task?.status==='blocked'&&task.resumeRequested){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;await this.save(run)}
       return q
     }
-    q.answer = answer; q.action = action; q.answeredAt = now(); delete q.deliveredAt; delete q.recordedAt; await this.save(run)
+    q.answer = answer; q.action = action; q.answeredAt = now(); delete q.deliveredAt; delete q.recordedAt; delete q.deliveryError; await this.save(run)
     await this.deliverAnswer(run, q)
     return q
   }
@@ -313,12 +314,15 @@ export class CaptainController {
     const task = run.tasks.find(t => t.id === q.taskId)
     if (!task || TERMINAL.has(task.status) || isStopped(run)) return
     if(task.status==='ready')return
-    if(task.status==='parked') { q.recordedAt=now(); task.waitingDecision=q.answer; await this.save(run); return }
-    if(q.action!=='wait'&&await this.heldDependencyWake(run,task)){q.recordedAt=now();task.waitingDecision=q.answer;await this.save(run);return}
+    if(task.status==='parked') { q.recordedAt=now(); delete q.deliveryError; task.waitingDecision=q.answer; await this.save(run); return }
+    if(q.action!=='wait'&&await this.heldDependencyWake(run,task)){q.recordedAt=now();delete q.deliveryError;task.waitingDecision=q.answer;await this.save(run);return}
     const diagnosticVersion=task.transitionVersion
-    if(task.status==='blocked')await this.runtime.assertCaptainDiagnostics?.(run)
+    if(task.status==='blocked')try{await this.runtime.assertCaptainDiagnostics?.(run)}catch(error){
+      q.deliveryError=(error instanceof Error?error.message:String(error)).slice(0,4000);await this.save(run)
+      throw new DiagnosticAnswerDeferred(q.deliveryError)
+    }
     if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready','parked'].includes(task.status)||task.transitionVersion!==diagnosticVersion||this.dependencyQuiescences.has(task.id)||task.dependencyBlocked&&task.parkingError)return
-    if(q.action==='wait'&&task.status==='blocked'){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;task.waitingDecision=q.answer;q.recordedAt=now();await this.save(run);return}
+    if(q.action==='wait'&&task.status==='blocked'){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;task.waitingDecision=q.answer;q.recordedAt=now();delete q.deliveryError;await this.save(run);return}
     if (task.status === 'blocked' && !task.executionActive && this.activeCount(run) >= run.config.parallelism) return
     delete task.resumeRequested
     const previousStatus=task.status
@@ -331,7 +335,7 @@ export class CaptainController {
       if(q.action==='wait'){task.status=previousStatus;task.executionActive=true;if(previousStatus!=='blocked')this.phase(task,'waiting')}
     else {this.phase(task,'analysis');delete task.error;delete task.idleCheckpointAt;delete task.waitingDecision}
     }
-    q.deliveredAt = now(); task.lastWakeAt = now(); await this.save(run)
+    q.deliveredAt = now(); delete q.deliveryError; task.lastWakeAt = now(); await this.save(run)
   }
 
   async message(sessionId: string, taskId: string, text: string, action: 'resume' | 'wait' = 'resume'): Promise<void> {
@@ -652,7 +656,7 @@ export class CaptainController {
     }
     for (const q of run.questions) {
       if (isStopped(run)) return
-      if (q.answer && !q.deliveredAt && !q.recordedAt) await this.deliverAnswer(run, q)
+      if (q.answer && !q.deliveredAt && !q.recordedAt)try{await this.deliverAnswer(run,q)}catch(error){if(!(error instanceof DiagnosticAnswerDeferred))throw error}
       if (!q.answer && !q.notifiedAt && Date.now() - Date.parse(q.lastNotifyAttemptAt ?? q.createdAt) >= 60000) await this.notifyQuestion(run, q)
     }
     // Admission counts persisted attempts, including blocked/failed setup. A trial

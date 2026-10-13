@@ -65,6 +65,7 @@ export interface Question {
     answeredAt?: string;
     deliveredAt?: string;
     recordedAt?: string;
+    deliveryError?: string;
     notifiedAt?: string;
     lastNotifyAttemptAt?: string;
 }
