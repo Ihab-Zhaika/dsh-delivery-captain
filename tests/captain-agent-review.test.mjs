@@ -84,11 +84,14 @@ test('native page plan covers large Unicode snapshots and empty files within byt
   assert.equal(f.disposed.includes('run'),false,'Planning never invents a native review after capacity rejection')
 })
 
-test('child guard blocks scoped mutation, shell, transport and messaging tools, while permitting source reads', async t => {
+test('child guard allows only selected immutable snapshots and blocks workspace secrets', async t => {
   const f = await fixture(t, { result: async (request, { guards }) => {
     assert.equal(guards.length, 1)
     for (const name of ['write', 'edit', 'shell', 'run_code', 'agent_teams_create', 'send_message']) assert.match(guards[0]({ name, arguments: {}, agent: f.child }), /read-only/i)
-    assert.equal(guards[0]({ name: 'read', arguments: { file_path: join(f.input.worktree, 'src/a.ts') }, agent: f.child }), undefined)
+    assert.equal(guards[0]({ name: 'read', arguments: { file_path: f.input.paths[0].snapshotPath }, agent: f.child }), undefined)
+    assert.match(guards[0]({ name: 'read', arguments: { file_path: join(f.input.worktree, 'src/a.ts') }, agent: f.child }), /selected.*snapshots/i)
+    assert.match(guards[0]({ name: 'read', arguments: { file_path: join(f.input.worktree, '.env') }, agent: f.child }), /selected.*snapshots/i)
+    assert.match(guards[0]({ name: 'read', arguments: { file_path: join(f.input.worktree, 'workspace-link', 'external-secret') }, agent: f.child }), /selected.*snapshots/i)
     assert.equal(guards[0]({ name: 'structured_output', arguments: {}, agent: f.child }), undefined)
     assert.match(guards[0]({ name: 'read', arguments: { file_path: join(tmpdir(), 'foreign-secret') }, agent: f.child }), /outside/i)
     return { stopReason: 'completed', structured: f.structured, output: [] }

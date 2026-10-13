@@ -104,7 +104,7 @@ export async function reviewTask(task: Task, config: RunConfig, run: CommandRunn
       const treeSha=(await bounded('git',['rev-parse',`${headSha}^{tree}`],{cwd:task.worktree})).trim(),snapshots:AgentReviewInput['paths']=[]
       for(const [index,path] of paths.entries()){
         const diff=await bounded('git',['--literal-pathspecs','diff','--no-ext-diff','--no-textconv','--no-renames','--binary','--unified=80',target,headSha,'--',path],{cwd:task.worktree})
-        const content=formatReviewSnapshot(`Immutable independent review snapshot\n${JSON.stringify({path,baseSha:target,headSha,treeSha,worktree:task.worktree})}\n\nInspect every changed hunk and its surrounding context, and read relevant current source in the given worktree if needed. Binary/opaque changes require actual review evidence, never a waived path.\n\n${diff}`)
+        const content=formatReviewSnapshot(`Immutable independent review snapshot\n${JSON.stringify({path,baseSha:target,headSha,treeSha,worktree:task.worktree})}\n\nInspect every changed hunk and its surrounding context. All permitted review input is provided in the selected immutable snapshots; workspace files are not available to the reviewer. Binary/opaque changes require actual review evidence, never a waived path.\n\n${diff}`)
         const snapshotPath=join(directory,`path-${index}.txt`);await writeFile(snapshotPath,content,'utf8');snapshots.push({path,snapshotPath,fingerprint:createHash('sha256').update(content).digest('hex')})
       }
       const result=await agentReview({baseSha:target,headSha,treeSha,worktree:task.worktree,businessContext:`${task.ticket.title}\n${task.ticket.body}`,maxTokensBudget:tokensBudget,timeoutMs:Math.ceil(remaining()),paths:snapshots},signal??new AbortController().signal)

@@ -8,7 +8,7 @@ import { validateJsonSchemaValue, type ObjectJsonSchema } from '@deepseek-ai/dsh
 import { lastAssistantStreamChunk } from '@deepseek-ai/dsh-llm'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
 
 export interface AgentReviewInput {
   baseSha: string
@@ -72,11 +72,6 @@ function argumentsObject(value: unknown): Record<string, unknown> | undefined {
 }
 function meaningful(value: string): boolean { return value.trim().length >= 20 && /[a-zA-Z\p{L}]/u.test(value) }
 function pathKey(path: string): string { const key = resolve(path); return process.platform === 'win32' ? key.toLowerCase() : key }
-function within(path: string, directory: string): boolean {
-  const rel = relative(directory, path)
-  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`))
-}
-
 async function snapshotsOf(input: AgentReviewInput): Promise<Snapshot[]> {
   if (!isAbsolute(input.worktree) || !input.businessContext.trim()) throw new Error('Independent review requires an absolute worktree and business context')
   if (![input.baseSha, input.headSha, input.treeSha].every(sha => /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(sha))) throw new Error('Independent review requires exact Git base/head/tree identities')
@@ -222,7 +217,7 @@ export async function runAgentReview(ctx: Context, parent: Agent, rawInput: Agen
       if (exec.name === 'structured_output') return undefined
       if (exec.name !== 'read') return 'Independent reviewer is read-only: this tool is forbidden'
       const args = argumentsObject(exec.arguments)
-      if (typeof args?.file_path !== 'string' || !isAbsolute(args.file_path) || (!snapshotPaths.has(pathKey(args.file_path)) && !within(resolve(args.file_path), input.worktree))) return 'Independent reviewer read is outside its selected snapshots and worktree'
+      if (typeof args?.file_path !== 'string' || !isAbsolute(args.file_path) || !snapshotPaths.has(pathKey(args.file_path))) return 'Independent reviewer read is outside its selected immutable snapshots'
       return undefined
     }))
     return undefined
