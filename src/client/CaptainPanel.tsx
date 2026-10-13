@@ -6,6 +6,13 @@ import css from './CaptainPanel.module.css'
 export interface CaptainOpenDetail { sessionId: string; workspace?: string }
 interface Eligibility { ticketId: string; eligible: boolean; reason: string; state?: string; predecessors?: string[]; scope?: 'milestone'|'unmilestoned'|'predecessor'; requiredFor?: string[] }
 interface Snapshot { run: Run | null; eligibility?: Eligibility[]; role?: 'idle'|'coordinator'|'worker'; coordinatorSessionId?: string | null; coordinatorLoop?:CoordinatorLoopState|null }
+interface NativeWorkerEvidence {
+  taskId:string;sessionId:string;error?:string;
+  lifecycle?:{available?:boolean;observedAt?:string;status?:'idle'|'running';inbox?:{readable:boolean;nextTurn?:number;nextStep?:number}};
+  execution?:{active:boolean|null;observedAt?:string;error?:string};
+  coordination?:{status?:string;phase?:string;reason?:string|null;decision?:string|null;unfinishedTeamTasks?:number|null};
+}
+interface NativeEvidence {host?:string;workers:NativeWorkerEvidence[]}
 type Action = 'pause' | 'resume' | 'drain' | 'stop' | 'parallelism' | 'loop' | 'save' | 'policy' | 'finish-existing' | 'allow-new-tickets'
 type IntakePolicy = { includeUnmilestoned: boolean; includeRequiredPredecessors: boolean; ocrMaxTokensBudget: number;reviewBackend:'agent'|'ocr';ocrAdditionalCheck:boolean }
 const MAX_OCR_TOKENS_BUDGET = 10_000_000
@@ -168,6 +175,9 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
   const [pollError,setPollError]=useState<string|null>(null)
   const [contextError,setContextError]=useState<string|null>(null)
   const [notice,setNotice]=useState<string|null>(null)
+  const [nativeEvidence,setNativeEvidence]=useState<NativeEvidence|null>(null)
+  const [nativeEvidenceError,setNativeEvidenceError]=useState<string|null>(null)
+  const [nativeEvidenceLoading,setNativeEvidenceLoading]=useState(false)
   const [dirty,setDirty]=useState(false)
   const [now, setNow] = useState(Date.now())
   const [selected, setSelected] = useState<string | null>(null)
@@ -289,8 +299,19 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
     try {await request('/api/darkingdoom/resume-task',signal,{sessionId,taskId:item.id,evidence:resumeEvidence});setResumeEvidence('');await refresh(signal)}
     catch(cause){setError(String(cause))}finally{mutation.current=false;setBusy(false)}
   }
+  async function inspectNativeActivity() {
+    const signal=controller.current?.signal
+    if(!signal||nativeEvidenceLoading||!run)return
+    setNativeEvidenceLoading(true);setNativeEvidenceError(null)
+    try {
+      const evidence=await request<NativeEvidence>(`/api/darkingdoom/evidence?sessionId=${encodeURIComponent(sessionId)}`,signal)
+      if(!evidence||!Array.isArray(evidence.workers))throw new Error('DarKingDoom Plugin returned invalid native activity evidence')
+      if(!signal.aborted)setNativeEvidence(evidence)
+    }catch(cause){if(!signal.aborted)setNativeEvidenceError(String(cause instanceof Error?cause.message:cause))}
+    finally{if(!signal.aborted)setNativeEvidenceLoading(false)}
+  }
   const merged = run?.tasks.filter(item => item.status === 'merged').length ?? 0
-  const working = run?.tasks.filter(item => ['starting','running','ready'].includes(item.status)||['blocked','parked'].includes(item.status)&&item.executionActive).length ?? 0
+  const reservedSlots = run?.tasks.filter(item => ['starting','running','ready'].includes(item.status)||['blocked','parked'].includes(item.status)&&item.executionActive).length ?? 0
   const blockers = run?.tasks.filter(item => item.error || item.status === 'blocked' || item.status === 'parked' || item.status === 'failed') ?? []
   const totalTaskTime = run?.tasks.reduce((sum, item) => sum + elapsedMs(item.startedAt, item.finishedAt, now), 0) ?? 0
   const eligibility = snapshot.eligibility ?? run?.tickets.map(ticket => {
@@ -350,7 +371,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
           {!worker && <>
           <div className={css.metrics}>
             <div><span>Wall time</span><strong>{run ? duration(elapsedMs(run.createdAt, run.status === 'stopped' ? run.stoppedAt??run.updatedAt : undefined, now)) : '—'}</strong><small>Includes waiting & pauses</small></div>
-            <div><span>Active tasks / parallel limit</span><strong>{working}<em> / {run?.config.parallelism ?? config.parallelism}</em></strong><small>{merged} merged · {run?.tasks.filter(item=>item.status==='blocked').length??0} blocked · {run?.tasks.filter(item=>item.status==='parked').length??0} parked</small></div>
+            <div><span>Reserved task slots / parallel limit</span><strong>{reservedSlots}<em> / {run?.config.parallelism ?? config.parallelism}</em></strong><small>{merged} merged · {run?.tasks.filter(item=>item.status==='blocked').length??0} blocked · {run?.tasks.filter(item=>item.status==='parked').length??0} parked</small></div>
             <div><span>Task elapsed, summed</span><strong>{run ? duration(totalTaskTime) : '—'}</strong><small>Overlaps; includes waiting</small></div>
             <div><span>Active agent effort</span><strong className={css.unmeasured}>Not measured</strong><small>No runtime effort telemetry</small></div>
           </div>
@@ -363,6 +384,32 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
             <label>Parallelism<input aria-label="Live parallelism" type="number" min={1} max={32} value={parallelism} disabled={!allowed.parallelism} onChange={event => setParallelism(Number(event.target.value))} /></label>
             <button disabled={!allowed.parallelism || !Number.isInteger(parallelism) || parallelism < 1 || parallelism > 32} onClick={() => void mutate('parallelism')}>Apply</button>
           </div>
+          <section className={css.card} aria-label="Native execution evidence">
+            <div className={css.sectionTitle}><h2>Native execution evidence</h2><span>Read-only snapshot</span></div>
+            <p className={css.muted}>Reserved task slots can include queued inbox messages. A queued message is not proof of a live model stream; inspect root, inbox, and owned activity separately.</p>
+            <button type="button" disabled={!loaded||nativeEvidenceLoading||!run} onClick={()=>void inspectNativeActivity()}>{nativeEvidenceLoading?'Inspecting…':'Inspect native activity'}</button>
+            {nativeEvidenceError&&<p className={css.error} role="alert">Native activity unavailable: {nativeEvidenceError}</p>}
+            {nativeEvidence&&<div className={css.fields}>
+              <p className={css.muted}>Host {nativeEvidence.host??'unknown'} · read-only evidence; no queued message was sent or changed.</p>
+              {nativeEvidence.workers.map(worker=>{
+                const task=run?.tasks.find(item=>item.id===worker.taskId)
+                const inbox=worker.lifecycle?.inbox
+                const pending=inbox?.readable?(inbox.nextTurn??0)+(inbox.nextStep??0):undefined
+                const queuedIdle=worker.lifecycle?.status==='idle'&&pending!==undefined&&pending>0
+                const activity=worker.execution?.active===null||worker.execution?.active===undefined?'unknown':worker.execution.active?'owned activity or pending input observed':'no native activity observed'
+                const observedAt=worker.execution?.observedAt??worker.lifecycle?.observedAt
+                return <article key={worker.taskId} className={css.reviewRecord}>
+                  <strong>#{task?.ticket.id??worker.taskId}</strong>
+                  <p>{queuedIdle?`Root idle · ${inbox!.nextTurn??0} queued next-turn messages · ${inbox!.nextStep??0} queued next-step messages`: `Root ${worker.lifecycle?.status??'status unavailable'} · ${activity}`}</p>
+                  {queuedIdle&&<p className={css.muted}>Queued input is not proof of a running model stream. Capacity remains reserved until owned jobs, descendants, and the inbox are safely settled.</p>}
+                  {queuedIdle&&<small>Execution reservation: {activity}</small>}
+                  {worker.execution?.error&&<p className={css.error} role="alert">Activity evidence failed: {worker.execution.error}</p>}
+                  {worker.coordination?.unfinishedTeamTasks!==undefined&&<small>{worker.coordination.unfinishedTeamTasks} unfinished original-team tasks · phase {worker.coordination.phase??'unknown'}</small>}
+                  {observedAt&&<small>Observed {new Date(observedAt).toLocaleString()}</small>}
+                </article>
+              })}
+            </div>}
+          </section>
           {dirty&&run?.status==='stopped'&&<p className={css.controlHint}>Save your configuration changes before resuming.</p>}
           <p className={css.controlHint}>Pause holds dispatch. Drain finishes active tickets. Finish existing tasks also keeps blocked/parked recovery available without new intake. Stop cancels active work. Unresolved blockers park after one hour, preserving work and freeing capacity.</p>
           {run?.intakeMode==='existing-only'&&<p className={css.authorization}>Existing tasks only: {run.tasks.length} admitted tickets. New admissions and follow-up issues are disabled until you explicitly allow new tickets.</p>}

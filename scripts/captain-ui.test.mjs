@@ -34,7 +34,7 @@ test('elapsed time freezes at task completion and rejects invalid timestamps', (
   assert.equal(ui.elapsedMs('2026-01-01T01:00:00Z', undefined, Date.parse('2026-01-01T00:00:00Z')), 0)
 })
 
-async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPass=false,policyPass=false,status='running',runConfig={},taskPatch={},failFirst=true,idle=false}={}) {
+async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPass=false,policyPass=false,status='running',runConfig={},taskPatch={},failFirst=true,idle=false,nativeEvidence={host:'test-host',workers:[]}}={}) {
   const startedAt=new Date().toISOString(),ticket={id:'7',title:'Own ticket',milestone:'M1',url:'',predecessors:[]}
   const task={id:'task',sessionId:'worker',ticket,status:'running',phase:'implementation',startedAt,phases:[],followups:[],reviewRounds:0,...taskPatch}
   const config={provider:'github',repository:'owner/repo',workspace:'C:/repo',remote:'origin',targetBranch:'main',milestones:['M1'],parallelism:2,maxTeamMembers:3,maxTickets:0,pollSeconds:30,maxRepairRounds:3,maxTaskMinutes:120,verifyCommands:['test'],workerPreset:'standard',requireMemory:false,requireBrowser:false,...runConfig}
@@ -45,6 +45,7 @@ async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPa
   const configurationRequests=[]
   const controlRequests=[]
   const resumeRequests=[]
+  const evidenceRequests=[]
   const server=createServer((req,res)=>{
     if(req.url.startsWith('/api/darkingdoom/state')) {
       if(++requests===1&&failFirst){if(deferFirst){firstResponse=res;return};res.writeHead(404,{'content-type':'text/plain'});res.end('Not Found')}
@@ -70,6 +71,8 @@ async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPa
       })
     }else if(req.url==='/api/darkingdoom/resume-task'){
       let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{resumeRequests.push(JSON.parse(body));res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({task}))})
+    }else if(req.url.startsWith('/api/darkingdoom/evidence')){
+      evidenceRequests.push(req.url);res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(nativeEvidence))
     }else{res.writeHead(controlPass?200:409,{'content-type':'application/json'});res.end(JSON.stringify(controlPass?{run}:{error:'Control rejected by lifecycle guard'}))}
   })
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve))
@@ -79,7 +82,7 @@ async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPa
   try {
     await act(async()=>{renderer=TestRenderer.create(createElement(ui.CaptainPanel,{sessionId:coordinator?'coordinator':'worker',onClose(){},openSession:async()=>{},initialSnapshot:snapshot}))})
     await settle()
-    await fn({renderer,settle,text:()=>JSON.stringify(renderer.toJSON()),requests:()=>requests,policyRequests,configurationRequests,controlRequests,resumeRequests,failFirst:()=>{assert.ok(firstResponse);firstResponse.writeHead(404,{'content-type':'text/plain'});firstResponse.end('Not Found')}})
+    await fn({renderer,settle,text:()=>JSON.stringify(renderer.toJSON()),requests:()=>requests,policyRequests,configurationRequests,controlRequests,resumeRequests,evidenceRequests,failFirst:()=>{assert.ok(firstResponse);firstResponse.writeHead(404,{'content-type':'text/plain'});firstResponse.end('Not Found')}})
   }finally{
     if(renderer)await act(async()=>renderer.unmount())
     globalThis.fetch=originalFetch;server.closeAllConnections();await new Promise(resolve=>server.close(resolve))
@@ -231,6 +234,23 @@ test('existing coordinator run shows native loop state and an activation control
   const active=renderToStaticMarkup(createElement(ui.CaptainPanel,{...props,initialSnapshot:{run,role:'coordinator',coordinatorLoop:{status:'active',activation:'armed',roundsStarted:3,maxGoalRounds:256}}}))
   assert.match(active,/Coordinator loop: active/);assert.match(active,/3 \/ 256 rounds/);assert.doesNotMatch(active,/Start coordinator loop/)
 })
+
+test('monitor separates reserved task slots from live execution and exposes queued idle roots on demand',async()=>withPollingPanel(async p=>{
+  assert.match(p.text(),/Reserved task slots \/ parallel limit/)
+  assert.match(p.text(),/not proof of a live model stream/i)
+  const inspect=p.renderer.root.findAllByType('button').find(button=>button.children.includes('Inspect native activity'))
+  assert.ok(inspect)
+  await act(async()=>inspect.props.onClick());await p.settle()
+  assert.equal(p.evidenceRequests.length,1)
+  assert.equal(p.evidenceRequests[0],'/api/darkingdoom/evidence?sessionId=coordinator')
+  assert.match(p.text(),/Native execution evidence/)
+  const nativeText=p.renderer.root.findAllByType('p').map(node=>node.children.join(' ')).filter(text=>/Root idle/.test(text)).join('\n')
+  assert.match(nativeText,/Root idle · 0 queued next-turn messages · 3 queued next-step messages/,nativeText)
+  assert.match(p.text(),/queued input is not proof of a running model stream/i)
+  const reservation=p.renderer.root.findAllByType('small').map(node=>node.children.join(' ').replace(/\s+/g,' ').trim()).find(text=>text.includes('Execution reservation'))
+  assert.equal(reservation,'Execution reservation: owned activity or pending input observed')
+  assert.doesNotMatch(p.text(),/queued secret prompt/)
+},true,{failFirst:false,nativeEvidence:{host:'host-1',workers:[{taskId:'task',sessionId:'worker',lifecycle:{available:true,status:'idle',observedAt:'2026-10-14T12:00:00.000Z',inbox:{readable:true,nextTurn:0,nextStep:3,content:'queued secret prompt'}},execution:{active:true,observedAt:'2026-10-14T12:00:00.000Z'},coordination:{status:'running',phase:'waiting',unfinishedTeamTasks:2}}]}}))
 
 test('eligibility graph lays out prerequisites before dependents and retains missing/cyclic nodes',()=>{
   const graph=ui.eligibilityGraph([{id:'1',title:'child',predecessors:['2']},{id:'2',title:'root',predecessors:[]},{id:'3',title:'missing',predecessors:['9']},{id:'4',title:'cycle',predecessors:['5']},{id:'5',title:'cycle',predecessors:['4']}])
