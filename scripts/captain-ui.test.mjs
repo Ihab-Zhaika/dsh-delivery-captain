@@ -87,7 +87,7 @@ test('new runs enable unmilestoned tickets and required predecessors with a mill
   const html=renderToStaticMarkup(createElement(ui.CaptainPanel,{sessionId:'main',onClose(){},openSession:async()=>{}}))
   assert.match(html,/checked=""\/>Include tickets without a milestone/)
   assert.match(html,/checked=""\/>Include required predecessors outside the selected milestones/)
-  assert.match(html,/Token budget per OCR review session<input[^>]*value="1000000"/)
+  assert.match(html,/Token budget per independent review session<input[^>]*value="1000000"/)
   assert.match(html,/Each review has its own budget; no shared pool across workers or the run/)
   assert.match(html,/Milestone order sets priority; dependencies still gate dispatch/)
 })
