@@ -271,13 +271,13 @@ class GithubProvider extends Provider<Row> {
 class AzureProvider extends Provider<string> {
   private flags(): string[] { return ['--org', required(this.config.organization, 'Azure organization'), '--project', required(this.config.project, 'Azure project'), '--output', 'json'] }
   private az(args: string[], project = true): Promise<any> { return this.json('az', [...args, ...(project ? this.flags() : ['--org', required(this.config.organization, 'Azure organization'), '--output', 'json'])]) }
-  private async invoke(area: string, resource: string, route: string[], method = 'GET', body?: unknown, query: string[] = []): Promise<any> {
+  private async invoke(area: string, resource: string, route: string[], method = 'GET', body?: unknown, query: string[] = [],permitted?:()=>boolean): Promise<any> {
     // Azure CLI parses this as float(version.replace('-preview', '')) and rejects
     // dotted preview revisions such as 7.1-preview.4; use negotiated preview.
     const args = ['devops', 'invoke', '--area', area, '--resource', resource, '--route-parameters', `project=${this.config.project}`, ...route, '--http-method', method, '--api-version', resource === 'comments' ? '7.1-preview' : '7.1', ...(query.length ? ['--query-parameters', ...query] : [])]
     if (body === undefined) return this.az(args, false)
     const folder = await mkdtemp(join(tmpdir(), 'captain-api-'))
-    try { const file = join(folder, 'body.json'); await writeFile(file, JSON.stringify(body), 'utf8'); return await this.az([...args, '--in-file', file], false) } finally { await rm(folder, { recursive: true, force: true }) }
+    try { const file = join(folder, 'body.json'); await writeFile(file, JSON.stringify(body), 'utf8'); if(permitted&&!permitted())throw new Error('Merge admission revoked during Azure request preparation');return await this.az([...args, '--in-file', file], false) } finally { await rm(folder, { recursive: true, force: true }) }
   }
   async preflight(): Promise<void> {
     // Works for either PAT (AZURE_DEVOPS_EXT_PAT) or Azure login authentication.
@@ -449,7 +449,7 @@ class AzureProvider extends Provider<string> {
     if (pr.merged) return this.confirmMerge(task, expectedHead)
     if (!pr.checksPassed) throw new Error(pr.blockedReason)
     if(permitted&&!permitted())throw new Error('Merge admission revoked by run or review policy change')
-    await this.invoke('git', 'pullRequests', [`repositoryId=${this.config.repository}`, `pullRequestId=${pr.id}`], 'PATCH', { status: 'completed', lastMergeSourceCommit: { commitId: expectedHead }, completionOptions: { bypassPolicy: false, deleteSourceBranch: false, transitionWorkItems: false } })
+    await this.invoke('git', 'pullRequests', [`repositoryId=${this.config.repository}`, `pullRequestId=${pr.id}`], 'PATCH', { status: 'completed', lastMergeSourceCommit: { commitId: expectedHead }, completionOptions: { bypassPolicy: false, deleteSourceBranch: false, transitionWorkItems: false } },[],permitted)
     return this.mergeResult(task, expectedHead)
   }
   async close(task: Task): Promise<void> {
