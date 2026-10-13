@@ -34,9 +34,9 @@ test('elapsed time freezes at task completion and rejects invalid timestamps', (
   assert.equal(ui.elapsedMs('2026-01-01T01:00:00Z', undefined, Date.parse('2026-01-01T00:00:00Z')), 0)
 })
 
-async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPass=false,policyPass=false,status='running',runConfig={},failFirst=true,idle=false}={}) {
+async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPass=false,policyPass=false,status='running',runConfig={},taskPatch={},failFirst=true,idle=false}={}) {
   const startedAt=new Date().toISOString(),ticket={id:'7',title:'Own ticket',milestone:'M1',url:'',predecessors:[]}
-  const task={id:'task',sessionId:'worker',ticket,status:'running',phase:'implementation',startedAt,phases:[],followups:[],reviewRounds:0}
+  const task={id:'task',sessionId:'worker',ticket,status:'running',phase:'implementation',startedAt,phases:[],followups:[],reviewRounds:0,...taskPatch}
   const config={provider:'github',repository:'owner/repo',workspace:'C:/repo',remote:'origin',targetBranch:'main',milestones:['M1'],parallelism:2,maxTeamMembers:3,maxTickets:0,pollSeconds:30,maxRepairRounds:3,maxTaskMinutes:120,verifyCommands:['test'],workerPreset:'standard',requireMemory:false,requireBrowser:false,...runConfig}
   const run={id:'run',captainSessionId:'coordinator',status,config,tasks:[task],tickets:[ticket],questions:[],createdAt:startedAt}
   const snapshot={run:idle?null:run,role:idle?'idle':coordinator?'coordinator':'worker',coordinatorSessionId:'coordinator'}
@@ -44,6 +44,7 @@ async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPa
   const policyRequests=[]
   const configurationRequests=[]
   const controlRequests=[]
+  const resumeRequests=[]
   const server=createServer((req,res)=>{
     if(req.url.startsWith('/api/darkingdoom/state')) {
       if(++requests===1&&failFirst){if(deferFirst){firstResponse=res;return};res.writeHead(404,{'content-type':'text/plain'});res.end('Not Found')}
@@ -67,6 +68,8 @@ async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPa
         if(controlPass&&['finish-existing','allow-new-tickets'].includes(value.action))run.intakeMode=value.action==='finish-existing'?'existing-only':'new-tickets'
         res.writeHead(controlPass?200:409,{'content-type':'application/json'});res.end(JSON.stringify(controlPass?{run}:{error:'Control rejected by lifecycle guard'}))
       })
+    }else if(req.url==='/api/darkingdoom/resume-task'){
+      let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{resumeRequests.push(JSON.parse(body));res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({task}))})
     }else{res.writeHead(controlPass?200:409,{'content-type':'application/json'});res.end(JSON.stringify(controlPass?{run}:{error:'Control rejected by lifecycle guard'}))}
   })
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve))
@@ -76,7 +79,7 @@ async function withPollingPanel(fn,coordinator=false,{deferFirst=false,controlPa
   try {
     await act(async()=>{renderer=TestRenderer.create(createElement(ui.CaptainPanel,{sessionId:coordinator?'coordinator':'worker',onClose(){},openSession:async()=>{},initialSnapshot:snapshot}))})
     await settle()
-    await fn({renderer,settle,text:()=>JSON.stringify(renderer.toJSON()),requests:()=>requests,policyRequests,configurationRequests,controlRequests,failFirst:()=>{assert.ok(firstResponse);firstResponse.writeHead(404,{'content-type':'text/plain'});firstResponse.end('Not Found')}})
+    await fn({renderer,settle,text:()=>JSON.stringify(renderer.toJSON()),requests:()=>requests,policyRequests,configurationRequests,controlRequests,resumeRequests,failFirst:()=>{assert.ok(firstResponse);firstResponse.writeHead(404,{'content-type':'text/plain'});firstResponse.end('Not Found')}})
   }finally{
     if(renderer)await act(async()=>renderer.unmount())
     globalThis.fetch=originalFetch;server.closeAllConnections();await new Promise(resolve=>server.close(resolve))
@@ -206,6 +209,18 @@ test('worker panel shows origin and own phase totals without coordinator control
   const html=renderToStaticMarkup(createElement(ui.CaptainPanel,{sessionId:'worker',onClose(){},openSession:async()=>{},initialSnapshot:{role:'worker',run,coordinatorSessionId:'coordinator'}}))
   assert.match(html,/Initiated by coordination session/);assert.match(html,/coordinator/);assert.match(html,/Phase timeline/);assert.match(html,/parked/)
   assert.doesNotMatch(html,/aria-label="Run controls"|Run configuration|Live parallelism|Delivery queue|Start DarKingDoom/)
+})
+
+test('only a time-budget-failed task exposes a bounded human continuation in the coordinator panel',async()=>{
+  for(const [coordinator,error] of [[true,'Task time budget exhausted'],[true,'CI checks failed'],[false,'Task time budget exhausted']])await withPollingPanel(async p=>{
+    if(coordinator)await act(async()=>p.renderer.root.findAllByType('button').find(button=>button.findAllByType('strong').some(s=>s.children.includes('Own ticket'))).props.onClick())
+    if(!coordinator||error!=='Task time budget exhausted'){assert.doesNotMatch(p.text(),/Authorize one new bounded window/);return}
+    assert.match(p.text(),/Authorize one new bounded window/);assert.match(p.text(),/480 minutes/)
+    const input=p.renderer.root.findAllByType('textarea').find(input=>input.parent.children.includes('Reason to retry (for example, solved)'))
+    await act(async()=>input.props.onChange({target:{value:'Human approved one window'}}))
+    await act(async()=>p.renderer.root.findAllByType('form').find(form=>form.findAllByType('button').some(button=>button.children.includes('Authorize one new bounded window'))).props.onSubmit({preventDefault(){}}))
+    await p.settle();assert.deepEqual(p.resumeRequests,[{sessionId:'coordinator',taskId:'task',evidence:'Human approved one window'}]);assert.equal(p.configurationRequests.length,0)
+  },coordinator,{failFirst:false,taskPatch:{status:'failed',phase:'blocked',error,finishedAt:new Date().toISOString(),assignmentConfig:{maxTaskMinutes:480}}})
 })
 
 test('existing coordinator run shows native loop state and an activation control without another run Start',()=>{

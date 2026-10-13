@@ -219,6 +219,8 @@ export interface TeamTask {
    * one of them later was never reviewed, so the verdict must not claim it.
    */
   reviewedScope?: string[]
+  /** Exact writable review outputs excluded from this verdict's source evidence. */
+  reviewedExcludedPaths?: string[]
   /**
    * Drift observed while this verdict was being formed (the workspace changed
    * between claim and close). The verdict cannot be read as binding a stable
@@ -230,6 +232,8 @@ export interface TeamTask {
    * can tell whether it judged a revision that was changing underneath it.
    */
   verdictStartSnapshot?: ArtifactSnapshot
+  /** Frozen exact output classification for this attempt; [] records no exclusions. */
+  verdictStartExcludedPaths?: string[]
   /**
    * Workspace snapshot an auto-generated contract (acceptance / inScope /
    * verify) was derived from. When a cited artifact changes underneath it the

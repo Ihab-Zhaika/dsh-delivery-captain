@@ -33,8 +33,8 @@ import {
   withTeamLock,
   writeTeam,
 } from './state.ts'
-import { contractStaleness, isVerdictKind, taskKindOf, verdictScopePatterns } from './quality-gates.ts'
-import { digestWorkspacePaths, snapshotWorkspacePaths } from './artifacts.ts'
+import { contractStaleness } from './quality-gates.ts'
+import { captureVerdictStart, digestWorkspacePaths } from './artifacts.ts'
 import type { TeamMember, TeamState, TeamTask } from './types.ts'
 
 /** Per-dependency output cap in the assignment prompt. */
@@ -76,7 +76,7 @@ export interface DispatchTicket {
   readonly previousStatus?: 'claimed' | 'in_progress'
   readonly previousAttempt?: number
   readonly previousAttemptId?: string
-  readonly previousResult?: Pick<TeamTask, 'output' | 'verdict' | 'findings' | 'changedPaths' | 'acceptanceResults' | 'commandsRun'>
+  readonly previousResult?: Pick<TeamTask, 'output' | 'verdict' | 'findings' | 'changedPaths' | 'acceptanceResults' | 'commandsRun' | 'verdictStartSnapshot' | 'verdictStartExcludedPaths' | 'reviewedExcludedPaths'>
   readonly subject: string
   readonly description?: string
   readonly teamDescription?: string
@@ -381,15 +381,14 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
           const previousResult = recoverOwned ? {
             output: task.output, verdict: task.verdict, findings: task.findings,
             changedPaths: task.changedPaths, acceptanceResults: task.acceptanceResults, commandsRun: task.commandsRun,
+            verdictStartSnapshot: task.verdictStartSnapshot, verdictStartExcludedPaths: task.verdictStartExcludedPaths,
+            reviewedExcludedPaths: task.reviewedExcludedPaths,
           } : undefined
           const attemptId = beginTaskAttempt(task, currentMember.name)
           // A verdict must be able to say which revision was on disk when it
           // started, so a review that runs while someone else edits the tree
           // cannot later claim to have judged stable bytes (issue #161).
-          if (isVerdictKind(taskKindOf(task))) {
-            const scope = verdictScopePatterns(fresh, task)
-            if (scope.length > 0) task.verdictStartSnapshot = snapshotWorkspacePaths(workspace, scope)
-          }
+          captureVerdictStart(workspace, fresh, task)
           // A recovered generation is parked before delivery. This makes each
           // (member, attempt) recovery idempotent even if every status poll
           // sees a disposed handle. Fresh pending work remains unparked so a

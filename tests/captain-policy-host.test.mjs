@@ -63,6 +63,14 @@ async function fixture(t,{complete=false,persistence=false,returnHook,iterationH
   return{host,run,task,root,get child(){return child},team,teamFile,requests,errors,journal,drive,setPrepareHook:fn=>prepareHook=fn,setStreamHook:fn=>streamHook=fn,setLookupHook:fn=>lookupHook=fn,setCatalog:rows=>catalog=rows,setInheritedReceipt:()=>inheritedReceipt=true,async discardChild(){await childHandle.dispose()},async unloadPolicy(){policyEnabled=false;await policyFiber.dispose()},async coldResume(){await childHandle.dispose();const resumed=await host.agents.resume({resumeSessionId:'policy-child',parentAgent:root,agentOptions:{provider:model.provider,model:model.id},setup(ctx){applyChildComposition(ctx,root,{persona:descriptor.persona,toolFilter:descriptor.toolFilter})}});handles.push(resumed);child=resumed.agent;return child},async remount(){await policyFiber.dispose();policyFiber=host.plugin({inject:['agents','systemPrompt','subagents','sessionController'],apply(ctx){install(ctx)}});fibers.push(policyFiber);await policyFiber.await()},saveTeam:()=>writeFile(teamFile,JSON.stringify(team))}
 }
 
+for (const boundary of ['prepare','stream']) test(`informational root progress at ${boundary} does not revoke unchanged member authority`,async t=>{
+  const f=await fixture(t)
+  const report=async()=>{f.task.transitionVersion=(f.task.transitionVersion??0)+1;f.task.phase='waiting';f.task.phases.push({phase:'waiting',at:new Date().toISOString(),note:'Original members are still working'})}
+  if(boundary==='prepare')f.setPrepareHook(report)
+  else f.setStreamHook(async index=>{if(index===1)await report()})
+  await f.drive();assert.equal(f.errors.length,0,JSON.stringify(f.errors));assert.equal(f.child.session.snapshotEvents().filter(e=>e.type==='assistant/message').length,1)
+})
+
 for(const change of ['WAIT','policy','attempt'])test(`F2 normal native completion revoked during awaited owned return ${change} cannot settle successfully`,{timeout:20000},async t=>{
  let f;f=await fixture(t,{returnHook:async()=>{if(change==='WAIT')f.task.holdRevision=(f.task.holdRevision??0)+1;if(change==='policy')f.run.coordinatorRevision++;if(change==='attempt')f.team.tasks[0].attemptId='revoked-after-done';await f.saveTeam()}})
  await f.drive();assert.equal(f.requests.length,1);assert.equal(f.journal.filter(e=>e.ownedReturn&&e.session===f.child.id).length,1)

@@ -28,8 +28,8 @@
 import { createHash } from 'node:crypto'
 import { closeSync, lstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { isAbsolute, join, relative, sep } from 'node:path'
-import { isDefaultExcludedPath, normalizeWorkspacePath } from './quality-gates.ts'
-import type { ArtifactDigest, ArtifactScopeGap, ArtifactSnapshot } from './types.ts'
+import { excludeVerdictOutputs, isDefaultExcludedPath, isVerdictKind, normalizeWorkspacePath, taskKindOf, verdictOutputExclusions, verdictScopePatterns } from './quality-gates.ts'
+import type { ArtifactDigest, ArtifactScopeGap, ArtifactSnapshot, TeamState, TeamTask } from './types.ts'
 
 /**
  * Directory segments never walked when a scope pattern names a directory:
@@ -356,4 +356,16 @@ export function snapshotWorkspacePaths(workspace: string, patterns: readonly str
   const at = Date.now()
   const { artifacts, gaps } = readArtifactScope(workspace, patterns)
   return { at, artifacts, ...gaps.length === 0 ? {} : { gaps } }
+}
+
+/** Freeze one newly admitted verdict attempt on every supported start path. */
+export function captureVerdictStart(workspace: string, team: TeamState, task: TeamTask): void {
+  if (!isVerdictKind(taskKindOf(task))) return
+  const scope = verdictScopePatterns(team, task)
+  task.verdictStartExcludedPaths = verdictOutputExclusions(team, task)
+  task.verdictStartSnapshot = undefined
+  if (scope.length > 0) {
+    const snapshot = snapshotWorkspacePaths(workspace, scope)
+    task.verdictStartSnapshot = { ...snapshot, artifacts: excludeVerdictOutputs(snapshot.artifacts, task.verdictStartExcludedPaths) }
+  }
 }

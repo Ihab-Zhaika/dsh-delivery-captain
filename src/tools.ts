@@ -62,12 +62,15 @@ import {
   bindReviewToRevision,
   deliveryArtifactPaths,
   deliveryScopePatterns,
+  excludeVerdictOutputs,
   isQualityKind,
   verdictScopePatterns,
+  verdictOutputExclusions,
+  verdictPathKey,
 } from './quality-gates.ts'
 import type { DeliveryAudit } from './quality-gates.ts'
 import { auditTeamWorkspace } from './workspace-audit.ts'
-import { readArtifactScope, snapshotWorkspacePaths, workspacePathExists } from './artifacts.ts'
+import { captureVerdictStart, readArtifactScope, snapshotWorkspacePaths, workspacePathExists } from './artifacts.ts'
 import { restrictableToolNames } from './harness-compat.ts'
 import { memberSpawnRelaxableDeny, optionalToolPolicy, requireToolPolicy, resolveMemberToolFilter, type MemberToolFilter, type MemberToolPolicy } from './tool-policies.ts'
 import type { ContractAmendmentInput } from './state.ts'
@@ -194,22 +197,40 @@ function bindClosingVerdict(workspace: string, team: TeamState, task: TeamTask):
   const scope = verdictScopePatterns(team, task)
   if (scope.length === 0) return
   const read = readArtifactScope(workspace, scope)
+  const frozen = task.verdictStartExcludedPaths ?? []
+  const current = verdictOutputExclusions(team, task)
+  const changedExclusions = task.verdictStartExcludedPaths !== undefined
+    && JSON.stringify(frozen.map(verdictPathKey).sort()) !== JSON.stringify(current.map(verdictPathKey).sort())
+  const excludedPaths = changedExclusions ? [] : frozen
+  const artifacts = excludeVerdictOutputs(read.artifacts, excludedPaths)
   const duringDrift = task.verdictStartSnapshot === undefined
     ? []
-    : artifactDrift(task.verdictStartSnapshot.artifacts, read.artifacts)
+    : artifactDrift(task.verdictStartSnapshot.artifacts, artifacts)
+  if (task.verdictStartSnapshot !== undefined) {
+    const startedPaths = new Set(task.verdictStartSnapshot.artifacts.map(artifact => verdictPathKey(artifact.path)))
+    for (const artifact of artifacts) {
+      if (artifact.present && !startedPaths.has(verdictPathKey(artifact.path))) {
+        duringDrift.push(`${artifact.path} appeared in the source scope during this attempt`)
+      }
+    }
+  }
+  if (changedExclusions) duringDrift.push('Review output exclusion contract changed during this attempt')
   const bound = bindReviewToRevision(team, task, {
-    artifacts: read.artifacts,
+    artifacts,
     gaps: read.gaps,
     scope,
     duringDrift,
+    excludedPaths,
   })
   task.reviewedTaskId = bound.reviewedTaskId
   task.reviewedAttempt = bound.reviewedAttempt
   task.reviewedArtifacts = bound.reviewedArtifacts
   task.reviewedGaps = bound.reviewedGaps
   task.reviewedScope = bound.reviewedScope
+  task.reviewedExcludedPaths = bound.reviewedExcludedPaths
   task.reviewedDuringDrift = bound.reviewedDuringDrift
   task.verdictStartSnapshot = undefined
+  task.verdictStartExcludedPaths = undefined
 }
 
 /** Process-local lock key enforcing one active team per captain session. */
@@ -1706,6 +1727,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         }
         if (quiescenceError === undefined && target === CAPTAIN_KEY) {
           beginTaskAttempt(task, CAPTAIN_KEY)
+          captureVerdictStart(workspace, fresh, task)
           // The captain is already in the turn that requested takeover; there
           // is no later member claim handshake to move claimed -> in_progress.
           task.status = 'in_progress'
@@ -1818,6 +1840,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
           throw new Error(`member "${assignee}" is busy with ${busy.id}; finish or reassign it first`)
         }
         const attemptId = beginTaskAttempt(task, assignee)
+        captureVerdictStart(workspace, fresh, task)
         await writeTeam(stateRoot, fresh)
         appendTeamEvent(ctx, captainSessionOf(ctx, fresh.captainSessionId, caller.session), 'agent-teams/task-updated', {
           teamId: fresh.id,

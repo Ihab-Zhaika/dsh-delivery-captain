@@ -10,12 +10,12 @@ const ticket = (id, milestone='M1',predecessors=[]) => ({id,title:id,body:'Imple
 async function fixture(fn) {
   const dir = await mkdtemp(join(tmpdir(),'captain-control-'))
   let tickets=[ticket('1'),ticket('2'),ticket('3','M2')], passing=true, remoteChecks=true
-  const starts=[],messages=[],merges=[],running=new Set()
-  const runtime={preflight:async()=>{},prepare:async(t)=>{t.baseSha='base'},start:async(t)=>{starts.push(t.id);running.add(t.sessionId)},send:async(id,text)=>messages.push({id,text}),stop:async(id)=>{running.delete(id)},isRunning:async(id)=>running.has(id),review:async()=>({passed:passing,headSha:'head',report:'report.json',findings:passing?[]:['Fix bug']}),head:async()=> 'head'}
+  const starts=[],messages=[],merges=[],stops=[],running=new Set()
+  const runtime={preflight:async()=>{},prepare:async(t)=>{t.baseSha='base'},start:async(t)=>{starts.push(t.id);running.add(t.sessionId)},send:async(id,text)=>messages.push({id,text}),stop:async(id,reason)=>{stops.push({id,reason});running.delete(id)},isRunning:async(id)=>running.has(id),review:async()=>({passed:passing,headSha:'head',report:'report.json',findings:passing?[]:['Fix bug']}),head:async()=> 'head'}
   const pr=()=>({id:'1',url:'https://example.com/pr',headSha:'head',merged:false,checksPassed:remoteChecks})
   const provider={preflight:async()=>{},discover:async()=>structuredClone(tickets),claim:async()=>{},ensurePullRequest:async()=>pr(),inspectPullRequest:async()=>pr(),merge:async(t)=>{merges.push(t.id);return {...pr(),merged:true,mergeSha:'merged'}},close:async(t)=>{const item=tickets.find(x=>x.id===t.ticket.id);if(item){item.state='closed';item.merged=true}},createFollowup:async()=> '9'}
   const controller=new CaptainController(new RunStore(join(dir,'state')),runtime,()=>provider)
-  try {await fn({controller,runtime,provider,dir,starts,messages,merges,config:config(dir),setTickets:v=>tickets=v,setPassing:v=>passing=v,setChecks:v=>remoteChecks=v})} finally {await controller.dispose();await rm(dir,{recursive:true,force:true})}
+  try {await fn({controller,runtime,provider,dir,starts,messages,merges,stops,config:config(dir),setTickets:v=>tickets=v,setPassing:v=>passing=v,setChecks:v=>remoteChecks=v})} finally {await controller.dispose();await rm(dir,{recursive:true,force:true})}
 }
 
 test('run Start arms the main loop and lifecycle controls never arm worker sessions',()=>fixture(async f=>{
@@ -102,6 +102,29 @@ test('explicit human parked-task resumption raises its team resource cap without
   await f.controller.resumeTask('captain',task.id,'The .NET issue is resolved; human permits five team members.',true,5)
   assert.equal(task.assignmentConfig.maxTeamMembers,5);assert.deepEqual(task.assignmentConfig.verifyCommands,commands);assert.equal(task.assignmentConfig.maxTaskMinutes,480)
   assert.ok(Date.parse(task.budgetStartedAt)>=Date.now()-1000)
+}))
+
+test('one explicit human window continues a budget-failed assignment without replacing identity or elapsed history',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:2,maxTaskMinutes:480});await f.controller.tick()
+  const task=run.tasks[0], identity=[task.id,task.sessionId,task.worktree,task.attempt], originalConfig=structuredClone(task.assignmentConfig)
+  task.startedAt=new Date(Date.now()-9*3600000).toISOString();const started=task.startedAt
+  await f.controller.tick();assert.equal(task.status,'failed');assert.equal(task.error,'Task time budget exhausted')
+  assert.equal(f.stops.findLast(s=>s.id===task.sessionId).reason,'shutdown','Time expiry must preserve the Original team for an explicitly authorized future window')
+  const failedAt=task.finishedAt, history=structuredClone(task.phases), starts=f.starts.length
+  await f.controller.resumeTask('captain',task.id,'Human approved one new eight-hour window for this same assignment.',true)
+  assert.equal(task.status,'running');assert.equal(f.starts.length,starts+1)
+  assert.deepEqual([task.id,task.sessionId,task.worktree,task.attempt],identity);assert.equal(task.startedAt,started)
+  assert.deepEqual(task.assignmentConfig,originalConfig);assert.equal(task.assignmentConfig.maxTaskMinutes,480)
+  assert.ok(Date.parse(task.budgetStartedAt)>=Date.now()-1000);assert.equal(task.finishedAt,undefined)
+  assert.deepEqual(task.phases.slice(0,history.length),history);assert.ok(task.phases.some(p=>p.note?.includes(failedAt)))
+}))
+
+test('failed assignments cannot receive a budget reset from automation or unrelated human failures',()=>fixture(async f=>{
+  const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+  await f.runtime.stop(task.sessionId);task.status='failed';task.error='Task time budget exhausted';task.finishedAt=new Date().toISOString();task.startedAt=new Date(Date.now()-3600000).toISOString()
+  await assert.rejects(f.controller.resumeTask('captain',task.id,'Automatic retry',false),/Resume requires/)
+  task.error='CI checks failed';await assert.rejects(f.controller.resumeTask('captain',task.id,'Human retry',true),/Resume requires/)
+  assert.equal(task.budgetStartedAt,undefined);assert.equal(task.status,'failed')
 }))
 
 test('explicit assigned-task resume reaches its worker without tracker discovery or a second claim',()=>fixture(async f=>{

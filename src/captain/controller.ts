@@ -415,7 +415,8 @@ export class CaptainController {
   }
   private async resumeTaskInternal(sessionId:string,taskId:string,evidence:string,human:boolean,teamMemberLimit:number|undefined,verifiedRecovery:boolean,expectedHold?:number):Promise<Task>{
     const run=this.captain(sessionId),task=this.findTask(run,taskId)
-    if(isStopped(run)||run.status!=='running'||!task||!(task.status==='parked'||task.status==='blocked'||human&&task.status==='running'&&task.phase==='waiting'))throw new Error('Resume requires a running coordinator and an idle blocked/parked task, or an explicit human retry of a waiting worker')
+    const budgetFailure=!!task&&human&&task.status==='failed'&&task.phase==='blocked'&&task.error==='Task time budget exhausted'&&!!task.finishedAt&&Date.now()>taskDeadline(task,taskDeliveryConfig(task,run.config).maxTaskMinutes)
+    if(isStopped(run)||run.status!=='running'||!task||!(task.status==='parked'||task.status==='blocked'||budgetFailure||human&&task.status==='running'&&task.phase==='waiting'))throw new Error('Resume requires a running coordinator and an idle blocked/parked task, or an explicit human retry of a waiting worker or budget-failed assignment')
     if(!evidence.trim()||evidence.length>30000)throw new Error('Describe the changed prerequisite or explicit human resumption')
     if(expectedHold!==undefined&&(task.holdRevision??0)!==expectedHold)throw new Error('A newer hold supersedes this recovery intent')
     const originalConfig=taskDeliveryConfig(task,run.config)
@@ -428,6 +429,7 @@ export class CaptainController {
     if(!human&&!verifiedRecovery)await this.diagnostics(run,task)
     if(isStopped(run)||this.disposed||run.status!=='running'||task.status!==previousStatus||task.transitionVersion!==version||expectedHold!==undefined&&(task.holdRevision??0)!==expectedHold||task.parkingError||this.dependencyQuiescences.has(task.id))throw new Error('Task changed during resumption validation or has not quiesced')
     task.transitionVersion=(task.transitionVersion??0)+1
+    if(budgetFailure){task.phases.push({phase:task.phase,at:now(),note:`Human-authorized continuation of the same assignment after budget failure at ${task.finishedAt}; original start ${task.startedAt} and prior elapsed history retained.`});delete task.finishedAt}
     if(human){task.pendingHumanRetry={at:now(),reason:evidence.trim(),previousBlocker:task.error??task.phases.at(-1)?.note};task.budgetStartedAt=now();task.phases.push({phase:task.phase,at:now(),note:'Explicit human task Resume authorizes one normal retry and starts a fresh bounded execution window; original elapsed/history and gate policies retained.'})}
     if(teamMemberLimit!==undefined) {
       task.assignmentConfig={...structuredClone(task.assignmentConfig??run.config),maxTeamMembers:teamMemberLimit}
@@ -831,7 +833,7 @@ export class CaptainController {
         continue
       }
       if (Date.now()>taskDeadline(task,taskDeliveryConfig(task,run.config).maxTaskMinutes)) {
-        await this.runtime.stop(task.sessionId); task.status = 'failed'; task.error = 'Task time budget exhausted'; task.finishedAt = now(); this.phase(task, 'blocked', task.error); await this.save(run); continue
+        await this.runtime.stop(task.sessionId,'shutdown'); task.executionActive=false; task.status = 'failed'; task.error = 'Task time budget exhausted'; task.finishedAt = now(); this.phase(task, 'blocked', task.error); await this.save(run); continue
       }
       if (task.status === 'ready') { await this.integrate(run, task, provider); continue }
       if(task.status==='running'&&(task.dependencyBlocked||dependencyBlocker(run.tickets.find(t=>t.id===task.ticket.id)??task.ticket,run.tickets,run.tasks))) {

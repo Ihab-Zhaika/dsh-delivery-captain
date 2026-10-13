@@ -1181,12 +1181,15 @@ export interface ReviewBinding {
   gaps?: readonly ArtifactScopeGap[]
   scope?: readonly string[]
   duringDrift?: readonly string[]
+  excludedPaths?: readonly string[]
 }
 
 export function bindReviewToRevision(team: TeamState, task: TeamTask, binding: ReviewBinding): TeamTask {
   const target = reviewedTargetOf(team, task)
-  if (target === undefined || binding.artifacts.length === 0) return task
+  if (target === undefined) return task
   const kind = taskKindOf(task)
+  const duringDrift = [...binding.duringDrift ?? []]
+  if (binding.artifacts.length === 0) duringDrift.push('No source artifacts were recorded; this verdict cannot establish source review coverage')
   return {
     ...task,
     ...kind === 'review' || kind === 'requirements' ? { reviewedTaskId: task.reviewedTaskId ?? target.id } : {},
@@ -1194,7 +1197,8 @@ export function bindReviewToRevision(team: TeamState, task: TeamTask, binding: R
     reviewedArtifacts: binding.artifacts.map((item) => ({ ...item })),
     ...binding.gaps === undefined || binding.gaps.length === 0 ? {} : { reviewedGaps: binding.gaps.map((gap) => ({ ...gap })) },
     ...binding.scope === undefined || binding.scope.length === 0 ? {} : { reviewedScope: [...binding.scope] },
-    ...binding.duringDrift === undefined || binding.duringDrift.length === 0 ? {} : { reviewedDuringDrift: [...binding.duringDrift] },
+    ...binding.excludedPaths === undefined ? {} : { reviewedExcludedPaths: [...binding.excludedPaths] },
+    ...duringDrift.length === 0 ? {} : { reviewedDuringDrift: duringDrift },
   }
 }
 
@@ -1221,7 +1225,7 @@ export function verdictScopePatterns(team: TeamState, task: TeamTask): string[] 
     for (const path of paths) {
       const normalized = normalizeWorkspacePath(path)
       // Keep directory/root contract markers for post-verdict new-file drift.
-      if (normalized !== undefined) changed.add(contractScope ? path : normalized)
+      if (normalized !== undefined) changed.add(contractScope ? path.trim().replaceAll('\\', '/') : normalized)
     }
   }
   if (changed.size > 0) return [...changed]
@@ -1275,8 +1279,56 @@ export function deliveryScopePatterns(team: TeamState): string[] {
 }
 
 function isDirectoryPattern(pattern: string): boolean {
-  const trimmed = pattern.trim()
+  const trimmed = pattern.trim().replaceAll('\\', '/')
   return trimmed.endsWith('/') || trimmed === '.' || trimmed === './'
+}
+
+/** Evidence paths use the filesystem's Windows case-insensitive identity. */
+export function verdictPathKey(path: string): string {
+  const normalized = normalizeWorkspacePath(path) ?? path
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+/** No directories, roots, globs or forbidden paths can be output exclusions. */
+export function isExactReviewOutputPath(path: unknown): path is string {
+  if (typeof path !== 'string' || isDirectoryPattern(path) || /[*?\[\]]/.test(path)) return false
+  const normalized = normalizeWorkspacePath(path)
+  return normalized !== undefined && normalized !== '' && !isDefaultExcludedPath(normalized)
+}
+
+/**
+ * A review's concrete writable paths are evidence outputs only when no
+ * upstream source contract claims them. Broad legacy integration directories
+ * can incidentally contain that report; their other contents stay judged.
+ */
+export function verdictOutputExclusions(team: TeamState, task: TeamTask): string[] {
+  if (taskKindOf(task) !== 'review') return []
+  const lineage = verdictLineageTasks(team, task)
+  const matches = (path: string, pattern: string): boolean => pathMatchesScope(
+    process.platform === 'win32' ? path.toLowerCase() : path,
+    process.platform === 'win32' ? pattern.toLowerCase() : pattern,
+  )
+  const protectedPath = (path: string): boolean => lineage.some(item => {
+    if ([...(item.changedPaths ?? []), ...(item.deliverables ?? []), ...(item.reviewedArtifacts ?? []).map(a => a.path), ...(item.contractSnapshot?.artifacts ?? []).map(a => a.path)]
+      .some(target => matches(path, target))) return true
+    const kind = taskKindOf(item)
+    if (kind === 'implementation' || kind === 'repair') return (item.inScope ?? []).some(pattern => matches(path, pattern))
+    if (kind === 'integration') return (item.inScope ?? []).some(pattern => !isDirectoryPattern(pattern) && matches(path, pattern))
+    return false
+  })
+  const outputs = new Map<string, string>()
+  for (const path of task.inScope ?? []) {
+    if (!isExactReviewOutputPath(path) || (task.outOfScope ?? []).some(pattern => matches(path, pattern)) || protectedPath(path)) continue
+    const normalized = normalizeWorkspacePath(path)!
+    outputs.set(verdictPathKey(normalized), normalized)
+  }
+  return [...outputs.values()].sort()
+}
+
+/** Filter exact outputs only; enumeration gaps and limits remain untouched. */
+export function excludeVerdictOutputs(artifacts: readonly ArtifactDigest[], paths: readonly string[]): ArtifactDigest[] {
+  const excluded = new Set(paths.map(verdictPathKey))
+  return artifacts.filter(artifact => !excluded.has(verdictPathKey(artifact.path)))
 }
 
 /** Root of the artifact lineage a gate judges (the implementation/repair chain). */
@@ -1359,10 +1411,12 @@ function verdictDrift(team: TeamState, item: TeamTask, audit: DeliveryAudit): Ar
   // A file that appeared under a bound directory scope after the verdict was
   // never reviewed: a broad scope must not quietly absorb new work.
   const recordedPaths = new Set((recorded ?? []).map((artifact) => artifact.path))
+  const excludedPaths = new Set((item.reviewedExcludedPaths ?? []).map(verdictPathKey))
   for (const pattern of item.reviewedScope ?? []) {
     if (!isDirectoryPattern(pattern)) continue
     for (const entry of audit.expandedScope ?? []) {
       if (entry.present !== true || recordedPaths.has(entry.path)) continue
+      if (excludedPaths.has(verdictPathKey(entry.path))) continue
       if (!pathMatchesScope(entry.path, pattern)) continue
       issues.push({ path: entry.path, message: `${entry.path} appeared under the reviewed scope ${pattern} after the verdict and was never reviewed` })
     }
@@ -1905,6 +1959,9 @@ export function hasValidQualityTaskFields(value: Record<string, unknown>): boole
   if (value['reviewedGaps'] !== undefined
     && (!Array.isArray(value['reviewedGaps']) || value['reviewedGaps'].length === 0 || !value['reviewedGaps'].every(isArtifactScopeGap))) return false
   if (value['reviewedScope'] !== undefined && !nonemptyStringList(value['reviewedScope'])) return false
+  for (const key of ['reviewedExcludedPaths', 'verdictStartExcludedPaths'] as const) {
+    if (value[key] !== undefined && (!Array.isArray(value[key]) || !(value[key] as unknown[]).every(isExactReviewOutputPath))) return false
+  }
   if (value['reviewedDuringDrift'] !== undefined && !nonemptyStringList(value['reviewedDuringDrift'])) return false
   if (value['contractSnapshot'] !== undefined && !isArtifactSnapshot(value['contractSnapshot'])) return false
   if (value['verdictStartSnapshot'] !== undefined && !isArtifactSnapshot(value['verdictStartSnapshot'])) return false

@@ -176,6 +176,9 @@ function clearAttemptResult(task: TeamTask): void {
   task.changedPaths = undefined
   task.acceptanceResults = undefined
   task.commandsRun = undefined
+  task.verdictStartSnapshot = undefined
+  task.verdictStartExcludedPaths = undefined
+  task.reviewedExcludedPaths = undefined
 }
 
 /** Activate the task's current generation for one owner and return its capability id. */

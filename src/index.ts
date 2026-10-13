@@ -44,6 +44,7 @@ import { formatProfilesForPrompt, type TeamProfileConfig } from './profiles.ts'
 import { parseToolPolicies, type MemberToolPolicy } from './tool-policies.ts'
 import { installTeamCapabilities } from './capabilities.ts'
 import { TEAM_TOOL_NAMES } from './tool-names.ts'
+import { registerArchivedTeamRestoreTool } from './archived-team-restore.ts'
 
 import { authenticatedWebRoutes, readJsonRequest, RequestBodyError, type BrowserRequestGate, type WebRouteHost } from './web-routes.ts'
 
@@ -213,6 +214,7 @@ export function apply(ctx: Context, config: Config): void {
   // settled, rather than here.
 
   const agentTeamsRuntime = registerAgentTeamsTools(ctx, resolved)
+  registerArchivedTeamRestoreTool(ctx, { stateDir: resolved.stateDir })
   installTeamCapabilities(ctx, {
     stateDir: resolved.stateDir,
     isPendingMember: agentTeamsRuntime.isPendingMember,
