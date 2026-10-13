@@ -74,6 +74,7 @@ export interface Question {
 }
 export interface Task {
     kind?: 'recovery';
+    maintenanceHandoff?: RecoveryMaintenance;
     incorporateTargetSha?: string;
     recoveryScopeAt?: string;
     holdRevision?: number;
@@ -238,6 +239,16 @@ export interface ReviewResult {
     reviewerSessionId?: string;
     failureKind?: 'team-evidence' | 'infrastructure' | 'findings';
 }
+export interface RecoveryMaintenance {
+    worktree: string;
+    repository: string;
+    branch: string;
+    baseSha: string;
+    headSha: string;
+    treeSha: string;
+    incorporated: boolean;
+    loaded: boolean;
+}
 export interface WorkerRuntime {
     coordinatorLoop?(run: Run, action: CoordinatorLoopAction): Promise<void>;
     coordinatorLoopState?(run: Run): CoordinatorLoopState;
@@ -249,6 +260,7 @@ export interface WorkerRuntime {
     containsTarget?(task: Task, sha: string): Promise<boolean>;
     renewRecovery?(task: Task, config: RunConfig, generation: number): Promise<void>;
     recoveryHasChanges?(task: Task): Promise<boolean>;
+    recoveryMaintenance?(task: Task): Promise<RecoveryMaintenance | undefined>;
     registerWorkspace?(task: Task, run: Run): Promise<void>;
     restore?(task: Task, run: Run): Promise<void>;
     preflight(config: RunConfig): Promise<void>;

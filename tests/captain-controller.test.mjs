@@ -1218,6 +1218,57 @@ test('verified non-code recovery settles without a repository PR and does not re
  assert.equal(run.recoveryCampaign.settlement.kind,'resolved');assert.equal(root.status,'parked');assert.equal(run.tasks[0].status,'running');assert.equal(f.merges.length,0);assert.equal(run.intakeMode,'existing-only');assert.equal(run.backlogHold,undefined)
  const starts=f.starts.length;await f.controller.tick();assert.equal(f.starts.length,starts)
 }))
+test('delivery failure quiesces the worker without archiving its repair team',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',f.config);await f.controller.tick();const task=run.tasks[0],reasons=[],stop=f.runtime.stop
+ f.runtime.stop=async(id,reason)=>{reasons.push(reason);await stop(id,reason)};f.setPassing(false)
+ await f.runtime.stop(task.sessionId,'shutdown');reasons.length=0;await f.controller.report(task.sessionId,{phase:'review',ready:true});await f.controller.tick()
+ assert.ok(reasons.length);assert.ok(reasons.every(reason=>reason==='shutdown'),'A failed review must retain the SAME repair team')
+ assert.notEqual(task.status,'merged')
+}))
+test('confirmed delivery archives only after the exact-head merge succeeds',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',f.config);await f.controller.tick();const task=run.tasks[0],events=[],stop=f.runtime.stop,merge=f.provider.merge
+ f.runtime.stop=async(id,reason)=>{events.push(reason??'archive');await stop(id,reason)};f.provider.merge=async(...args)=>{events.push('merged');return merge(...args)}
+ await f.runtime.stop(task.sessionId,'shutdown');events.length=0;await f.controller.report(task.sessionId,{phase:'review',ready:true});await f.controller.tick()
+ assert.equal(task.status,'merged');assert.equal(events[0],'shutdown');assert.ok(events.indexOf('archive')>events.indexOf('merged'))
+}))
+test('a verified maintenance artifact never routes an unchanged recovery root into ticket review or PR delivery',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task,stop=f.runtime.stop,reasons=[]
+ const handoff={worktree:root.worktree+'/artifacts/maintenance/darkingdoom',repository:'Ihab-Zhaika/dsh-delivery-captain',branch:'recovery/'+root.id.slice(0,8)+'-policy',headSha:'a'.repeat(40),treeSha:'b'.repeat(40),incorporated:false,loaded:false}
+ f.runtime.recoveryMaintenance=async()=>handoff;f.runtime.assertRecoveryDiagnostics=async()=>{};f.runtime.review=async()=>{throw Error('Wrong repository review must not run')};f.runtime.stop=async(id,reason)=>{reasons.push(reason);await stop(id,reason)}
+ await f.controller.report(root.sessionId,{phase:'review',ready:true});await f.controller.recoverOwned();await f.controller.recoveryGrades.get(run.id)
+ assert.equal(root.status,'blocked');assert.match(root.error,/maintainer/i);assert.deepEqual(root.maintenanceHandoff,handoff);assert.equal(root.reviewRounds,0);assert.equal(f.merges.length,0);assert.ok(reasons.every(r=>r==='shutdown'))
+ const messages=f.messages.length;await f.controller.recoverOwned();assert.equal(f.messages.length,messages,'Unchanged maintenance handoffs do not wake the archived owner')
+}))
+test('a delayed recovery artifact failure cannot overwrite a later explicit worker hold',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;let enter,reject;const entered=new Promise(r=>enter=r),gate=new Promise((_r,j)=>reject=j)
+ f.runtime.recoveryMaintenance=async()=>{enter();return gate};await f.controller.report(root.sessionId,{phase:'review',ready:true});await f.controller.recoverOwned();await entered
+ await f.controller.report(root.sessionId,{phase:'blocked',note:'Later hold owns this transition'});reject(Error('Stale inspection failed'));await f.controller.recoveryGrades.get(run.id)
+ assert.equal(root.error,'Later hold owns this transition');assert.equal(root.phase,'blocked')
+}))
+test('failed archival after a confirmed merge preserves delivery and records cleanup separately',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',f.config);await f.controller.tick();const task=run.tasks[0],stop=f.runtime.stop
+ f.runtime.stop=async(id,reason)=>{if(reason===undefined)throw Error('Archive unavailable');await stop(id,reason)}
+ await f.runtime.stop(task.sessionId,'shutdown');await f.controller.report(task.sessionId,{phase:'review',ready:true});await f.controller.tick()
+ assert.equal(task.status,'merged');assert.match(task.error,/Merged; team cleanup pending/);assert.equal(task.reviewRounds,0)
+}))
+test('maintenance observation is coordinator-owned, idempotent and preserves existing holds until actual load proof',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.control('captain','finish-existing');await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId,'shutdown');await f.controller.report(root.sessionId,{phase:'blocked',note:'Retained original hold'})
+ const record={worktree:root.worktree+'/artifacts/maintenance/darkingdoom',repository:'owner/plugin',branch:'recovery/'+root.id.slice(0,8)+'-policy',baseSha:'c'.repeat(40),headSha:'a'.repeat(40),treeSha:'b'.repeat(40),incorporated:true,loaded:false}
+ f.runtime.recoveryMaintenance=async()=>structuredClone(record);f.runtime.assertRecoveryDiagnostics=async()=>{};f.runtime.recoveryHasChanges=async()=>!record.loaded
+ await assert.rejects(f.controller.observeMaintenanceHandoff(root.sessionId),/captain/)
+ await assert.rejects(f.controller.settleRecovery('captain','resolved','Actual plugin code changed',[]),/Observe/)
+ await f.controller.observeMaintenanceHandoff('captain');assert.equal(root.error,'Retained original hold');assert.equal(root.status,'blocked');const count=root.phases.length;await f.controller.observeMaintenanceHandoff('captain');assert.equal(root.phases.length,count)
+ await assert.rejects(f.controller.settleRecovery('captain','resolved','Not yet loaded',[]),/gated PR/);record.loaded=true;await f.controller.settleRecovery('captain','resolved','Existing maintainer reviewed, integrated and loaded the actual plugin repair',[])
+ assert.equal(root.status,'parked');assert.equal(root.error,undefined);assert.equal(root.maintenanceHandoff.loaded,true);assert.equal(f.merges.length,0);assert.equal(run.intakeMode,'existing-only')
+}))
+test('a later pause during the final maintenance activity check revokes the pending observation',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId,'shutdown')
+ f.runtime.assertRecoveryDiagnostics=async()=>{};f.runtime.recoveryMaintenance=async()=>({headSha:'a'.repeat(40),treeSha:'b'.repeat(40)})
+ let entered,release;const began=new Promise(r=>entered=r),gate=new Promise(r=>release=r),running=f.runtime.isRunning
+ f.runtime.isRunning=async id=>{if(id===root.sessionId){entered();await gate;return false}return running(id)}
+ const pending=f.controller.observeMaintenanceHandoff('captain');await began;await f.controller.control('captain','pause');release()
+ await assert.rejects(pending,/changed/);assert.equal(root.maintenanceHandoff,undefined)
+}))
 test('external settlement cannot release workers and dirty recovery code cannot bypass PR gates',()=>fixture(async f=>{
  const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId)
  f.runtime.assertRecoveryDiagnostics=async()=>{};f.runtime.recoveryHasChanges=async()=>true

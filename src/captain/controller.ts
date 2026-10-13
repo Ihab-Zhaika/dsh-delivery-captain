@@ -599,6 +599,9 @@ export class CaptainController {
     if(this.recoveryGrades.has(run.id))return
     if(campaign.settlement&&!needsBacklogRecovery(run)){delete run.backlogHold;await this.save(run);return}
     if(campaign.settlement?.fingerprint===fingerprint){if(!needsBacklogRecovery(run)){delete run.backlogHold;await this.save(run)};return}
+    // A plugin artifact belongs to the existing maintainer flow, never to the
+    // consumer repository's ticket publisher or a fresh worker replay.
+    if(task.maintenanceHandoff)return
     if(task.prUrl&&task.headSha&&task.reviewHistory?.some(r=>r.passed&&r.headSha===task.headSha)&&task.status!=='merged'){
       const pr=await provider.inspectPullRequest(task)
       if(this.disposed||run.status!=='running')return
@@ -634,8 +637,24 @@ export class CaptainController {
   }
   private gradeRecovery(run:Run,task:Task):void{
     if(this.recoveryGrades.has(run.id)||this.disposed||!['running','draining'].includes(run.status))return
-    const provider=this.providerFactory(taskDeliveryConfig(task,run.config));this.recoveryGradeProviders.set(run.id,provider)
-    const work=this.integrate(run,task,provider).catch(async error=>{if(!isStopped(run)&&!this.disposed){run.recoveryCampaign!.error=String(error);await this.save(run)}}).finally(()=>{this.recoveryGradeProviders.delete(run.id);this.recoveryGrades.delete(run.id)})
+    const version=task.transitionVersion,revision=run.coordinatorRevision
+    const work=(async()=>{
+      await this.runtime.stop(task.sessionId,'shutdown')
+      if(this.disposed||isStopped(run)||task.status!=='ready'||task.transitionVersion!==version||run.coordinatorRevision!==revision)return
+      const handoff=await this.runtime.recoveryMaintenance?.(task)
+      if(handoff){
+        if(!this.runtime.assertRecoveryDiagnostics)throw new Error('Recovery diagnostics adapter unavailable')
+        await this.runtime.assertRecoveryDiagnostics(run)
+        if(this.disposed||isStopped(run)||task.status!=='ready'||task.transitionVersion!==version||run.coordinatorRevision!==revision)return
+        task.maintenanceHandoff=handoff;task.status='blocked';task.executionActive=false;task.blockedSince??=now()
+        task.error='Plugin maintenance artifact requires the existing maintainer PR and verified load before diagnostic settlement'
+        this.phase(task,'waiting',task.error);await this.save(run)
+        await this.notify(run,`Verified recovery maintenance handoff: ${handoff.repository}, ${handoff.branch}, head ${handoff.headSha}, tree ${handoff.treeSha}. Preserve the original reports; use the existing maintainer PR flow, then settle only genuinely resolved affected holds. Do not review/publish this artifact through the unchanged consumer repository or incorporate a foreign repository SHA into ticket branches.`,`maintenance-handoff:${task.id}:${handoff.headSha}`)
+        return
+      }
+      const provider=this.providerFactory(taskDeliveryConfig(task,run.config));this.recoveryGradeProviders.set(run.id,provider)
+      await this.integrate(run,task,provider)
+    })().catch(async error=>{if(!isStopped(run)&&!this.disposed&&task.status==='ready'&&task.transitionVersion===version&&run.coordinatorRevision===revision){run.recoveryCampaign!.error=String(error);task.status='blocked';task.error=String(error);task.blockedSince??=now();this.phase(task,'blocked',task.error);await this.save(run)}}).finally(()=>{this.recoveryGradeProviders.delete(run.id);this.recoveryGrades.delete(run.id)})
     this.recoveryGrades.set(run.id,work)
   }
   private async releaseSharedRecovery(run:Run):Promise<void>{
@@ -662,17 +681,33 @@ export class CaptainController {
     const revision=run.coordinatorRevision,version=campaign.task.transitionVersion
     if(!this.runtime.assertRecoveryDiagnostics||!this.runtime.recoveryHasChanges)throw new Error('Recovery evidence adapter unavailable')
     await this.runtime.assertRecoveryDiagnostics(run)
+    const handoff=await this.runtime.recoveryMaintenance?.(campaign.task)
+    if(handoff&&!campaign.task.maintenanceHandoff)throw new Error('Observe the verified maintenance handoff before settling its artifact')
     if(await this.runtime.recoveryHasChanges(campaign.task))throw new Error('Recovery repository changes must pass the gated PR flow before settlement')
     if(await this.runtime.isRunning(campaign.task.sessionId)||campaign.task.parkingError||this.recoveryGrades.has(run.id))throw new Error('Recovery activity changed during settlement validation')
     if(this.disposed||run.status!=='running'||run.coordinatorRevision!==revision||campaign.task.transitionVersion!==version)throw new Error('Recovery changed during settlement validation')
     if(kind==='external'&&affectedTaskIds.length)throw new Error('Unchanged external holds cannot release workers')
+    if(handoff)campaign.task.maintenanceHandoff=handoff
     campaign.settlement={kind,at:now(),note:note.trim(),fingerprint:backlogFingerprint(run)}
+    if(kind==='resolved'){delete campaign.error;delete campaign.task.error;delete campaign.task.blockedSince}
     campaign.task.status='parked';campaign.task.executionActive=false;campaign.task.waitingDecision=note.trim();this.phase(campaign.task,'parked',`Recovery diagnosis ${kind}; completed reports retained, no code merge claimed`)
     for(const id of affectedTaskIds){const revision=run.tasks.find(t=>t.id===id)?.holdRevision??0,key=`diagnostic:${campaign.task.id}:${createHash('sha256').update(note).digest('hex')}:${id}:${revision}`;if(!run.recoveryReleases?.some(r=>r.key===key))(run.recoveryReleases??=[]).push({taskId:id,key,holdRevision:revision,note:`Completed original recovery diagnostics verified a changed solution: ${note}. Retry only the affected normal step; retain all acceptance, dependency and exact-head review/CI gates.`})}
     await this.save(run);await this.dispatchRecoveryReleases(run)
     campaign.settlement.fingerprint=backlogFingerprint(run)
     if(!needsBacklogRecovery(run))delete run.backlogHold
     await this.save(run);return run
+  }
+  async observeMaintenanceHandoff(sessionId:string):Promise<Task>{
+    const run=this.captain(sessionId),task=run.recoveryCampaign?.task
+    if(run.status!=='running'||!task||!this.runtime.recoveryMaintenance||!this.runtime.assertRecoveryDiagnostics||this.recoveryGrades.has(run.id))throw new Error('Maintenance observation requires an idle owned recovery campaign')
+    const version=task.transitionVersion,revision=run.coordinatorRevision
+    await this.runtime.assertRecoveryDiagnostics(run)
+    const handoff=await this.runtime.recoveryMaintenance(task)
+    if(!handoff)throw new Error('No verified maintenance artifact is available')
+    const active=await this.runtime.isRunning(task.sessionId)
+    if(this.disposed||run.status!=='running'||version!==task.transitionVersion||revision!==run.coordinatorRevision||this.recoveryGrades.has(run.id)||active)throw new Error('Recovery changed during maintenance observation')
+    if(JSON.stringify(task.maintenanceHandoff)===JSON.stringify(handoff))return task
+    task.maintenanceHandoff=handoff;task.phases.push({phase:task.phase,at:now(),note:`Observed maintenance artifact ${handoff.repository} at ${handoff.headSha}; consumer identity, holds and historical verdicts unchanged.`});await this.save(run);return task
   }
   /** Already-owned idle recovery is local; the full intake catalog can be slow. */
   private recoverIdleTask(run:Run,task:Task,provider:TicketProvider):Promise<void> {
@@ -850,7 +885,7 @@ export class CaptainController {
   private async integrate(run: Run, task: Task, provider: TicketProvider): Promise<void> {
     try {
       if(await this.dependenciesBlocked(run,task,provider))return
-      await this.runtime.stop(task.sessionId)
+      await this.runtime.stop(task.sessionId,'shutdown')
       if (isStopped(run) || this.disposed) return
       if(task.incorporateTargetSha){if(!this.runtime.containsTarget||!await this.runtime.containsTarget(task,task.incorporateTargetSha))throw new Error(`Incorporate shared repair ${task.incorporateTargetSha} through a safe merge (no rebase or history rewrite), preserve work and rerun exact-head verification`);delete task.incorporateTargetSha}
       const previous = task.reviewHistory?.at(-1)
@@ -884,6 +919,7 @@ export class CaptainController {
       if (pr.headSha !== review.headSha || !pr.mergeSha) throw new Error('Cannot confirm exact-head merge')
       task.status = 'merged'; task.mergedSha = pr.mergeSha; task.finishedAt = now(); this.phase(task, 'complete'); delete task.error
       await this.save(run)
+      try{await this.runtime.stop(task.sessionId)}catch(error){task.error=`Merged; team cleanup pending: ${String(error)}`;await this.save(run)}
       if(task.kind==='recovery'){
         task.closedAt=now();await this.save(run);await this.releaseSharedRecovery(run)
       }else try { await provider.close(task); task.closedAt = now() } catch (error) { task.error = `Merged; ticket closure pending: ${String(error)}` }

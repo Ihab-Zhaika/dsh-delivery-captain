@@ -302,6 +302,7 @@ export declare class CaptainController {
     private releaseSharedRecovery;
     private dispatchRecoveryReleases;
     settleRecovery(sessionId: string, kind: 'resolved' | 'external', note: string, affectedTaskIds: string[]): Promise<Run>;
+    observeMaintenanceHandoff(sessionId: string): Promise<Task>;
     /** Already-owned idle recovery is local; the full intake catalog can be slow. */
     private recoverIdleTask;
     private recoverIdleTaskRun;

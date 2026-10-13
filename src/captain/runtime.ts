@@ -22,6 +22,7 @@ import { CoordinatorLoop } from './coordinator-loop.ts'
 import {recoveryFacts} from './backlog.ts'
 import {fileURLToPath} from 'node:url'
 import {runAgentReview} from './agent-review.ts'
+import {inspectRecoveryMaintenance} from './maintenance.ts'
 import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { isAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { renderPrompt, type PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
@@ -610,8 +611,11 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
     async recoveryHasChanges(task){
       if(task.kind!=='recovery')throw new Error('Recovery ownership required')
       if((await runCommandImpl('git',['branch','--show-current'],{cwd:task.worktree})).trim()!==task.branch)throw new Error('Recovery worktree branch changed')
-      return !!(await runCommandImpl('git',['status','--porcelain'],{cwd:task.worktree})).trim()||!!(await runCommandImpl('git',['diff','--name-only',task.baseSha,'HEAD'],{cwd:task.worktree})).trim()
+      if(!!(await runCommandImpl('git',['status','--porcelain'],{cwd:task.worktree})).trim()||!!(await runCommandImpl('git',['diff','--name-only',task.baseSha,'HEAD'],{cwd:task.worktree})).trim())return true
+      const handoff=await inspectRecoveryMaintenance(task,fileURLToPath(new URL('../../',import.meta.url)),loadedHost,runCommandImpl)
+      return !!handoff&&(!handoff.incorporated||!handoff.loaded)
     },
+    recoveryMaintenance:task=>inspectRecoveryMaintenance(task,fileURLToPath(new URL('../../',import.meta.url)),loadedHost,runCommandImpl),
     async containsTarget(task,sha){if(!/^[a-f0-9]{40}$/i.test(sha))return false;if((await runCommandImpl('git',['branch','--show-current'],{cwd:task.worktree})).trim()!==task.branch)throw new Error('Worktree branch ownership changed');try{await runCommandImpl('git',['merge-base','--is-ancestor',sha,'HEAD'],{cwd:task.worktree});return true}catch{return false}},
     async renewRecovery(task,config,generation){
       if(task.kind!=='recovery')throw new Error('Only recovery workspace renewal is supported')
