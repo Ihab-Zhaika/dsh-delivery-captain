@@ -308,6 +308,28 @@ test('blocked-worker guidance requires actual scoped main-session original team 
   await assert.rejects(rt.assertCaptainDiagnostics(run),/completed diagnostic/)
 })
 
+test('fresh exact-ticket diagnostic guidance does not wait for unrelated original diagnostic work',async t=>{
+ const root=await repo(t),h=host(),rt=runtime.createRuntime(h.ctx),item=task({id:'blocked-ticket-uuid',status:'blocked',blockedSince:'2026-10-13T07:00:00Z'}),run={id:'diagnostic-run',captainSessionId:'captain',config:{...config,workspace:root},tasks:[item]}
+ const team=await seedTeam(root,h,task({id:run.id,sessionId:'captain',worktree:root}))
+ team.description+=' DarKingDoom diagnostics';team.members[0].status='working'
+ Object.assign(team.tasks[0],{output:`Completed diagnosis of ${item.id}: the public artifact target was missing.`,createdAt:Date.parse('2026-10-13T07:05:00Z'),updatedAt:Date.parse('2026-10-13T07:10:00Z')})
+ team.tasks.push({...team.tasks[0],id:'other-diagnosis',status:'in_progress',output:undefined,subject:'Unrelated diagnosis'})
+ const file=join(root,'.agent-teams','archive',team.id,'team.json')
+ await writeFile(file,JSON.stringify(team));await rt.assertCaptainDiagnostics(run,item)
+ await assert.rejects(rt.assertCaptainDiagnostics(run),/completed diagnostic/)
+ team.tasks[0].output='Completed diagnosis of another ticket';await writeFile(file,JSON.stringify(team))
+ await assert.rejects(rt.assertCaptainDiagnostics(run,item),/completed diagnostic/)
+ team.tasks[0].output=`Completed diagnosis of ${item.id}`;team.tasks[0].updatedAt=Date.parse('2026-10-13T06:59:00Z');await writeFile(file,JSON.stringify(team))
+ await assert.rejects(rt.assertCaptainDiagnostics(run,item),/completed diagnostic/)
+ team.tasks[0].createdAt=Date.parse('2026-10-13T06:59:00Z');team.tasks[0].updatedAt=Date.parse('2026-10-13T07:10:00Z');await writeFile(file,JSON.stringify(team))
+ await rt.assertCaptainDiagnostics(run,item)
+ team.tasks[0].createdAt=Date.parse('2026-10-13T07:05:00Z')
+ team.tasks[0].updatedAt=Date.parse('2026-10-13T07:10:00Z');team.tasks[0].status='in_progress';await writeFile(file,JSON.stringify(team))
+ await assert.rejects(rt.assertCaptainDiagnostics(run,item),/completed diagnostic/)
+ team.tasks[0].status='completed';team.members[0].id='';await writeFile(file,JSON.stringify(team))
+ await assert.rejects(rt.assertCaptainDiagnostics(run,item),/completed diagnostic/)
+})
+
 test('diagnostic status exposes loaded code and archived team evidence without waking sessions',async t=>{
   const root=await repo(t),h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:root})
   await seedTeam(root,h,item,true);const before=h.calls.length

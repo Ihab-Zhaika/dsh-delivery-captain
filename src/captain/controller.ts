@@ -115,8 +115,8 @@ export class CaptainController {
   }
   private ownedTasks(run:Run):Task[]{return [...run.tasks,...run.recoveryCampaign?[run.recoveryCampaign.task]:[]]}
   private findTask(run:Run,id:string):Task|undefined{return this.ownedTasks(run).find(t=>t.id===id)}
-  private async diagnostics(run:Run):Promise<void>{
-    try{await this.runtime.assertCaptainDiagnostics?.(run)}catch(error){
+  private async diagnostics(run:Run,task:Task):Promise<void>{
+    try{await this.runtime.assertCaptainDiagnostics?.(run,task)}catch(error){
       if(!run.recoveryCampaign?.task.baseSha||!this.runtime.assertRecoveryDiagnostics)throw error
       await this.runtime.assertRecoveryDiagnostics(run)
     }
@@ -308,7 +308,7 @@ export class CaptainController {
     delete task.idleCheckpointAt
     this.phase(task, report.phase, report.note)
     if (report.ready) { delete task.blockedSince; task.status = 'ready'; this.phase(task, 'waiting', 'Queued for independent verification and merge') }
-    else if (blocked) { if(changedHold)task.holdRevision=(task.holdRevision??0)+1;task.blockedSince ??= now(); task.status = 'blocked'; task.error = report.note ?? 'Worker blocked'; task.lastWakeAt = now(); task.executionActive = true }
+    else if (blocked) { if(changedHold)task.holdRevision=(task.holdRevision??0)+1;if(task.status!=='blocked')task.blockedSince=now();else task.blockedSince ??= now(); task.status = 'blocked'; task.error = report.note ?? 'Worker blocked'; task.lastWakeAt = now(); task.executionActive = true }
     else if (!['blocked','waiting'].includes(report.phase)) { task.status = 'running'; delete task.blockedSince }
     await this.save(run)
     if (blocked) await this.notifyBlocker(run, task)
@@ -351,7 +351,7 @@ export class CaptainController {
     if(task.status==='parked') { q.recordedAt=now(); delete q.deliveryError; task.waitingDecision=q.answer; await this.save(run); return }
     if(q.action!=='wait'&&await this.heldDependencyWake(run,task)){q.recordedAt=now();delete q.deliveryError;task.waitingDecision=q.answer;await this.save(run);return}
     const diagnosticVersion=task.transitionVersion
-    if(task.status==='blocked')try{await this.diagnostics(run)}catch(error){
+    if(task.status==='blocked')try{await this.diagnostics(run,task)}catch(error){
       q.deliveryError=(error instanceof Error?error.message:String(error)).slice(0,4000);await this.save(run)
       throw new DiagnosticAnswerDeferred(q.deliveryError)
     }
@@ -367,7 +367,7 @@ export class CaptainController {
     if (isStopped(run) || this.disposed) { await this.runtime.stop(task.sessionId); return }
     if(!TERMINAL.has(task.status)&&task.transitionVersion===version){
       if(q.action==='wait'){task.status=previousStatus;task.executionActive=true;if(previousStatus!=='blocked')this.phase(task,'waiting')}
-    else {this.phase(task,'analysis');delete task.error;delete task.idleCheckpointAt;delete task.waitingDecision}
+    else {this.phase(task,'analysis');delete task.blockedSince;delete task.error;delete task.idleCheckpointAt;delete task.waitingDecision}
     }
     q.deliveredAt = now(); delete q.deliveryError; task.lastWakeAt = now(); await this.save(run)
   }
@@ -389,7 +389,7 @@ export class CaptainController {
     }
     if(action==='resume'&&await this.heldDependencyWake(run,task))throw new Error('Guidance not delivered: dependency prerequisites are unmet, unverified, or worker quiescence is incomplete')
     const diagnosticVersion=task.transitionVersion
-    if(task.status==='blocked')await this.diagnostics(run)
+    if(task.status==='blocked')await this.diagnostics(run,task)
     if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready','parked'].includes(task.status)||task.transitionVersion!==diagnosticVersion||this.dependencyQuiescences.has(task.id)||task.dependencyBlocked&&task.parkingError)throw new Error('Task changed while validating diagnostic evidence')
     if(action==='wait'&&task.status==='blocked'){task.holdRevision=(task.holdRevision??0)+1;delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;task.waitingDecision=text;task.lastGuidanceHash=hash;await this.save(run);return}
     if (task.status === 'blocked' && !task.executionActive && this.activeCount(run) >= run.config.parallelism) throw new Error('No execution slot available; answer will need to wait')
@@ -403,7 +403,7 @@ export class CaptainController {
     task.lastGuidanceHash=hash;task.lastWakeAt=now()
     if(!TERMINAL.has(task.status)&&task.transitionVersion===version){
       if(action==='wait'){task.holdRevision=(task.holdRevision??0)+1;task.status=previousStatus;task.executionActive=true;if(previousStatus!=='blocked')this.phase(task,'waiting')}
-      else{task.status='running';this.phase(task,'analysis');delete task.error;delete task.idleCheckpointAt;delete task.waitingDecision}
+      else{task.status='running';this.phase(task,'analysis');delete task.blockedSince;delete task.error;delete task.idleCheckpointAt;delete task.waitingDecision}
     }
     await this.save(run)
   }
@@ -423,7 +423,7 @@ export class CaptainController {
     const version=task.transitionVersion
     const previousStatus=task.status
     if(task.status!=='parked'&&await this.runtime.isRunning(task.sessionId))throw new Error('Worker is already executing; retry was not duplicated')
-    if(!human&&!verifiedRecovery)await this.diagnostics(run)
+    if(!human&&!verifiedRecovery)await this.diagnostics(run,task)
     if(isStopped(run)||this.disposed||run.status!=='running'||task.status!==previousStatus||task.transitionVersion!==version||expectedHold!==undefined&&(task.holdRevision??0)!==expectedHold||task.parkingError||this.dependencyQuiescences.has(task.id))throw new Error('Task changed during resumption validation or has not quiesced')
     task.transitionVersion=(task.transitionVersion??0)+1
     if(human){task.pendingHumanRetry={at:now(),reason:evidence.trim(),previousBlocker:task.error??task.phases.at(-1)?.note};task.budgetStartedAt=now();task.phases.push({phase:task.phase,at:now(),note:'Explicit human task Resume authorizes one normal retry and starts a fresh bounded execution window; original elapsed/history and gate policies retained.'})}

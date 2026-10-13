@@ -1057,6 +1057,37 @@ test('a diagnostic-deferred answer cannot abort independent ticket intake',()=>f
  f.runtime.assertCaptainDiagnostics=async()=>{};await f.controller.tick();assert.ok(q.deliveredAt);assert.equal(q.deliveryError,undefined);assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,1)
 }))
 
+test('blocked answer guidance passes the exact ticket to scoped original diagnostics',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0],q=await f.controller.question(task.sessionId,'Bind the current source review?')
+ await f.controller.report(task.sessionId,{phase:'blocked',note:'Fresh diagnostic decision needed'});f.runtime.isRunning=async()=>false
+ let checked=0;f.runtime.assertCaptainDiagnostics=async(actualRun,actualTask)=>{assert.equal(actualRun,run);assert.equal(actualTask,task);checked++}
+ await f.controller.answer('captain',q.id,'Use the completed exact-ticket original diagnosis')
+ assert.equal(checked,1);assert.ok(q.deliveredAt);assert.equal(f.messages.filter(m=>m.id===task.sessionId).length,1)
+}))
+
+test('an immediate new block during admitted guidance starts a fresh diagnostic interval',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ for(const mode of ['answer','message']){
+  await f.controller.report(task.sessionId,{phase:'blocked',note:'Previous blocker'});task.blockedSince=new Date(Date.now()-3601000).toISOString();f.runtime.isRunning=async()=>false;f.runtime.assertCaptainDiagnostics=async()=>{}
+  const send=f.runtime.send;let once=false;f.runtime.send=async(id,...args)=>{const result=await send(id,...args);if(id===task.sessionId&&!once){once=true;await f.controller.report(id,{phase:'blocked',note:`New blocker after ${mode}`})}return result}
+  const started=Date.now()
+  try{if(mode==='answer'){const q=await f.controller.question(task.sessionId,'Resume current work?');await f.controller.answer('captain',q.id,'Concrete remedy')}else await f.controller.message('captain',task.id,'Different concrete remedy')}
+  finally{f.runtime.send=send}
+  assert.equal(task.status,'blocked');assert.ok(Date.parse(task.blockedSince)>=started,`${mode} must not inherit the earlier blocked interval`)
+ }
+}))
+
+test('admitted answer and message end the prior diagnostic interval before a silent idle hold',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0];f.runtime.assertCaptainDiagnostics=async()=>{};f.runtime.isRunning=async()=>false
+ for(const mode of ['answer','message']){
+  await f.controller.report(task.sessionId,{phase:'blocked',note:`Previous ${mode} block`});task.blockedSince=new Date(Date.now()-3601000).toISOString()
+  if(mode==='answer'){const q=await f.controller.question(task.sessionId,'Resume now?');await f.controller.answer('captain',q.id,'Changed prerequisite')}else await f.controller.message('captain',task.id,'Another changed prerequisite')
+  assert.equal(task.blockedSince,undefined)
+  task.phase='waiting';task.lastWakeAt=new Date(Date.now()-61000).toISOString();const observed=Date.now();await f.controller.recoverOwned()
+  assert.equal(task.status,'blocked');assert.ok(Date.parse(task.blockedSince)>=observed)
+ }
+}))
+
 test('recording a diagnostic deferral must not hide persistence failure or admit more work',()=>fixture(async f=>{
  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:2});await f.controller.tick();const task=run.tasks[0],q=await f.controller.question(task.sessionId,'Repair choice?')
  await f.controller.report(task.sessionId,{phase:'blocked',note:'Diagnosis pending'});f.runtime.isRunning=async()=>false;f.runtime.assertCaptainDiagnostics=async()=>{throw new Error('Diagnostic incomplete')};q.answer='Recorded decision';q.action='resume'
