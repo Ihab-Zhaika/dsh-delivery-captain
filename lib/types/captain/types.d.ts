@@ -172,6 +172,7 @@ export interface Run {
         at: string;
         message: string;
     };
+    maintenanceReviewHistory?: MaintenanceReviewRecord[];
     createdAt: string;
     updatedAt: string;
     tasks: Task[];
@@ -239,6 +240,19 @@ export interface ReviewResult {
     reviewerSessionId?: string;
     failureKind?: 'team-evidence' | 'infrastructure' | 'findings';
 }
+export interface MaintenanceReviewRecord {
+    id: string;
+    baseSha: string;
+    headSha: string;
+    budget: number;
+    policy: string;
+    startedAt: string;
+    finishedAt?: string;
+    result?: ReviewResult & {
+        treeSha?: string;
+        directory?: string;
+    };
+}
 export interface RecoveryMaintenance {
     worktree: string;
     repository: string;
@@ -261,6 +275,11 @@ export interface WorkerRuntime {
     renewRecovery?(task: Task, config: RunConfig, generation: number): Promise<void>;
     recoveryHasChanges?(task: Task): Promise<boolean>;
     recoveryMaintenance?(task: Task): Promise<RecoveryMaintenance | undefined>;
+    reviewMaintenance?(run: Run, baseSha: string, headSha: string, signal?: AbortSignal): Promise<ReviewResult & {
+        treeSha?: string;
+        directory?: string;
+    }>;
+    cancelMaintenanceReview?(runId: string): void;
     registerWorkspace?(task: Task, run: Run): Promise<void>;
     restore?(task: Task, run: Run): Promise<void>;
     preflight(config: RunConfig): Promise<void>;

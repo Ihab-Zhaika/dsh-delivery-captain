@@ -1,4 +1,4 @@
-import type { FollowupInput, Phase, Question, Run, RunConfig, Task, TicketProvider, WorkerRuntime } from './types.ts';
+import type { FollowupInput, MaintenanceReviewRecord, Phase, Question, Run, RunConfig, Task, TicketProvider, WorkerRuntime } from './types.ts';
 import { RunStore } from './store.ts';
 export declare const repositoryKey: (c: RunConfig) => string;
 /** Durable orchestration; timers call tick, models only report and answer questions. */
@@ -42,6 +42,7 @@ export declare class CaptainController {
             tasks: Task[];
             tickets: import("./types.ts").Ticket[];
             questions: Question[];
+            maintenanceReviewHistory: undefined;
             recoveryCampaign: {
                 task: Task;
                 fingerprint: string;
@@ -123,6 +124,7 @@ export declare class CaptainController {
             tasks: Task[];
             tickets: import("./types.ts").Ticket[];
             questions: Question[];
+            maintenanceReviewHistory: undefined;
             recoveryCampaign: {
                 task: Task;
                 fingerprint: string;
@@ -186,6 +188,7 @@ export declare class CaptainController {
             tasks: never[];
             tickets: never[];
             questions: never[];
+            maintenanceReviewHistory: undefined;
             version: 1;
             id: string;
             captainSessionId: string;
@@ -303,6 +306,7 @@ export declare class CaptainController {
     private dispatchRecoveryReleases;
     settleRecovery(sessionId: string, kind: 'resolved' | 'external', note: string, affectedTaskIds: string[]): Promise<Run>;
     observeMaintenanceHandoff(sessionId: string): Promise<Task>;
+    reviewMaintenance(sessionId: string, baseSha: string, headSha: string, signal?: AbortSignal): Promise<MaintenanceReviewRecord>;
     /** Already-owned idle recovery is local; the full intake catalog can be slow. */
     private recoverIdleTask;
     private recoverIdleTaskRun;

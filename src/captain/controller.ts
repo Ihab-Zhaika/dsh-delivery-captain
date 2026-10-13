@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
-import type { FollowupInput, Phase, Question, Run, RunConfig, Task, TicketProvider, WorkerRuntime } from './types.ts'
+import type { FollowupInput, MaintenanceReviewRecord, Phase, Question, Run, RunConfig, Task, TicketProvider, WorkerRuntime } from './types.ts'
 import { eligibility, validateConfig, taskDeliveryConfig, taskDeadline, dependencyBlocker } from './scheduler.ts'
 import { RunStore } from './store.ts'
 import { incorporationInstructions } from './runtime.ts'
@@ -83,13 +83,13 @@ export class CaptainController {
     const tasks = this.ownedTasks(run).filter(t => t.sessionId === sessionId)
     return { role: 'worker' as const, coordinatorSessionId: run.captainSessionId,
       ...tasks[0]?.kind==='recovery'?{recoveryScope:run.tasks}:{},
-      run: { ...run, tasks, tickets: tasks.map(t => t.ticket), questions: run.questions.filter(q => tasks.some(t => t.id === q.taskId)),recoveryCampaign:tasks[0]?.kind==='recovery'?run.recoveryCampaign:undefined,recoveryReleases:run.recoveryReleases?.filter(release=>tasks.some(task=>task.id===release.taskId)) } }
+      run: { ...run, tasks, tickets: tasks.map(t => t.ticket), questions: run.questions.filter(q => tasks.some(t => t.id === q.taskId)),maintenanceReviewHistory:undefined,recoveryCampaign:tasks[0]?.kind==='recovery'?run.recoveryCampaign:undefined,recoveryReleases:run.recoveryReleases?.filter(release=>tasks.some(task=>task.id===release.taskId)) } }
   }
   async sessionView(sessionId:string) {
     const seen=new Set<string>();let id:string|null=sessionId
     while(id&&!seen.has(id)&&seen.size<64) {
       seen.add(id);const view=this.view(id)
-      if(view.run)return id===sessionId?view:{...view,role:'worker' as const,...view.role==='coordinator'?{run:{...view.run,tasks:[],tickets:[],questions:[]}}:{}}
+      if(view.run)return id===sessionId?view:{...view,role:'worker' as const,...view.role==='coordinator'?{run:{...view.run,tasks:[],tickets:[],questions:[],maintenanceReviewHistory:undefined}}:{}}
       id=await this.runtime.parentSession?.(id)??null
     }
     const workspace=await this.runtime.workspacePath?.(sessionId)
@@ -190,6 +190,7 @@ export class CaptainController {
       this.stoppingRuns.add(run.id)
       try {
       run.status = 'stopped'
+      this.runtime.cancelMaintenanceReview?.(run.id)
       await this.endLoop(run)
       this.activeProviders.get(run.id)?.cancel?.()
       this.ownedProviders.get(run.id)?.cancel?.()
@@ -709,6 +710,29 @@ export class CaptainController {
     if(JSON.stringify(task.maintenanceHandoff)===JSON.stringify(handoff))return task
     task.maintenanceHandoff=handoff;task.phases.push({phase:task.phase,at:now(),note:`Observed maintenance artifact ${handoff.repository} at ${handoff.headSha}; consumer identity, holds and historical verdicts unchanged.`});await this.save(run);return task
   }
+  async reviewMaintenance(sessionId:string,baseSha:string,headSha:string,signal?:AbortSignal):Promise<MaintenanceReviewRecord>{
+    const run=this.captain(sessionId),task=run.recoveryCampaign?.task
+    if(run.status!=='running'||!task?.maintenanceHandoff||!this.runtime.reviewMaintenance||run.config.reviewBackend!=='agent'||!/^[a-f0-9]{40}$/i.test(baseSha)||!/^[a-f0-9]{40}$/i.test(headSha))throw new Error('Explicit maintenance review requires exact coordinator, observed ownership and frozen range')
+    if(this.recoveryGrades.has(run.id))throw new Error('A maintenance review is already running')
+    const reviewRun={...run,config:structuredClone(run.config)},budget=reviewRun.config.ocrMaxTokensBudget??1_000_000,policy=JSON.stringify([reviewRun.config.reviewBackend,reviewRun.config.ocrAdditionalCheck??false,budget]),revision=run.coordinatorRevision,version=task.transitionVersion
+    const prior=[...(run.maintenanceReviewHistory??[])].reverse().find(r=>r.baseSha===baseSha&&r.headSha===headSha&&r.policy===policy&&r.finishedAt)
+    // Repeating a completed tuple never silently buys another review or
+    // adopts its old verdict as current. The native report remains history.
+    if(prior)return {...prior,result:{...prior.result!,passed:false,findings:[...prior.result!.findings,'Retained historical receipt; no new current-head adoption or paid retry'],failureKind:'infrastructure'}}
+    const record:MaintenanceReviewRecord={id:randomUUID(),baseSha,headSha,budget,policy,startedAt:now()}
+    ;(run.maintenanceReviewHistory??=[]).push(record)
+    const work=(async()=>{
+      await this.save(run)
+      try{
+        if(this.disposed||run.status!=='running'||run.coordinatorRevision!==revision||task.transitionVersion!==version)throw new Error('Maintenance review changed before native admission')
+        record.result=await this.runtime.reviewMaintenance!(reviewRun,baseSha,headSha,signal)
+        if(this.disposed||run.status!=='running'||run.coordinatorRevision!==revision||task.transitionVersion!==version||policy!==JSON.stringify([run.config.reviewBackend,run.config.ocrAdditionalCheck??false,run.config.ocrMaxTokensBudget??1_000_000]))record.result={...record.result,passed:false,findings:[...record.result.findings,'Maintenance review policy or ownership changed; retain native receipt without adoption'],failureKind:'infrastructure'}
+      }catch(error){record.result={passed:false,baseSha,headSha,report:String(error),findings:[String(error)],backend:'agent',failureKind:'infrastructure'}}
+      record.finishedAt=now();await this.save(run)
+    })()
+    this.recoveryGrades.set(run.id,work)
+    try{await work;return record}finally{this.recoveryGrades.delete(run.id)}
+  }
   /** Already-owned idle recovery is local; the full intake catalog can be slow. */
   private recoverIdleTask(run:Run,task:Task,provider:TicketProvider):Promise<void> {
     const existing=this.idleRecoveries.get(task.id)
@@ -975,6 +999,7 @@ export class CaptainController {
 
   async dispose(): Promise<void> {
     this.disposed = true
+    for(const run of this.runs.values())this.runtime.cancelMaintenanceReview?.(run.id)
     for(const run of this.runs.values())run.coordinatorRevision=(run.coordinatorRevision??0)+1
     for(const run of this.runs.values())try{await this.runtime.coordinatorLoop?.(run,'shutdown')}catch(error){run.coordinatorLoopError=String(error)}
     for (const provider of this.activeProviders.values()) provider.cancel?.()

@@ -61,6 +61,7 @@ export interface Run {
   recoveryCampaign?:{task:Task;fingerprint:string;affectedTaskIds:string[];affectedHoldRevisions?:Record<string,number>;generation?:number;lastAttemptAt?:string;lastSentFingerprint?:string;error?:string;settlement?:{kind:'resolved'|'external';at:string;note:string;fingerprint:string}};
   recoveryReleases?:Array<{taskId:string;sourceHead?:string;targetSha?:string;note:string;key:string;holdRevision?:number;queuedAt?:string;revokedAt?:string;error?:string}>;
   schedulerFailures?:{count:number;at:string;message:string};
+  maintenanceReviewHistory?:MaintenanceReviewRecord[];
   createdAt: string; updatedAt: string; tasks: Task[]; tickets: Ticket[];
   questions: Question[]; error?: string; lastPollAt?: string;
   recoveryPending?: boolean;
@@ -85,6 +86,7 @@ export interface TicketProvider {
   createFollowup(task: Task, input: FollowupInput, permitted?: () => boolean): Promise<string>;
 }
 export interface ReviewResult { passed: boolean; headSha: string; baseSha?: string; report: string; findings: string[];backend?:'agent'|'ocr';policyStamp?:string;reviewerSessionId?:string;failureKind?: 'team-evidence' | 'infrastructure' | 'findings' }
+export interface MaintenanceReviewRecord {id:string;baseSha:string;headSha:string;budget:number;policy:string;startedAt:string;finishedAt?:string;result?:ReviewResult&{treeSha?:string;directory?:string}}
 export interface RecoveryMaintenance {worktree:string;repository:string;branch:string;baseSha:string;headSha:string;treeSha:string;incorporated:boolean;loaded:boolean}
 export interface WorkerRuntime {
   coordinatorLoop?(run:Run,action:CoordinatorLoopAction):Promise<void>;
@@ -98,6 +100,8 @@ export interface WorkerRuntime {
   renewRecovery?(task:Task,config:RunConfig,generation:number):Promise<void>;
   recoveryHasChanges?(task:Task):Promise<boolean>;
   recoveryMaintenance?(task:Task):Promise<RecoveryMaintenance|undefined>;
+  reviewMaintenance?(run:Run,baseSha:string,headSha:string,signal?:AbortSignal):Promise<ReviewResult&{treeSha?:string;directory?:string}>;
+  cancelMaintenanceReview?(runId:string):void;
   registerWorkspace?(task: Task, run: Run): Promise<void>;
   restore?(task: Task, run: Run): Promise<void>;
   preflight(config: RunConfig): Promise<void>;

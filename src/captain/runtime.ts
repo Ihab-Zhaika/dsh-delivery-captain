@@ -23,6 +23,7 @@ import {recoveryFacts} from './backlog.ts'
 import {fileURLToPath} from 'node:url'
 import {runAgentReview} from './agent-review.ts'
 import {inspectRecoveryMaintenance} from './maintenance.ts'
+import {reviewMaintenanceRange} from './maintenance-review.ts'
 import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { isAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { renderPrompt, type PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
@@ -226,7 +227,20 @@ export function installDeliveryPolicy(ctx: Context, runs: () => readonly Run[]):
       const system=options.messages.filter(message=>message.role==='system').flatMap(message=>message.content).map(block=>block.type==='text'?block.text:'').join('\n')
       if(!system.includes(admission.text))throw new Error('Effective SYSTEM delivery policy missing from native request')
     }
-    return(async function*(){await validate();const iterator=next()[Symbol.asyncIterator]();try{while(true){await validate();const item=await iterator.next();await validate();if(item.done)return;yield item.value}}finally{await iterator.return?.()}})()
+    return(async function*(){
+      await validate();const iterator=next()[Symbol.asyncIterator]()
+      let completed=false,failed=false,primary:unknown
+      try{
+        while(true){await validate();const item=await iterator.next();await validate();if(item.done){completed=true;break}yield item.value}
+      }catch(error){failed=true;primary=error;throw error}
+      finally{
+        try{await iterator.return?.()}
+        catch(cleanup){if(failed)throw new AggregateError([primary,cleanup],'Delivery stream failed and owned cleanup also failed',{cause:primary});throw cleanup}
+        // Only normal exhaustion can settle successfully. Failed/aborted paths
+        // retain their original outcome; a later policy check cannot mask it.
+        if(completed)await validate()
+      }
+    })()
   })
   ctx.effect(()=>()=>{active=false;for(const release of [...releases])release()},'darkingdoom: owned policy registrations')
 }
@@ -239,6 +253,7 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
   const configured = new WeakSet<Agent>()
   const stopped = new Set<string>()
   const reviews = new Map<string, AbortController>()
+  const maintenanceReviewRoots=new Map<string,string>()
   const controlCalls = new Set<string>()
   function currentWorkerPrompt(sessionId: string, text: string): string {
     const worker = workers.get(sessionId)
@@ -616,6 +631,25 @@ export function createRuntime(ctx: Context, options: RuntimeOptions = {}): Worke
       return !!handoff&&(!handoff.incorporated||!handoff.loaded)
     },
     recoveryMaintenance:task=>inspectRecoveryMaintenance(task,fileURLToPath(new URL('../../',import.meta.url)),loadedHost,runCommandImpl),
+    async reviewMaintenance(run,baseSha,headSha,signal){
+      const task=run.recoveryCampaign?.task,parent=ctx.agents.get(run.captainSessionId as SessionId)
+      if(!task?.maintenanceHandoff||!parent||run.config.reviewBackend!=='agent')throw new Error('Observed maintenance ownership and exact coordinator are required')
+      if(reviews.has(task.sessionId))throw new Error('A review is already running for this owner')
+      const controller=new AbortController(),abort=()=>controller.abort(signal?.reason)
+      signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();reviews.set(task.sessionId,controller);maintenanceReviewRoots.set(run.id,task.sessionId)
+      try{
+        const root=fileURLToPath(new URL('../../',import.meta.url)),handoff=await inspectRecoveryMaintenance(task,root,loadedHost,runCommandImpl)
+        if(!handoff?.incorporated||!handoff.loaded)throw new Error('Maintenance artifact is not verified in the loaded maintainer checkout')
+        const result=await reviewMaintenanceRange(root,baseSha,headSha,ocrTokensBudget(run.config),runCommandImpl,(input,currentSignal)=>runAgentReview(ctx,parent,input,currentSignal),controller.signal)
+        try{
+          const current=await inspectRecoveryMaintenance(task,root,loadedHost,runCommandImpl)
+          if(!current?.incorporated||!current.loaded)throw new Error('Maintenance handoff changed during native review')
+          if(ctx.agents.get(run.captainSessionId as SessionId)!==parent)throw new Error('Coordinator identity changed during maintenance review')
+        }catch(error){return {...result,passed:false,findings:[...result.findings,String(error)],failureKind:'infrastructure'}}
+        return result
+      }finally{signal?.removeEventListener('abort',abort);reviews.delete(task.sessionId);maintenanceReviewRoots.delete(run.id)}
+    },
+    cancelMaintenanceReview(runId){const root=maintenanceReviewRoots.get(runId);if(root)reviews.get(root)?.abort(new Error('Maintenance review cancelled by its coordinator lifecycle'))},
     async containsTarget(task,sha){if(!/^[a-f0-9]{40}$/i.test(sha))return false;if((await runCommandImpl('git',['branch','--show-current'],{cwd:task.worktree})).trim()!==task.branch)throw new Error('Worktree branch ownership changed');try{await runCommandImpl('git',['merge-base','--is-ancestor',sha,'HEAD'],{cwd:task.worktree});return true}catch{return false}},
     async renewRecovery(task,config,generation){
       if(task.kind!=='recovery')throw new Error('Only recovery workspace renewal is supported')

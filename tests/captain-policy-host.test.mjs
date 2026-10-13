@@ -16,24 +16,24 @@ const loadModule=async name=>import(pathToFileURL(requireBase.resolve('@deepseek
 const model={provider:'local-policy-test',id:'fixture',name:'Fixture',context:{contextWindow:262144},defaultMaxTokens:8192}
 const chunks=[{type:'block-start',index:0,blockType:'text'},{type:'text-delta',index:0,text:'done'},{type:'block-end',index:0,block:{type:'text',text:'done'}},{type:'usage',usage:{inputTokens:10,outputTokens:1}},{type:'finish',reason:{kind:'stop'}}]
 const frozenPersona='You are reviewer. MANDATORY independent OCR --max-tokens-budget 1000000. Preserve role, source scope and original attempts.'
-async function fixture(t,{complete=false,persistence=false}={}){
+async function fixture(t,{complete=false,persistence=false,returnHook,iterationHook,responseChunks=chunks}={}){
   const dir=await mkdtemp(join(tmpdir(),'captain-policy-host-')),host=new Context(),fibers=[],handles=[],requests=[],errors=[],journal=[]
   t.after(async()=>{for(const handle of handles.reverse())await handle.dispose();for(const fiber of fibers.reverse())await fiber.dispose();await rm(dir,{recursive:true,force:true})})
   async function mount(name,config){const m=await loadModule(name),fiber=host.plugin(m.default,config);fibers.push(fiber);await fiber.await()}
   await mount('session');await mount('session-projection');await mount('agent');await mount('llm',{});await mount('system-prompt',{includeHarnessIdentity:false});await mount('tools',{mode:'native'});if(persistence)await mount('session-persistence-jsonl',{root:join(dir,'private-sessions'),compression:'none'});await mount('agent-loop',{agents:[],maxParallelToolCalls:1})
-  host.on('agent/error',payload=>errors.push(String(payload.error)))
+  host.on('agent/error',payload=>{errors.push(String(payload.error));journal.push({nativeError:payload.error})})
   host.on('session/event',(session,event)=>journal.push({id:session.id,event}))
   let prepareHook,streamHook,lookupHook
   class Adapter extends LlmAdapter{
     async listModels(){return[model]}
     async resolveModel(provider,id){if(prepareHook)await prepareHook();return{...model,provider,id}}
-    async *stream(options){requests.push({json:JSON.stringify(options),marked:isAgentLoopRequest(options),frozen:Object.isFrozen(options),session:options.sessionId});try{for(let index=0;index<chunks.length;index++){if(streamHook)await streamHook(index);yield chunks[index]}}finally{journal.push({streamClosed:true,session:options.sessionId})}}
+    async *stream(options){requests.push({json:JSON.stringify(options),marked:isAgentLoopRequest(options),frozen:Object.isFrozen(options),session:options.sessionId});const response=requests.length===1?responseChunks:chunks;try{for(let index=0;index<response.length;index++){if(streamHook)await streamHook(index);yield response[index]}}finally{journal.push({streamClosed:true,session:options.sessionId})}}
   }
   host.llm.registerAdapter(['local-policy-test'],new Adapter())
   // A native downstream observer registered before policy consumes only
   // chunks that escape the policy wrapper, not the adapter's private output.
   host.on('llm/stream',async function*(_options,next){for await(const item of next()){journal.push({delivered:true,item});yield item}})
-  host.tools.register({name:'read',description:'Read-only synthetic fixture tool',parameters:{},output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]},async execute(){return'fixture'}})
+  host.tools.register({name:'read',description:'Read-only synthetic fixture tool',parameters:{},output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]},async execute(){journal.push({toolExecuted:true});return'fixture'}})
   const rootHandle=await host.agents.create({sessionId:'policy-root',meta:{cwd:dir},agentOptions:{provider:model.provider,model:model.id}});handles.push(rootHandle)
   const root=rootHandle.agent,at=Date.now()
   const config={provider:'github',repository:'test/repo',workspace:dir,milestones:['M1'],remote:'origin',targetBranch:'main',parallelism:1,maxTeamMembers:2,pollSeconds:30,maxTickets:0,maxRepairRounds:3,maxTaskMinutes:480,verifyCommands:['node --version'],workerPreset:'standard',requireBrowser:false,requireMemory:false,reviewBackend:'agent',ocrAdditionalCheck:false,ocrMaxTokensBudget:5_000_000}
@@ -52,12 +52,50 @@ async function fixture(t,{complete=false,persistence=false}={}){
   let policyEnabled=true
   const install=ctx=>{if(policyEnabled)runtime.installDeliveryPolicy?.(ctx,()=>[run])}
   let policyFiber=host.plugin({inject:['agents','systemPrompt','subagents','sessionController'],apply(ctx){install(ctx)}});fibers.push(policyFiber);await policyFiber.await()
+  if(returnHook||iterationHook)host.on('llm/stream',(options,next)=>{
+    const iterator=next()[Symbol.asyncIterator]();let index=0
+    return {[Symbol.asyncIterator](){return this},async next(){await iterationHook?.(index++);return iterator.next()},async return(value){journal.push({ownedReturn:true,session:options.sessionId});await returnHook?.();return await iterator.return?.(value)??{done:true,value:undefined}}}
+  })
   const descriptor=snapshotSubagentDescriptor({mode:'continuable',provider:'spawn',label:'agent-teams:policy-team:reviewer',persona:frozenPersona,toolFilter:{allow:['read']},agentProvider:model.provider,agentModel:model.id})
   const childHandle=await host.agents.create({sessionId:'policy-child',parentAgent:root,meta:{cwd:dir,parentSession:root.id,origin:'subagent',delegationDepth:1},agentOptions:{provider:model.provider,model:model.id},setup(ctx,agent){applyChildComposition(ctx,root,{persona:frozenPersona,toolFilter:{allow:['read']}});if(complete)ctx.systemPrompt.section({name:'negative-complete',order:0,text:frozenPersona,complete:true});agent.session.append('subagent/descriptor',descriptor)}});handles.push(childHandle)
   let child=childHandle.agent
   async function drive(agent=child){agent.followup(createUserMessage({source:{kind:'user'},content:[{type:'text',text:'Review the assigned source; preserve history.'}]}));await agent.whenIdle()}
   return{host,run,task,root,get child(){return child},team,teamFile,requests,errors,journal,drive,setPrepareHook:fn=>prepareHook=fn,setStreamHook:fn=>streamHook=fn,setLookupHook:fn=>lookupHook=fn,setCatalog:rows=>catalog=rows,setInheritedReceipt:()=>inheritedReceipt=true,async discardChild(){await childHandle.dispose()},async unloadPolicy(){policyEnabled=false;await policyFiber.dispose()},async coldResume(){await childHandle.dispose();const resumed=await host.agents.resume({resumeSessionId:'policy-child',parentAgent:root,agentOptions:{provider:model.provider,model:model.id},setup(ctx){applyChildComposition(ctx,root,{persona:descriptor.persona,toolFilter:descriptor.toolFilter})}});handles.push(resumed);child=resumed.agent;return child},async remount(){await policyFiber.dispose();policyFiber=host.plugin({inject:['agents','systemPrompt','subagents','sessionController'],apply(ctx){install(ctx)}});fibers.push(policyFiber);await policyFiber.await()},saveTeam:()=>writeFile(teamFile,JSON.stringify(team))}
 }
+
+for(const change of ['WAIT','policy','attempt'])test(`F2 normal native completion revoked during awaited owned return ${change} cannot settle successfully`,{timeout:20000},async t=>{
+ let f;f=await fixture(t,{returnHook:async()=>{if(change==='WAIT')f.task.holdRevision=(f.task.holdRevision??0)+1;if(change==='policy')f.run.coordinatorRevision++;if(change==='attempt')f.team.tasks[0].attemptId='revoked-after-done';await f.saveTeam()}})
+ await f.drive();assert.equal(f.requests.length,1);assert.equal(f.journal.filter(e=>e.ownedReturn&&e.session===f.child.id).length,1)
+ assert.equal(f.child.session.snapshotEvents().filter(e=>e.type==='assistant/message').length,0,'Successful assistant settlement must follow the cleanup authority fence')
+ assert.ok(f.errors.some(e=>/policy|ownership|scope/i.test(e)),JSON.stringify(f.errors));assert.equal(f.journal.some(e=>e.toolExecuted),false)
+})
+test('F2 unchanged authority and unrelated sibling progress settle once after owned cleanup',async t=>{
+ let f;f=await fixture(t,{returnHook:async()=>{f.team.tasks.push({id:'sibling',subject:'Other completed work',assignee:'teammate',status:'completed',dependencies:[],output:'Genuine unrelated progress',createdAt:Date.now(),updatedAt:Date.now()});await f.saveTeam()}})
+ await f.drive();assert.equal(f.errors.length,0,JSON.stringify(f.errors));assert.equal(f.child.session.snapshotEvents().filter(e=>e.type==='assistant/message').length,1);assert.equal(f.journal.filter(e=>e.ownedReturn).length,1)
+})
+for(const primary of ['authority','iterator'])test(`F2 ${primary} failure retains original precedence and separate owned cleanup fault`,async t=>{
+ const f=await fixture(t,{returnHook:async()=>{throw Error('cleanup-secondary')},...(primary==='iterator'?{iterationHook:async index=>{if(index===1)throw Error('iterator-primary')}}:{})})
+ if(primary==='authority')f.setStreamHook(async index=>{if(index!==1)return;f.task.holdRevision=(f.task.holdRevision??0)+1;await f.saveTeam()})
+ await f.drive();const error=f.journal.find(e=>e.nativeError)?.nativeError
+ assert.ok(error instanceof AggregateError,'Primary and cleanup failures must both survive');assert.equal(error.errors.length,2);assert.match(String(error.errors[0]),primary==='iterator'?/iterator-primary/:/policy|ownership|scope/i);assert.match(String(error.errors[1]),/cleanup-secondary/);assert.equal(error.cause,error.errors[0]);assert.equal(f.journal.filter(e=>e.ownedReturn).length,1);assert.equal(f.child.session.snapshotEvents().filter(e=>e.type==='assistant/message').length,0)
+})
+test('F2 cleanup-only failure remains nonpassing and is not replaced by a post-check',async t=>{
+ let f;f=await fixture(t,{returnHook:async()=>{f.task.holdRevision=(f.task.holdRevision??0)+1;throw Error('cleanup-only')}})
+ await f.drive();assert.ok(f.errors.some(e=>/cleanup-only/.test(e)));assert.equal(f.child.session.snapshotEvents().filter(e=>e.type==='assistant/message').length,0);assert.equal(f.journal.filter(e=>e.ownedReturn).length,1)
+})
+const toolChunks=[{type:'block-start',index:0,blockType:'tool-call'},{type:'tool-call-delta',index:0,id:'fixture-call',name:'read',argumentsDelta:'{}'},{type:'block-end',index:0,block:{type:'tool-call',id:'fixture-call',name:'read',arguments:'{}'}},{type:'usage',usage:{inputTokens:10,outputTokens:1}},{type:'finish',reason:{kind:'tool-calls'}}]
+test('F2 a tool call buffered before cleanup cannot dispatch after a revoked normal completion',async t=>{
+ let f;f=await fixture(t,{responseChunks:toolChunks,returnHook:async()=>{f.task.holdRevision=(f.task.holdRevision??0)+1}})
+ await f.drive();assert.equal(f.requests.length,1);assert.equal(f.journal.filter(e=>e.ownedReturn).length,1);assert.equal(f.journal.some(e=>e.toolExecuted),false);assert.equal(f.child.session.snapshotEvents().filter(e=>e.type==='assistant/message').length,0)
+})
+test('F2 unchanged normal cleanup permits the actual buffered tool dispatch',async t=>{
+ const f=await fixture(t,{responseChunks:toolChunks,returnHook:async()=>{}})
+ await f.drive();assert.equal(f.errors.length,0,JSON.stringify(f.errors));assert.ok(f.journal.some(e=>e.toolExecuted),'Fixture must demonstrate a real permitted tool call');assert.equal(f.requests.length,2)
+})
+test('F2 parent cancellation during cleanup retains cleanup without successful settlement',async t=>{
+ let f;f=await fixture(t,{returnHook:async()=>{f.child.cancel({kind:'parent'})}})
+ await f.drive();assert.equal(f.journal.filter(e=>e.ownedReturn).length,1);const messages=f.child.session.snapshotEvents().filter(e=>e.type==='assistant/message');assert.ok(messages.every(e=>e.data.interrupted===true),JSON.stringify(messages));assert.equal(f.journal.some(e=>e.toolExecuted),false)
+})
 
 for(const boundary of ['lookup','stream'])test(`A-R1 unrelated teammate progress at ${boundary} preserves unchanged actual owner response`,{timeout:20000},async t=>{
  const f=await fixture(t);let updates=0

@@ -1269,6 +1269,29 @@ test('a later pause during the final maintenance activity check revokes the pend
  const pending=f.controller.observeMaintenanceHandoff('captain');await began;await f.controller.control('captain','pause');release()
  await assert.rejects(pending,/changed/);assert.equal(root.maintenanceHandoff,undefined)
 }))
+test('a prospective maintenance primary review is coordinator-only, single-flight, tuple-specific and leaves tickets unchanged',()=>fixture(async f=>{
+ f.config.reviewBackend='agent';const run=await recoveryFixture(f);await f.controller.control('captain','finish-existing');await f.controller.tick();const root=run.recoveryCampaign.task;root.maintenanceHandoff={headSha:'a'.repeat(40)}
+ const base='b'.repeat(40),head='c'.repeat(40);let release,enter,calls=0;const gate=new Promise(r=>release=r),entered=new Promise(r=>enter=r),ids=run.tasks.map(t=>t.id)
+ f.runtime.reviewMaintenance=async(_run,b,h)=>{calls++;assert.equal(b,base);assert.equal(h,head);enter();await gate;return{passed:true,baseSha:base,headSha:head,treeSha:'d'.repeat(40),report:'Authentic fixture receipt',findings:[],backend:'agent',reviewerSessionId:'fixture-native-child'}}
+ await assert.rejects(f.controller.reviewMaintenance(root.sessionId,base,head),/captain/)
+ const pending=f.controller.reviewMaintenance('captain',base,head);await entered;await assert.rejects(f.controller.reviewMaintenance('captain',base,head),/running/);release();const result=await pending
+ assert.equal(result.result.passed,true);assert.equal(calls,1);assert.deepEqual(run.tasks.map(t=>t.id),ids);assert.equal(f.merges.length,0);assert.equal(run.intakeMode,'existing-only');assert.equal(f.controller.view(run.tasks[0].sessionId).run.maintenanceReviewHistory,undefined)
+ const old=await f.controller.reviewMaintenance('captain',base,head);assert.equal(calls,1,'Same exact tuple/policy receipt must not launch a timer replay');assert.equal(old.result.passed,false,'Historical receipt cannot be silently adopted as current')
+}))
+test('a maintenance primary result revoked by a later pause remains nonpassing history',()=>fixture(async f=>{
+ f.config.reviewBackend='agent';const run=await recoveryFixture(f);await f.controller.tick();run.recoveryCampaign.task.maintenanceHandoff={headSha:'a'.repeat(40)};let release,enter;const gate=new Promise(r=>release=r),entered=new Promise(r=>enter=r)
+ f.runtime.reviewMaintenance=async()=>{enter();await gate;return{passed:true,baseSha:'b'.repeat(40),headSha:'c'.repeat(40),report:'Native structured receipt',findings:[],backend:'agent'}}
+ const pending=f.controller.reviewMaintenance('captain','b'.repeat(40),'c'.repeat(40));await entered;await f.controller.control('captain','pause');release();const result=await pending
+ assert.equal(result.result.passed,false);assert.match(result.result.findings.join(' '),/changed/);assert.equal(run.status,'paused');assert.equal(f.merges.length,0)
+}))
+for(const action of ['stop','dispose'])test(`maintenance review under a terminal archived owner cancels and settles during ${action}`,()=>fixture(async f=>{
+ f.config.reviewBackend='agent';const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;root.status='failed';root.maintenanceHandoff={headSha:'a'.repeat(40)};let enter,cancel,called=false;const began=new Promise(r=>enter=r),gate=new Promise(r=>cancel=r)
+ f.runtime.reviewMaintenance=async()=>{enter();await gate;return{passed:false,baseSha:'b'.repeat(40),headSha:'c'.repeat(40),report:'Owned native review cancelled',findings:['cancelled'],backend:'agent'}}
+ f.runtime.cancelMaintenanceReview=id=>{assert.equal(id,run.id);called=true;cancel()}
+ const pending=f.controller.reviewMaintenance('captain','b'.repeat(40),'c'.repeat(40));await began
+ const closing=action==='stop'?f.controller.control('captain','stop'):f.controller.dispose();await new Promise(r=>setTimeout(r,20));try{assert.equal(called,true,'Terminal task filtering must not skip paid review ownership')}finally{cancel()}
+ await closing;assert.equal((await pending).result.passed,false)
+}))
 test('external settlement cannot release workers and dirty recovery code cannot bypass PR gates',()=>fixture(async f=>{
  const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId)
  f.runtime.assertRecoveryDiagnostics=async()=>{};f.runtime.recoveryHasChanges=async()=>true
