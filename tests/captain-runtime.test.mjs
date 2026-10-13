@@ -20,6 +20,37 @@ async function repo(t) {
   return root
 }
 test('runtime factory exists', () => assert.equal(typeof runtime.createRuntime, 'function'))
+
+test('independent agent primary performs CI and immutable full-path snapshots without invoking OCR',async t=>{
+ const root=await repo(t),base=git(root,'rev-parse','HEAD');git(root,'switch','-c','work')
+ await writeFile(join(root,'a.txt'),'changed');await writeFile(join(root,'test-file.txt'),'new test');git(root,'add','.');git(root,'commit','-m','Change source and test')
+ const item=task({worktree:root,baseSha:base,branch:'work'}),cfg={...config,workspace:root,targetBranch:'main',reviewBackend:'agent'};let observed
+ const noOcr=async(file,args,options)=>{if(file==='ocr')throw new Error('OCR should not run');return runner(file,args,options)}
+ const result=await review.reviewTask(item,cfg,noOcr,undefined,undefined,async input=>{observed=input;assert.deepEqual(input.paths.map(p=>p.path),['a.txt','test-file.txt']);for(const p of input.paths)assert.match(await (await import('node:fs/promises')).readFile(p.snapshotPath,'utf8'),/Immutable independent review snapshot/);return{report:'{"native":"structured-complete"}',findings:[],reviewerSessionId:'independent'}})
+ assert.equal(result.passed,true,result.report);assert.equal(result.backend,'agent');assert.equal(result.reviewerSessionId,'independent');assert.equal(observed.baseSha,base);assert.equal(observed.headSha,git(root,'rev-parse','HEAD'));assert.equal(observed.treeSha,git(root,'rev-parse','HEAD^{tree}'));assert.equal(observed.maxTokensBudget,1_000_000)
+})
+test('missing independent adapter fails closed and optional OCR transport failure does not impersonate its verdict',async t=>{
+ const root=await repo(t),base=git(root,'rev-parse','HEAD');git(root,'switch','-c','work');await writeFile(join(root,'a.txt'),'changed');git(root,'commit','-am','Change')
+ const item=task({worktree:root,baseSha:base,branch:'work'}),cfg={...config,workspace:root,targetBranch:'main',reviewBackend:'agent'}
+ const absent=await review.reviewTask(item,cfg,runner);assert.equal(absent.passed,false);assert.match(absent.report,/adapter.*unavailable/)
+ const unavailable=async(file,args,options)=>{if(file==='ocr')throw new Error('Provider capacity failure');return runner(file,args,options)}
+ const extra=await review.reviewTask(item,{...cfg,ocrAdditionalCheck:true},unavailable,undefined,undefined,async()=>({report:'{"native":"independent-complete"}',findings:[],reviewerSessionId:'reviewer'}))
+ assert.equal(extra.passed,true,extra.report);assert.equal(JSON.parse(extra.report).optionalOcr.status,'incomplete');assert.equal(extra.backend,'agent')
+})
+test('native agent preflight does not require optional OCR installation',async()=>{
+ const h=host(),calls=[];h.ctx.subagents.getProvider=()=>({inheritsParentContext:false,capabilities:{toolFilter:true,outputSchema:true,persona:true}})
+ const rt=runtime.createRuntime(h.ctx,{runner:async(file,args)=>{calls.push([file,args]);if(file==='ocr')throw new Error('Not installed');return ''}})
+ await rt.preflight({...config,reviewBackend:'agent'});assert.ok(calls.every(c=>c[0]!=='ocr'))
+})
+
+test('literal wildcard filenames retain their own changed hunks in immutable snapshots',async t=>{
+ const root=await repo(t),base=git(root,'rev-parse','HEAD');git(root,'switch','-c','work');await writeFile(join(root,'file[1].txt'),'unique_literal_hunk');git(root,'add','.');git(root,'commit','-m','Literal wildcard path')
+ const item=task({worktree:root,baseSha:base,branch:'work'}),cfg={...config,workspace:root,targetBranch:'main',reviewBackend:'agent'}
+ const result=await review.reviewTask(item,cfg,runner,undefined,undefined,async input=>{const selected=input.paths.find(p=>p.path==='file[1].txt');assert.ok(selected);assert.match(await (await import('node:fs/promises')).readFile(selected.snapshotPath,'utf8'),/\+unique_literal_hunk/);return{report:'{"native":"complete"}',findings:[],reviewerSessionId:'reviewer'}})
+ assert.equal(result.passed,true,result.report)
+ assert.equal(await review.isReviewCurrent(item,{...cfg,ocrAdditionalCheck:true},result,runner),false)
+ assert.equal(await review.isReviewCurrent(item,{...cfg,ocrMaxTokensBudget:1000},result,runner),false)
+})
 test('worker requires independent full-range OCR with the same explicit total budget as controller review', () => {
   for (const [budget, expected] of [[undefined, '1000000'], [2_000_000, '2000000']]) {
     const prompt = runtime.workerPrompt(task({ worktree: '/worker', baseSha: 'base' }), { ...config, ...(budget === undefined ? {} : { ocrMaxTokensBudget: budget }) })
@@ -444,7 +475,7 @@ test('cached passed review stays valid only for clean exact head and current tar
   const cfg = { ...config, workspace: root, targetBranch: 'target' }
   const h = host(); await seedTeam(root, h, item)
   const rt = runtime.createRuntime(h.ctx, { runner })
-  const evidence = { passed: true, headSha: head, baseSha: base, report: '{}', findings: [] }
+  const evidence = { policyStamp:review.reviewPolicyStamp(cfg),passed: true, headSha: head, baseSha: base, report: '{}', findings: [] }
   assert.equal(await rt.isReviewCurrent(item, cfg, evidence), true)
   assert.equal(await rt.isReviewCurrent(item, cfg, { ...evidence, passed: false }), false)
   assert.equal(await rt.isReviewCurrent(item, cfg, { ...evidence, baseSha: undefined }), false)

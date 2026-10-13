@@ -1,4 +1,6 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm,writeFile } from 'node:fs/promises'
+import {createHash} from 'node:crypto'
+import type {AgentReviewInput} from './agent-review.ts'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { CommandRunner, Phase, ReviewResult, RunConfig, Task } from './types.ts'
@@ -15,6 +17,7 @@ function object(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('Malformed OCR report object')
   return value as Record<string, unknown>
 }
+export function reviewPolicyStamp(config:RunConfig):string{return JSON.stringify([config.reviewBackend??'ocr',config.ocrAdditionalCheck??false,ocrTokensBudget(config)])}
 function rows(value: unknown): Record<string, unknown>[] {
   // Go's nil slices are encoded as null; the contract treats them as empty sets.
   if (value === null) return []
@@ -52,13 +55,15 @@ export function parseOcrReport(text: string, head: string, base: string, changed
   return findings
 }
 
-export async function reviewTask(task: Task, config: RunConfig, run: CommandRunner, onPhase?: (phase: Phase) => Promise<void>, signal?: AbortSignal): Promise<ReviewResult> {
+export type IndependentReviewRunner=(input:AgentReviewInput,signal:AbortSignal)=>Promise<{report:string;findings:string[];reviewerSessionId:string}>
+export async function reviewTask(task: Task, config: RunConfig, run: CommandRunner, onPhase?: (phase: Phase) => Promise<void>, signal?: AbortSignal,agentReview?:IndependentReviewRunner): Promise<ReviewResult> {
   let headSha = ''; let baseSha: string | undefined; let report = ''; const findings: string[] = []
   const directory = await mkdtemp(join(tmpdir(), 'darkingdoom-review-'))
   const timeoutMs = Math.max(1, config.maxTaskMinutes) * 60_000
   const started = Date.parse(task.startedAt)
   const deadline = Number.isFinite(started) ? taskDeadline({...task,phases:task.phases??[]},config.maxTaskMinutes) : Date.now()
   const remaining = () => { signal?.throwIfAborted(); const ms = deadline - Date.now(); if (ms <= 0) throw new Error('Review timed out'); return ms }
+  const backend=config.reviewBackend??'ocr';let reviewerSessionId:string|undefined
   const bounded: CommandRunner = (file, args, options) => run(file, args, { ...options, signal, timeoutMs: Math.min(options?.timeoutMs ?? Infinity, remaining()) })
   const unchanged = async () => {
     if (await resolveHead(task, bounded) !== headSha) throw new Error('Worktree HEAD changed during review')
@@ -80,25 +85,37 @@ export async function reviewTask(task: Task, config: RunConfig, run: CommandRunn
       await bounded(shell, args, { cwd: task.worktree })
       await unchanged()
     }
-    const paths = (await bounded('git', ['diff', '--no-renames', '--name-only', '-z', target, headSha], { cwd: task.worktree })).split('\0').filter(Boolean)
+    const paths = (await bounded('git', ['diff', '--no-ext-diff','--no-textconv','--no-renames', '--name-only', '-z', target, headSha], { cwd: task.worktree })).split('\0').filter(Boolean)
     const output = join(directory, 'review.json')
     await unchanged()
     await onPhase?.('review')
-    await bounded('ocr', ['review', '--audience', 'agent', '--from', target, '--to', headSha, '--format', 'json', '--output', output, '--background', `${task.ticket.title}\n${task.ticket.body}`, '--max-tokens-budget', String(tokensBudget), '--timeout', String(Math.max(1, Math.ceil(remaining() / 60_000)))], { cwd: task.worktree })
-    report = await readFile(output, 'utf8')
-    findings.push(...parseOcrReport(report, headSha, target, paths))
+    const ocr=async()=>{await bounded('ocr', ['review', '--audience', 'agent', '--from', target, '--to', headSha, '--format', 'json', '--output', output, '--background', `${task.ticket.title}\n${task.ticket.body}`, '--max-tokens-budget', String(tokensBudget), '--concurrency','1','--timeout', String(Math.max(1, Math.ceil(remaining() / 60_000)))], { cwd: task.worktree });const text=await readFile(output,'utf8');return {text,findings:parseOcrReport(text,headSha,target,paths)}}
+    if(backend==='agent'){
+      if(!agentReview)throw new Error('Independent agent review adapter is unavailable; cannot substitute a manual pass')
+      const treeSha=(await bounded('git',['rev-parse',`${headSha}^{tree}`],{cwd:task.worktree})).trim(),snapshots:AgentReviewInput['paths']=[]
+      for(const [index,path] of paths.entries()){
+        const diff=await bounded('git',['--literal-pathspecs','diff','--no-ext-diff','--no-textconv','--no-renames','--binary','--unified=80',target,headSha,'--',path],{cwd:task.worktree})
+        const content=`Immutable independent review snapshot\n${JSON.stringify({path,baseSha:target,headSha,treeSha,worktree:task.worktree})}\n\nInspect every changed hunk and its surrounding context, and read relevant current source in the given worktree if needed. Binary/opaque changes require actual review evidence, never a waived path.\n\n${diff}`
+        const snapshotPath=join(directory,`path-${index}.txt`);await writeFile(snapshotPath,content,'utf8');snapshots.push({path,snapshotPath,fingerprint:createHash('sha256').update(content).digest('hex')})
+      }
+      const result=await agentReview({baseSha:target,headSha,treeSha,worktree:task.worktree,businessContext:`${task.ticket.title}\n${task.ticket.body}`,maxTokensBudget:tokensBudget,timeoutMs:Math.ceil(remaining()),paths:snapshots},signal??new AbortController().signal)
+      report=result.report;reviewerSessionId=result.reviewerSessionId;findings.push(...result.findings)
+      if(config.ocrAdditionalCheck){let supplemental:unknown;try{const extra=await ocr();findings.push(...extra.findings);supplemental={status:'complete',report:extra.text}}catch(error){supplemental={status:'incomplete',reason:String(error)}};report=JSON.stringify({primary:JSON.parse(report),optionalOcr:supplemental})}
+    }else{const result=await ocr();report=result.text;findings.push(...result.findings)}
     await unchanged()
     if (await fetchTarget(config, bounded, task.worktree) !== target) throw new Error('Target branch moved during review; integrate current target and repeat checks')
     await unchanged()
-    return { passed: findings.length === 0, headSha, baseSha, report, findings, ...(findings.length?{failureKind:'findings' as const}:{}) }
+    return { passed: findings.length === 0, headSha, baseSha, report, findings,backend,policyStamp:reviewPolicyStamp(config),...reviewerSessionId?{reviewerSessionId}:{}, ...(findings.length?{failureKind:'findings' as const}:{}) }
   } catch (error) {
     findings.push(error instanceof Error ? error.message : String(error))
-    return { passed: false, headSha, baseSha, report: report || findings.join('\n'), findings, failureKind:'infrastructure' }
+    return { passed: false, headSha, baseSha, report: report || findings.join('\n'), findings,backend, failureKind:'infrastructure' }
   } finally { await rm(directory, { recursive: true, force: true }) }
 }
 
 /** Cheap cache validation; a cached pass is evidence for one exact clean range only. */
 export async function isReviewCurrent(task: Task, config: RunConfig, review: ReviewResult, run: CommandRunner, signal?: AbortSignal): Promise<boolean> {
+  if((review.backend??'ocr')!==(config.reviewBackend??'ocr'))return false
+  if(review.policyStamp!==reviewPolicyStamp(config))return false
   if (!review.passed || review.findings.length || !review.baseSha || !/^[a-f0-9]{40,64}$/.test(review.baseSha) || !/^[a-f0-9]{40,64}$/.test(review.headSha)) return false
   const deadline = taskDeadline({...task,phases:task.phases??[]},Math.max(1,config.maxTaskMinutes))
   const bounded: CommandRunner = (file, args, options) => {

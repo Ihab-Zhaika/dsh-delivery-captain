@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path'
 import type { FollowupInput, Phase, Question, Run, RunConfig, Task, TicketProvider, WorkerRuntime } from './types.ts'
 import { eligibility, validateConfig, taskDeliveryConfig, taskDeadline, dependencyBlocker } from './scheduler.ts'
 import { RunStore } from './store.ts'
+import {backlogFingerprint,needsBacklogRecovery,backlogRecoveryReason,recoveryTask,recoveryFacts} from './backlog.ts'
 
 const TERMINAL = new Set<Task['status']>(['merged', 'failed', 'cancelled'])
 const PHASES: Phase[] = ['setup','analysis','implementation','testing','review','repair','integration','waiting','blocked','complete']
@@ -26,6 +27,9 @@ export class CaptainController {
   private readonly ownedTicks = new Map<string,Promise<void>>()
   private readonly ownedProviders = new Map<string,TicketProvider>()
   private readonly idleRecoveries = new Map<string,Promise<void>>()
+  private readonly recoveryScans=new Map<string,Promise<void>>()
+  private readonly recoveryGrades=new Map<string,Promise<void>>()
+  private readonly recoveryGradeProviders=new Map<string,TicketProvider>()
   private readonly resumeDispatches = new Map<string, Promise<void>>()
   private readonly resumeProviders = new Map<string, Set<TicketProvider>>()
   private readonly resumingTasks = new Set<string>()
@@ -40,13 +44,14 @@ export class CaptainController {
     for (const run of await this.store.loadAll()) {
       validateConfig(run.config)
       if(run.intakeMode!==undefined&&!['existing-only','new-tickets'].includes(run.intakeMode))throw new Error('Unknown persisted ticket intake mode')
+      if(run.recoveryCampaign){const task=run.recoveryCampaign.task;if(task?.kind!=='recovery'||!task.id||!task.sessionId||!task.worktree||run.tasks.some(t=>t.id===task.id||t.sessionId===task.sessionId)||task.sessionId===run.captainSessionId)throw new Error('Invalid persisted recovery session ownership')}
       const previous = this.runs.get(run.captainSessionId)
       if (previous && previous.createdAt > run.createdAt) continue
       // Workspace membership is independent of execution: retain completed and
       // stopped task histories under their worktrees without waking a model.
       let groupingChanged = false
       if(isStopped(run)&&!run.stoppedAt){run.stoppedAt=run.updatedAt;groupingChanged=true}
-      if (this.runtime.registerWorkspace) for (const task of run.tasks.filter(t => t.baseSha)) {
+      if (this.runtime.registerWorkspace) for (const task of this.ownedTasks(run).filter(t => t.baseSha)) {
         const previousGrouping = JSON.stringify([task.workspaceId, task.workspaceError])
         try { await this.runtime.registerWorkspace(task, run); delete task.workspaceError }
         catch (error) { task.workspaceError = `Workspace registration failed: ${String(error)}` }
@@ -61,21 +66,22 @@ export class CaptainController {
       }
       this.runs.set(run.captainSessionId, run)
       if (!isStopped(run) && !run.recoveryPending) {
-        try { for (const task of run.tasks.filter(t => !TERMINAL.has(t.status) && t.baseSha)) await this.runtime.restore?.(task, run) }
+        try { for (const task of this.ownedTasks(run).filter(t => !TERMINAL.has(t.status) && t.baseSha)) await this.runtime.restore?.(task, run) }
         catch (error) { run.error = `Recovery worker restore failed: ${String(error)}`; run.recoveryPending = true; await this.save(run) }
       }
     }
   }
   state(sessionId: string): Run | null {
-    return this.runs.get(sessionId) ?? [...this.runs.values()].find(run => run.tasks.some(t => t.sessionId === sessionId)) ?? null
+    return this.runs.get(sessionId) ?? [...this.runs.values()].find(run => this.ownedTasks(run).some(t => t.sessionId === sessionId)) ?? null
   }
   /** Session projection is separate from internal ownership lookup. */
   view(sessionId: string) {
     const run = this.state(sessionId)
     if (!run) return { role: 'idle' as const, run: null, coordinatorSessionId: null }
     if (run.captainSessionId === sessionId) return { role: 'coordinator' as const, run, coordinatorSessionId: sessionId }
-    const tasks = run.tasks.filter(t => t.sessionId === sessionId)
+    const tasks = this.ownedTasks(run).filter(t => t.sessionId === sessionId)
     return { role: 'worker' as const, coordinatorSessionId: run.captainSessionId,
+      ...tasks[0]?.kind==='recovery'?{recoveryScope:run.tasks}:{},
       run: { ...run, tasks, tickets: tasks.map(t => t.ticket), questions: run.questions.filter(q => tasks.some(t => t.id === q.taskId)) } }
   }
   async sessionView(sessionId:string) {
@@ -89,7 +95,7 @@ export class CaptainController {
     if(workspace) {
       const canonical=(path:string)=>process.platform==='win32'?resolve(path).toLowerCase():resolve(path)
       for(const run of this.runs.values()) {
-        const task=run.tasks.find(t=>canonical(t.worktree)===canonical(workspace))
+        const task=this.ownedTasks(run).find(t=>canonical(t.worktree)===canonical(workspace))
         if(task)return this.view(task.sessionId)
       }
     }
@@ -107,9 +113,17 @@ export class CaptainController {
     if (!run) throw new Error('Session is not an explicitly activated captain')
     return run
   }
+  private ownedTasks(run:Run):Task[]{return [...run.tasks,...run.recoveryCampaign?[run.recoveryCampaign.task]:[]]}
+  private findTask(run:Run,id:string):Task|undefined{return this.ownedTasks(run).find(t=>t.id===id)}
+  private async diagnostics(run:Run):Promise<void>{
+    try{await this.runtime.assertCaptainDiagnostics?.(run)}catch(error){
+      if(!run.recoveryCampaign?.task.baseSha||!this.runtime.assertRecoveryDiagnostics)throw error
+      await this.runtime.assertRecoveryDiagnostics(run)
+    }
+  }
   private worker(sessionId: string): { run: Run; task: Task } {
     for (const run of this.runs.values()) {
-      const task = run.tasks.find(t => t.sessionId === sessionId && !TERMINAL.has(t.status) && t.status !== 'parked')
+      const task = this.ownedTasks(run).find(t => t.sessionId === sessionId && !TERMINAL.has(t.status) && t.status !== 'parked')
       if (task && !isStopped(run)) return { run, task }
     }
     throw new Error('Session is not an active assigned worker')
@@ -149,7 +163,7 @@ export class CaptainController {
     const modeAction=action==='finish-existing'||action==='allow-new-tickets'
     if(modeAction&&run.intakeMode===(action==='finish-existing'?'existing-only':'new-tickets')&&!(action==='finish-existing'&&run.status==='draining'))return run
     const revision=['loop','resume','pause','drain','stop','finish-existing','allow-new-tickets'].includes(action)?run.coordinatorRevision=(run.coordinatorRevision??0)+1:run.coordinatorRevision
-    if (action === 'parallelism') run.config = validateConfig({ ...run.config, parallelism })
+    if (action === 'parallelism') run.config = validateConfig({ ...run.config,reviewBackend:run.config.reviewBackend??'ocr', parallelism })
     else if (action === 'pause') {run.status = 'paused';await this.runtime.coordinatorLoop?.(run,'pause')}
     else if (action === 'drain') run.status = 'draining'
     else if(modeAction){
@@ -170,7 +184,7 @@ export class CaptainController {
       if(run.coordinatorRevision!==revision||this.disposed)throw new Error('Run changed while activating resumption')
       run.status = 'running'
       delete run.stoppedAt
-      for (const t of run.tasks.filter(t => t.status === 'cancelled'&&(run.config.milestones.includes(t.ticket.milestone)||run.config.includeUnmilestoned&&!t.ticket.milestone||run.config.includeRequiredPredecessors&&eligibility(run.tickets,run.config.milestones,[],run.config).some(row=>row.ticketId===t.ticket.id&&row.scope==='predecessor'))&&(!run.config.ticketIds||run.config.ticketIds.includes(t.ticket.id)))) { t.status = 'blocked'; t.budgetStartedAt=now(); t.phases.push({phase:t.phase,at:now(),note:'Explicit run Resume starts a fresh bounded execution window; previous elapsed/history and assignment gates retained.'});t.resumeRequested = true; delete t.finishedAt; t.recoveryAttempts = 0; delete t.lastWakeAt }
+      for (const t of this.ownedTasks(run).filter(t => t.status === 'cancelled'&&(t.kind==='recovery'||(run.config.milestones.includes(t.ticket.milestone)||run.config.includeUnmilestoned&&!t.ticket.milestone||run.config.includeRequiredPredecessors&&eligibility(run.tickets,run.config.milestones,[],run.config).some(row=>row.ticketId===t.ticket.id&&row.scope==='predecessor'))&&(!run.config.ticketIds||run.config.ticketIds.includes(t.ticket.id))))) { t.status = 'blocked'; t.budgetStartedAt=now(); t.phases.push({phase:t.phase,at:now(),note:'Explicit run Resume starts a fresh bounded execution window; previous elapsed/history and assignment gates retained.'});t.resumeRequested = true; delete t.finishedAt; t.recoveryAttempts = 0; delete t.lastWakeAt }
     } else if (action === 'stop') {
       this.stoppingRuns.add(run.id)
       try {
@@ -178,12 +192,14 @@ export class CaptainController {
       await this.endLoop(run)
       this.activeProviders.get(run.id)?.cancel?.()
       this.ownedProviders.get(run.id)?.cancel?.()
+      this.recoveryGradeProviders.get(run.id)?.cancel?.()
       for(const provider of this.resumeProviders.get(run.id)??[])provider.cancel?.()
       // Commit revocation before awaiting cancellation: late worker reports cannot mutate delivery.
       await this.save(run)
       await this.drainWorkers(run, false)
       await this.resumeDispatches.get(run.id)
       await this.ownedTicks.get(run.id)
+      await this.recoveryGrades.get(run.id)
       // A worker may still be inside create/start. Drain that operation before cancelling the final roster.
       await this.runTicks.get(run.id)
       const shutdownErrors = await this.drainWorkers(run, true)
@@ -205,12 +221,12 @@ export class CaptainController {
   async configure(sessionId:string,raw:unknown):Promise<Run> {
     const run=this.captain(sessionId)
     if(this.disposed||run.status!=='stopped'||this.stoppingRuns.has(run.id))throw new Error('Configuration can only be saved after the run has fully stopped')
-    const config=validateConfig(raw)
+    const config=validateConfig({reviewBackend:run.config.reviewBackend??'ocr',...(raw as Record<string,unknown>)})
     for(const key of ['provider','repository','workspace','remote','targetBranch','organization','project'] as const) {
       if(config[key]!==run.config[key])throw new Error(`${key} is part of this run identity; use a new coordinator session to change it`)
     }
     const revision=run.coordinatorRevision
-    for(const task of run.tasks)if(task.status!=='merged'&&await this.runtime.isRunning(task.sessionId))throw new Error('A worker is still executing; finish Stop before saving configuration')
+    for(const task of this.ownedTasks(run))if(task.status!=='merged'&&await this.runtime.isRunning(task.sessionId))throw new Error('A worker is still executing; finish Stop before saving configuration')
     if(this.disposed||run.status!=='stopped'||this.stoppingRuns.has(run.id)||run.coordinatorRevision!==revision)throw new Error('Run changed while validating stopped configuration')
     // Preserve original gates and policies even for legacy tasks created before snapshots.
     for(const task of run.tasks)task.assignmentConfig??=structuredClone(run.config)
@@ -231,7 +247,7 @@ export class CaptainController {
   async updateMilestones(sessionId:string,milestones:unknown,expectedRevision?:number):Promise<Run> {
     const run=this.captain(sessionId)
     if(this.disposed||!['running','paused'].includes(run.status)||expectedRevision!==undefined&&run.coordinatorRevision!==expectedRevision)throw new Error('Milestone scope needs the active coordinator; run changed during validation')
-    const updated=validateConfig({...run.config,milestones})
+    const updated=validateConfig({...run.config,reviewBackend:run.config.reviewBackend??'ocr',milestones})
     for(const task of run.tasks)task.assignmentConfig??=structuredClone(run.config)
     run.coordinatorRevision=(run.coordinatorRevision??0)+1
     run.config=updated;await this.save(run)
@@ -241,17 +257,18 @@ export class CaptainController {
     const run=this.captain(sessionId)
     if(this.disposed||!['running','paused'].includes(run.status)||expectedRevision!==undefined&&run.coordinatorRevision!==expectedRevision)throw new Error('Policy needs the active coordinator; run changed during validation')
     if(!raw||typeof raw!=='object'||Array.isArray(raw))throw new Error('Invalid intake/review policy')
-    const fields=['includeUnmilestoned','includeRequiredPredecessors','ocrMaxTokensBudget']
+    const fields=['includeUnmilestoned','includeRequiredPredecessors','ocrMaxTokensBudget','reviewBackend','ocrAdditionalCheck']
     const values=raw as Record<string,unknown>
-    if(!Object.keys(values).length||Object.keys(values).some(key=>!fields.includes(key)))throw new Error('Only intake scope and OCR budget policy may change here')
-    const updated=validateConfig({...run.config,...values})
+    if(!Object.keys(values).length||Object.keys(values).some(key=>!fields.includes(key)))throw new Error('Only intake scope and independent review policy may change here')
+    const updated=validateConfig({...run.config,reviewBackend:run.config.reviewBackend??'ocr',...values})
     this.updateReviewBudget(run,updated,'ocrMaxTokensBudget' in values)
+    if('reviewBackend' in values||'ocrAdditionalCheck' in values)for(const task of this.ownedTasks(run).filter(t=>t.status!=='merged')){task.assignmentConfig={...structuredClone(task.assignmentConfig??run.config),reviewBackend:updated.reviewBackend,ocrAdditionalCheck:updated.ocrAdditionalCheck};task.phases.push({phase:task.phase,at:now(),note:`Explicit human review backend: ${updated.reviewBackend}, optional OCR ${updated.ocrAdditionalCheck}. Historical findings, exact-head coverage, CI and acceptance gates retained.`})}
     run.coordinatorRevision=(run.coordinatorRevision??0)+1
     this.recordPolicyNotice(run,updated);run.config=updated
     await this.save(run);await this.notifyPolicy(run);return run
   }
   private updateReviewBudget(run:Run,config:RunConfig,explicit:boolean):void {
-    for(const task of run.tasks){
+    for(const task of this.ownedTasks(run)){
       task.assignmentConfig??=structuredClone(run.config)
       if(explicit&&task.status!=='merged'&&task.assignmentConfig.ocrMaxTokensBudget!==config.ocrMaxTokensBudget){
         const previous=task.assignmentConfig.ocrMaxTokensBudget??'CLI/worker setting'
@@ -261,9 +278,9 @@ export class CaptainController {
     }
   }
   private recordPolicyNotice(run:Run,config:RunConfig):void {
-    const fields=['includeUnmilestoned','includeRequiredPredecessors','ocrMaxTokensBudget'] as const
+    const fields=['includeUnmilestoned','includeRequiredPredecessors','ocrMaxTokensBudget','reviewBackend','ocrAdditionalCheck'] as const
     if(!fields.some(key=>run.config[key]!==config[key]))return
-    run.policyNotice={revision:run.coordinatorRevision??0,text:`Owner updated intake/review policy: ${JSON.stringify(Object.fromEntries(fields.map(key=>[key,config[key]])))}. Each independent OCR review session/invocation has its OWN ${config.ocrMaxTokensBudget??1_000_000} token ceiling; no shared pool across workers, members, controller or run. This explicit policy supersedes previous ad hoc lower review-budget guidance. Existing assignments receive current policy on their next legitimate message; do not wake workers merely to announce a setting. Use completed original diagnostics and this changed budget to recover budget-blocked reviews within capacity. Required predecessors may be scheduled outside root milestone/query filters only when enabled; explicit trial allowlists remain hard limits. Do not invent milestones or waive complete exact-head review, CI, acceptance, security, ownership or dependency proof. Preserve all teams/worktrees/history, and keep unchanged external blockers parked.`}
+    run.policyNotice={revision:run.coordinatorRevision??0,text:`Owner updated intake/review policy: ${JSON.stringify(Object.fromEntries(fields.map(key=>[key,config[key]])))}. Each independent review session/invocation has its OWN ${config.ocrMaxTokensBudget??1_000_000} token ceiling; no shared pool across workers, members, controller or run. ${config.reviewBackend==='agent'?'The human explicitly selected independent agent PRIMARY review. OCR is optional, not a mandatory blocker. This supersedes old OCR-only delegation wording; preserve old failed/interrupted attempts, never fabricate their pass. Use supported new current review tasks and pending DAG/adjudication to bind genuine exact-head replacement evidence. Controller uses a separate fresh read-only native reviewer with immutable snapshots, complete actual read receipts and structured provenance. Do not rerun broken OCR merely because older instructions demand it.':'OCR remains the primary review gate.'} Existing assignments receive current policy on legitimate messages; do not wake workers merely to announce a setting. Use completed original diagnostics and actual changed review policy to recover blocked reviews within capacity. Do not waive complete exact-head coverage, CI, acceptance, security, ownership, trial limits or dependency proof. Preserve all teams/worktrees/history and unchanged external holds.`}
   }
   private async notifyPolicy(run:Run):Promise<void> {
     const notice=run.policyNotice
@@ -275,11 +292,14 @@ export class CaptainController {
     return run?this.runtime.coordinatorLoopState?.(run)??{status:'not-started' as const}:null
   }
 
-  async report(sessionId: string, report: { phase: Phase; ready?: boolean; blocked?: boolean; note?: string }): Promise<Task> {
+  async report(sessionId: string, report: { phase: Phase; ready?: boolean; blocked?: boolean; note?: string;affectedTaskIds?:string[] }): Promise<Task> {
     const { run, task } = this.worker(sessionId)
+    if(report.affectedTaskIds!==undefined&& (task.kind!=='recovery'||!Array.isArray(report.affectedTaskIds)||report.affectedTaskIds.some(id=>typeof id!=='string'||!run.tasks.some(t=>t.id===id))))throw new Error('Recovery affects only explicitly listed existing task IDs')
     if (!PHASES.includes(report.phase) || report.phase === 'complete' || report.phase === 'parked') throw new Error('Only the controller can complete or park a task')
     const blocked=report.blocked||report.phase==='blocked'
+    const changedHold=blocked&&(task.status!=='blocked'||task.error!==(report.note??'Worker blocked'))
     if (report.ready && blocked) throw new Error('A task cannot be ready and blocked together')
+    if(report.affectedTaskIds!==undefined){run.recoveryCampaign!.affectedTaskIds=[...new Set(report.affectedTaskIds)];run.recoveryCampaign!.affectedHoldRevisions=Object.fromEntries(report.affectedTaskIds.map(id=>[id,run.tasks.find(t=>t.id===id)?.holdRevision??0]))}
     if(task.dependencyBlocked) {
       task.phases.push({phase:task.phase,at:now(),note:`Report retained during dependency hold; requested ${report.phase}${report.ready?' ready':''}: ${report.note??''}`});await this.save(run);return task
     }
@@ -288,10 +308,11 @@ export class CaptainController {
     delete task.idleCheckpointAt
     this.phase(task, report.phase, report.note)
     if (report.ready) { delete task.blockedSince; task.status = 'ready'; this.phase(task, 'waiting', 'Queued for independent verification and merge') }
-    else if (blocked) { task.blockedSince ??= now(); task.status = 'blocked'; task.error = report.note ?? 'Worker blocked'; task.lastWakeAt = now(); task.executionActive = true }
+    else if (blocked) { if(changedHold)task.holdRevision=(task.holdRevision??0)+1;task.blockedSince ??= now(); task.status = 'blocked'; task.error = report.note ?? 'Worker blocked'; task.lastWakeAt = now(); task.executionActive = true }
     else if (!['blocked','waiting'].includes(report.phase)) { task.status = 'running'; delete task.blockedSince }
     await this.save(run)
     if (blocked) await this.notifyBlocker(run, task)
+    if(task.kind==='recovery'&&report.note)await this.notify(run,`Dedicated recovery session ${task.sessionId} reported ${report.phase}:\n${report.note}\nUse genuine completed original recovery reports to release only affected existing holds; preserve final gates.`,`recovery-report:${task.id}:${createHash('sha256').update(JSON.stringify(report)).digest('hex')}`)
     return task
   }
 
@@ -313,23 +334,24 @@ export class CaptainController {
     if (!q || !answer.trim() || answer.length > 30000) throw new Error('Invalid question or answer')
     if (action !== 'resume' && action !== 'wait') throw new Error('Invalid answer action')
     if (q.answer === answer && q.action === action && (q.deliveredAt||q.recordedAt)) {
-      const task=run.tasks.find(t=>t.id===q.taskId)
+      const task=this.findTask(run,q.taskId)
       if(action==='wait'&&task?.status==='blocked'&&task.resumeRequested){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;await this.save(run)}
       return q
     }
     q.answer = answer; q.action = action; q.answeredAt = now(); delete q.deliveredAt; delete q.recordedAt; delete q.deliveryError; await this.save(run)
+    if(action==='wait'){const task=this.findTask(run,q.taskId);if(task){task.holdRevision=(task.holdRevision??0)+1;await this.save(run)}}
     await this.deliverAnswer(run, q)
     return q
   }
 
   private async deliverAnswer(run: Run, q: Question): Promise<void> {
-    const task = run.tasks.find(t => t.id === q.taskId)
+    const task = this.findTask(run,q.taskId)
     if (!task || TERMINAL.has(task.status) || isStopped(run)) return
     if(task.status==='ready')return
     if(task.status==='parked') { q.recordedAt=now(); delete q.deliveryError; task.waitingDecision=q.answer; await this.save(run); return }
     if(q.action!=='wait'&&await this.heldDependencyWake(run,task)){q.recordedAt=now();delete q.deliveryError;task.waitingDecision=q.answer;await this.save(run);return}
     const diagnosticVersion=task.transitionVersion
-    if(task.status==='blocked')try{await this.runtime.assertCaptainDiagnostics?.(run)}catch(error){
+    if(task.status==='blocked')try{await this.diagnostics(run)}catch(error){
       q.deliveryError=(error instanceof Error?error.message:String(error)).slice(0,4000);await this.save(run)
       throw new DiagnosticAnswerDeferred(q.deliveryError)
     }
@@ -351,14 +373,14 @@ export class CaptainController {
   }
 
   async message(sessionId: string, taskId: string, text: string, action: 'resume' | 'wait' = 'resume'): Promise<void> {
-    const run = this.captain(sessionId), task = run.tasks.find(t => t.id === taskId)
+    const run = this.captain(sessionId), task = this.findTask(run,taskId)
     if (!task || TERMINAL.has(task.status) || isStopped(run)) throw new Error('Task is not active')
     if(task.status==='ready')throw new Error('Task is already owned by controller verification; guidance cannot interrupt it')
     if (!text.trim() || text.length > 30000) throw new Error('Invalid worker message')
     if(action!=='resume'&&action!=='wait')throw new Error('Invalid guidance action')
     if(task.status==='parked') {
       if(action==='resume')throw new Error('Task is parked; use explicit task resumption with changed prerequisite evidence')
-      task.waitingDecision=text;await this.save(run);return
+      task.holdRevision=(task.holdRevision??0)+1;task.waitingDecision=text;await this.save(run);return
     }
     const hash=createHash('sha256').update(JSON.stringify([text.trim(),action,task.blockerFingerprint])).digest('hex')
     if(task.lastGuidanceHash===hash){
@@ -367,9 +389,9 @@ export class CaptainController {
     }
     if(action==='resume'&&await this.heldDependencyWake(run,task))throw new Error('Guidance not delivered: dependency prerequisites are unmet, unverified, or worker quiescence is incomplete')
     const diagnosticVersion=task.transitionVersion
-    if(task.status==='blocked')await this.runtime.assertCaptainDiagnostics?.(run)
+    if(task.status==='blocked')await this.diagnostics(run)
     if(isStopped(run)||this.disposed||TERMINAL.has(task.status)||['ready','parked'].includes(task.status)||task.transitionVersion!==diagnosticVersion||this.dependencyQuiescences.has(task.id)||task.dependencyBlocked&&task.parkingError)throw new Error('Task changed while validating diagnostic evidence')
-    if(action==='wait'&&task.status==='blocked'){delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;task.waitingDecision=text;task.lastGuidanceHash=hash;await this.save(run);return}
+    if(action==='wait'&&task.status==='blocked'){task.holdRevision=(task.holdRevision??0)+1;delete task.resumeRequested;task.transitionVersion=(task.transitionVersion??0)+1;task.waitingDecision=text;task.lastGuidanceHash=hash;await this.save(run);return}
     if (task.status === 'blocked' && !task.executionActive && this.activeCount(run) >= run.config.parallelism) throw new Error('No execution slot available; answer will need to wait')
     delete task.resumeRequested
     const previousStatus=task.status
@@ -380,16 +402,20 @@ export class CaptainController {
     if (isStopped(run) || this.disposed) { await this.runtime.stop(task.sessionId); return }
     task.lastGuidanceHash=hash;task.lastWakeAt=now()
     if(!TERMINAL.has(task.status)&&task.transitionVersion===version){
-      if(action==='wait'){task.status=previousStatus;task.executionActive=true;if(previousStatus!=='blocked')this.phase(task,'waiting')}
+      if(action==='wait'){task.holdRevision=(task.holdRevision??0)+1;task.status=previousStatus;task.executionActive=true;if(previousStatus!=='blocked')this.phase(task,'waiting')}
       else{task.status='running';this.phase(task,'analysis');delete task.error;delete task.idleCheckpointAt;delete task.waitingDecision}
     }
     await this.save(run)
   }
 
   async resumeTask(sessionId: string, taskId: string, evidence: string, human = false, teamMemberLimit?:number): Promise<Task> {
-    const run=this.captain(sessionId),task=run.tasks.find(t=>t.id===taskId)
+    return this.resumeTaskInternal(sessionId,taskId,evidence,human,teamMemberLimit,false)
+  }
+  private async resumeTaskInternal(sessionId:string,taskId:string,evidence:string,human:boolean,teamMemberLimit:number|undefined,verifiedRecovery:boolean,expectedHold?:number):Promise<Task>{
+    const run=this.captain(sessionId),task=this.findTask(run,taskId)
     if(isStopped(run)||run.status!=='running'||!task||!(task.status==='parked'||task.status==='blocked'||human&&task.status==='running'&&task.phase==='waiting'))throw new Error('Resume requires a running coordinator and an idle blocked/parked task, or an explicit human retry of a waiting worker')
     if(!evidence.trim()||evidence.length>30000)throw new Error('Describe the changed prerequisite or explicit human resumption')
+    if(expectedHold!==undefined&&(task.holdRevision??0)!==expectedHold)throw new Error('A newer hold supersedes this recovery intent')
     const originalConfig=taskDeliveryConfig(task,run.config)
     if(teamMemberLimit!==undefined&&(!human||!Number.isInteger(teamMemberLimit)||teamMemberLimit<originalConfig.maxTeamMembers||teamMemberLimit>run.config.maxTeamMembers))throw new Error('A team resource override requires human resumption and a raised member limit within the configured run cap')
     if(task.parkingError||task.status==='parked'&&task.executionActive)throw new Error('Parking has not safely quiesced the worker')
@@ -397,8 +423,8 @@ export class CaptainController {
     const version=task.transitionVersion
     const previousStatus=task.status
     if(task.status!=='parked'&&await this.runtime.isRunning(task.sessionId))throw new Error('Worker is already executing; retry was not duplicated')
-    if(!human)await this.runtime.assertCaptainDiagnostics?.(run)
-    if(isStopped(run)||this.disposed||run.status!=='running'||task.status!==previousStatus||task.transitionVersion!==version||task.parkingError||this.dependencyQuiescences.has(task.id))throw new Error('Task changed during resumption validation or has not quiesced')
+    if(!human&&!verifiedRecovery)await this.diagnostics(run)
+    if(isStopped(run)||this.disposed||run.status!=='running'||task.status!==previousStatus||task.transitionVersion!==version||expectedHold!==undefined&&(task.holdRevision??0)!==expectedHold||task.parkingError||this.dependencyQuiescences.has(task.id))throw new Error('Task changed during resumption validation or has not quiesced')
     task.transitionVersion=(task.transitionVersion??0)+1
     if(human){task.pendingHumanRetry={at:now(),reason:evidence.trim(),previousBlocker:task.error??task.phases.at(-1)?.note};task.budgetStartedAt=now();task.phases.push({phase:task.phase,at:now(),note:'Explicit human task Resume authorizes one normal retry and starts a fresh bounded execution window; original elapsed/history and gate policies retained.'})}
     if(teamMemberLimit!==undefined) {
@@ -436,7 +462,7 @@ export class CaptainController {
         this.phase(task,'waiting','Confirmed owned native activity; corrected prior automatic idle observation without replaying work');await this.save(run)
       }else if(task.executionActive!==executing){task.executionActive=executing;await this.save(run)}
     }
-    for(const task of run.tasks) {
+    for(const task of this.ownedTasks(run)) {
       if(this.disposed||run.status!=='running')return
       // An uncertain reviewed PR must be reconciled before any writer is woken.
       // Incomplete initial setup still follows claim/fetch admission below.
@@ -446,7 +472,7 @@ export class CaptainController {
       if(this.disposed||run.status!=='running')return
       if(task.status!=='blocked'||!task.resumeRequested||task.transitionVersion!==version)continue
       task.executionActive=executing
-      if(executing||this.activeCount(run)>=run.config.parallelism)continue
+      if(executing||task.kind!=='recovery'&&this.activeCount(run)>=run.config.parallelism)continue
       const expire=async()=>{
         if(Date.now()<=taskDeadline(task,taskDeliveryConfig(task,run.config).maxTaskMinutes))return false
         delete task.resumeRequested;task.status='failed';task.error='Task time budget exhausted';task.finishedAt=now();this.phase(task,'blocked',task.error);await this.save(run);return true
@@ -458,7 +484,7 @@ export class CaptainController {
       let held:boolean
       try{held=await this.dependenciesBlocked(run,task,provider)}finally{providers.delete(provider);if(!providers.size)this.resumeProviders.delete(run.id)}
       if(held)continue
-      if(this.disposed||run.status!=='running'||task.status!=='blocked'||task.transitionVersion!==version||this.activeCount(run)>=run.config.parallelism)continue
+      if(this.disposed||run.status!=='running'||task.status!=='blocked'||task.transitionVersion!==version||task.kind!=='recovery'&&this.activeCount(run)>=run.config.parallelism)continue
       task.status='starting';delete task.resumeRequested
       const revision=task.transitionVersion=(task.transitionVersion??0)+1
       this.resumingTasks.add(task.id)
@@ -487,6 +513,7 @@ export class CaptainController {
 
   async followup(sessionId: string, input: FollowupInput): Promise<string> {
     const { run, task } = this.worker(sessionId)
+    if(task.kind==='recovery')throw new Error('Recovery does not create follow-up issues; fix shared causes or use existing owners')
     if(run.intakeMode==='existing-only')throw new Error('Existing-only mode forbids new follow-up issues; record needed future work without creating a ticket')
     if (!input.title.trim() || !input.body.trim() || !(run.config.milestones.includes(input.milestone)||run.config.includeUnmilestoned&&input.milestone==='') || !Array.isArray(input.predecessors) || input.predecessors.some(x => typeof x !== 'string')) throw new Error('Follow-up requires title, scope/acceptance body, configured milestone (or an enabled unassigned milestone) and predecessor IDs')
     const id = await this.providerFactory(run.config).createFollowup(task, input,()=>run.intakeMode!=='existing-only'&&!isStopped(run)&&!this.disposed)
@@ -526,7 +553,7 @@ export class CaptainController {
     for (const run of this.runs.values()) {
       if (isStopped(run) || this.disposed || this.startingSessions.has(run.captainSessionId) || runIds && !runIds.includes(run.id)) continue
       if(this.runTicks.has(run.id))continue
-      const tick=this.tickRun(run).catch(async error=>{if(!isStopped(run)&&!this.disposed){run.error=String(error);await this.save(run)}})
+      const tick=this.tickRun(run).then(async()=>{if(!isStopped(run)&&!this.disposed&&run.schedulerFailures){const previous=run.schedulerFailures;delete run.schedulerFailures;try{await this.save(run)}catch(error){run.schedulerFailures=previous;throw error}}}).catch(async error=>{if(!isStopped(run)&&!this.disposed){run.error=String(error);run.schedulerFailures={count:(run.schedulerFailures?.count??0)+1,at:now(),message:String(error).slice(0,1600)};await this.save(run)}})
         .finally(()=>{this.activeProviders.delete(run.id);this.runTicks.delete(run.id)})
       this.runTicks.set(run.id,tick)
     }
@@ -542,12 +569,109 @@ export class CaptainController {
       const work=(async()=>{
         const provider=this.providerFactory(run.config)
         this.ownedProviders.set(run.id,provider)
+        await this.coordinateRecovery(run,provider)
         for(const task of run.tasks)await this.recoverIdleTask(run,task,provider)
         await this.dispatchResumes(run)
       })().catch(async error=>{if(!isStopped(run)&&!this.disposed){run.error=`Owned recovery deferred: ${String(error)}`;await this.save(run)}}).finally(()=>{this.ownedProviders.delete(run.id);this.ownedTicks.delete(run.id)})
       this.ownedTicks.set(run.id,work)
     }
     return Promise.all([...this.ownedTicks.values()]).then(()=>{})
+  }
+  /** One durable non-ticket recovery owner, independent of catalog discovery. */
+  private coordinateRecovery(run:Run,provider:TicketProvider):Promise<void>{
+    const pending=this.recoveryScans.get(run.id);if(pending)return pending
+    const work=this.coordinateRecoveryRun(run,provider).finally(()=>this.recoveryScans.delete(run.id))
+    this.recoveryScans.set(run.id,work);return work
+  }
+  private async coordinateRecoveryRun(run:Run,provider:TicketProvider):Promise<void>{
+    if(this.disposed||run.status!=='running'||run.recoveryPending)return
+    await this.dispatchRecoveryReleases(run)
+    const parked=run.tasks.filter(t=>t.status==='parked').length,threshold=run.config.parkedRecoveryThreshold??4
+    if(needsBacklogRecovery(run)){
+      const changed=!run.backlogHold||run.backlogHold.parked!==parked||run.backlogHold.threshold!==threshold||run.backlogHold.reason!==backlogRecoveryReason(run)
+      run.backlogHold={since:run.backlogHold?.since??now(),parked,threshold,reason:backlogRecoveryReason(run)}
+      if(changed)await this.save(run)
+      if(!run.recoveryCampaign){run.recoveryCampaign={task:recoveryTask(run,repositoryKey(run.config)),fingerprint:backlogFingerprint(run),affectedTaskIds:[]};await this.save(run)}
+    }else if(run.backlogHold&&run.recoveryCampaign?.task.status==='merged'){delete run.backlogHold;await this.save(run)}
+    const campaign=run.recoveryCampaign;if(!campaign||this.disposed||run.status!=='running')return
+    const task=campaign.task,fingerprint=backlogFingerprint(run)
+    if(this.recoveryGrades.has(run.id))return
+    if(campaign.settlement&&!needsBacklogRecovery(run)){delete run.backlogHold;await this.save(run);return}
+    if(campaign.settlement?.fingerprint===fingerprint){if(!needsBacklogRecovery(run)){delete run.backlogHold;await this.save(run)};return}
+    if(task.prUrl&&task.headSha&&task.reviewHistory?.some(r=>r.passed&&r.headSha===task.headSha)&&task.status!=='merged'){
+      const pr=await provider.inspectPullRequest(task)
+      if(this.disposed||run.status!=='running')return
+      if(pr.merged){if(pr.headSha!==task.headSha||!pr.mergeSha)throw new Error('Recovered shared PR does not match reviewed head');await this.runtime.stop(task.sessionId);task.status='merged';task.mergedSha=pr.mergeSha;task.finishedAt=now();task.closedAt=now();this.phase(task,'complete');await this.save(run)}
+    }
+    if(task.status==='merged'){
+      await this.releaseSharedRecovery(run)
+      if(!needsBacklogRecovery(run)){delete run.backlogHold;await this.save(run);return}
+    }
+    if(!TERMINAL.has(task.status)&&Date.now()>taskDeadline(task,taskDeliveryConfig(task,run.config).maxTaskMinutes)){await this.runtime.stop(task.sessionId,'shutdown');task.status='failed';task.error='Recovery execution budget exhausted; preserve existing session and evidence';task.finishedAt=now();this.phase(task,'blocked',task.error);await this.save(run);await this.notifyBlocker(run,task);return}
+    if(task.status==='ready'){this.gradeRecovery(run,task);return}
+    if(['cancelled','failed'].includes(task.status))return
+    if(task.status==='merged'&&campaign.lastSentFingerprint===fingerprint)return
+    if(task.status==='running')await this.recoverIdleTask(run,task,provider)
+    if(this.disposed||run.status!=='running'||task.assignmentDelivered&&await this.runtime.isRunning(task.sessionId))return
+    if(task.assignmentDelivered&&campaign.lastSentFingerprint===fingerprint)return
+    if(campaign.error&&Date.now()-Date.parse(campaign.lastAttemptAt??'')<60000)return
+    campaign.lastAttemptAt=now();campaign.fingerprint=fingerprint;await this.save(run)
+    try{
+      if(task.status==='merged'){
+        if(!this.runtime.renewRecovery)throw new Error('Runtime cannot safely renew the same recovery worktree')
+        await this.runtime.renewRecovery(task,taskDeliveryConfig(task,run.config),(campaign.generation??0)+1);campaign.generation=(campaign.generation??0)+1;campaign.affectedTaskIds=[];await this.save(run)
+      }
+      if(!task.baseSha){await this.runtime.prepare(task,taskDeliveryConfig(task,run.config));await this.save(run)}
+      if(this.disposed||run.status!=='running')return
+      task.transitionVersion=(task.transitionVersion??0)+1;const scopeVersion=task.transitionVersion;task.recoveryScopeAt=now();await this.save(run)
+      let admitted:boolean
+      if(!task.assignmentDelivered||task.status==='merged')admitted=await this.runtime.start(task,run)!==false
+      else admitted=await this.runtime.send(task.sessionId,`Changed shared recovery evidence:\n${recoveryFacts(run)}\nReuse your existing original team, inspect actual changes and drive actionable recovery. No repeated unchanged retries or new ticket roots.`,`recovery-facts:${task.id}:${fingerprint}`,()=>!this.disposed&&run.status==='running')!==false
+      if(this.disposed||isStopped(run)){await this.runtime.stop(task.sessionId,'shutdown');return}
+      if(admitted){task.assignmentDelivered=true;if(task.transitionVersion===scopeVersion){task.status='running';delete task.finishedAt;delete task.error;this.phase(task,'analysis')};task.lastWakeAt=now();campaign.lastSentFingerprint=fingerprint;delete campaign.error;delete campaign.settlement;await this.save(run);await this.notify(run,`Backlog safeguard is holding new intake (${parked} parked, threshold ${threshold}). Dedicated recovery session ${task.sessionId}, workspace ${task.worktree}, is investigating shared causes. Reuse this owner, prioritize existing recovery and preserve the human intake mode.`,`recovery-owner:${task.id}:${fingerprint}`)}
+    }catch(error){campaign.error=String(error);task.status='blocked';task.error=`Recovery startup/transport deferred: ${String(error)}`;task.blockedSince??=now();this.phase(task,'blocked',task.error);await this.save(run)}
+  }
+  private gradeRecovery(run:Run,task:Task):void{
+    if(this.recoveryGrades.has(run.id)||this.disposed||!['running','draining'].includes(run.status))return
+    const provider=this.providerFactory(taskDeliveryConfig(task,run.config));this.recoveryGradeProviders.set(run.id,provider)
+    const work=this.integrate(run,task,provider).catch(async error=>{if(!isStopped(run)&&!this.disposed){run.recoveryCampaign!.error=String(error);await this.save(run)}}).finally(()=>{this.recoveryGradeProviders.delete(run.id);this.recoveryGrades.delete(run.id)})
+    this.recoveryGrades.set(run.id,work)
+  }
+  private async releaseSharedRecovery(run:Run):Promise<void>{
+    const campaign=run.recoveryCampaign,repair=campaign?.task
+    if(!campaign||repair?.status!=='merged'||!repair.mergedSha||!repair.prUrl)return
+    for(const id of campaign.affectedTaskIds){const key=`${repair.id}:${repair.mergedSha}:${id}`;if(!run.recoveryReleases?.some(r=>r.key===key))(run.recoveryReleases??=[]).push({taskId:id,sourceHead:repair.headSha,targetSha:repair.mergedSha,holdRevision:campaign.affectedHoldRevisions?.[id]??0,key,note:`Verified shared recovery PR ${repair.prUrl} merged at ${repair.mergedSha}. Incorporate that target commit safely into this existing branch, preserve source/teams/history, resolve conflicts and rerun complete exact-head OCR/CI; unchanged external acceptance remains required.`})}
+    await this.save(run);await this.dispatchRecoveryReleases(run)
+  }
+  private async dispatchRecoveryReleases(run:Run):Promise<void>{
+    for(const release of run.recoveryReleases??[]){
+      if(this.disposed||run.status!=='running')return
+      if(release.queuedAt||release.revokedAt)continue
+      if(release.sourceHead&&!run.recoveryCampaign?.task.reviewHistory?.some(r=>r.passed&&r.headSha===release.sourceHead)){release.error='Verified shared review provenance unavailable';await this.save(run);continue}
+      const task=run.tasks.find(t=>t.id===release.taskId);if(!task||TERMINAL.has(task.status)){release.queuedAt=now();await this.save(run);continue}
+      if((task.holdRevision??0)!==(release.holdRevision??0)){release.revokedAt=now();release.error='A later explicit or worker-reported hold supersedes this recovery intent';await this.save(run);continue}
+      if(!['blocked','parked'].includes(task.status))continue
+      try{if(await this.runtime.isRunning(task.sessionId))continue;if(this.disposed||run.status!=='running'||(task.holdRevision??0)!==(release.holdRevision??0))continue;if(release.targetSha)task.incorporateTargetSha=release.targetSha;await this.save(run);await this.resumeTaskInternal(run.captainSessionId,task.id,release.note,false,undefined,true,release.holdRevision??0);if(task.status==='running'||task.resumeRequested){release.queuedAt=now();delete release.error}else release.error=task.error??'Fresh prerequisites remain unmet';await this.save(run)}
+      catch(error){release.error=String(error);await this.save(run)}
+    }
+  }
+  async settleRecovery(sessionId:string,kind:'resolved'|'external',note:string,affectedTaskIds:string[]):Promise<Run>{
+    const run=this.captain(sessionId),campaign=run.recoveryCampaign
+    if(run.status!=='running'||!campaign||!['resolved','external'].includes(kind)||!note?.trim()||note.length>20000||!Array.isArray(affectedTaskIds)||affectedTaskIds.some(id=>!run.tasks.some(t=>t.id===id)))throw new Error('Recovery settlement requires the coordinator, concrete evidence and existing task IDs')
+    const revision=run.coordinatorRevision,version=campaign.task.transitionVersion
+    if(!this.runtime.assertRecoveryDiagnostics||!this.runtime.recoveryHasChanges)throw new Error('Recovery evidence adapter unavailable')
+    await this.runtime.assertRecoveryDiagnostics(run)
+    if(await this.runtime.recoveryHasChanges(campaign.task))throw new Error('Recovery repository changes must pass the gated PR flow before settlement')
+    if(await this.runtime.isRunning(campaign.task.sessionId)||campaign.task.parkingError||this.recoveryGrades.has(run.id))throw new Error('Recovery activity changed during settlement validation')
+    if(this.disposed||run.status!=='running'||run.coordinatorRevision!==revision||campaign.task.transitionVersion!==version)throw new Error('Recovery changed during settlement validation')
+    if(kind==='external'&&affectedTaskIds.length)throw new Error('Unchanged external holds cannot release workers')
+    campaign.settlement={kind,at:now(),note:note.trim(),fingerprint:backlogFingerprint(run)}
+    campaign.task.status='parked';campaign.task.executionActive=false;campaign.task.waitingDecision=note.trim();this.phase(campaign.task,'parked',`Recovery diagnosis ${kind}; completed reports retained, no code merge claimed`)
+    for(const id of affectedTaskIds){const revision=run.tasks.find(t=>t.id===id)?.holdRevision??0,key=`diagnostic:${campaign.task.id}:${createHash('sha256').update(note).digest('hex')}:${id}:${revision}`;if(!run.recoveryReleases?.some(r=>r.key===key))(run.recoveryReleases??=[]).push({taskId:id,key,holdRevision:revision,note:`Completed original recovery diagnostics verified a changed solution: ${note}. Retry only the affected normal step; retain all acceptance, dependency and exact-head review/CI gates.`})}
+    await this.save(run);await this.dispatchRecoveryReleases(run)
+    campaign.settlement.fingerprint=backlogFingerprint(run)
+    if(!needsBacklogRecovery(run))delete run.backlogHold
+    await this.save(run);return run
   }
   /** Already-owned idle recovery is local; the full intake catalog can be slow. */
   private recoverIdleTask(run:Run,task:Task,provider:TicketProvider):Promise<void> {
@@ -597,15 +721,17 @@ export class CaptainController {
   private async tickRun(run: Run): Promise<void> {
     const provider = this.providerFactory(run.config)
     this.activeProviders.set(run.id, provider)
+    await this.coordinateRecovery(run,provider)
     await this.notifyPolicy(run)
     for(const task of run.tasks)await this.recoverIdleTask(run,task,provider)
     await this.dispatchResumes(run)
     if(isStopped(run)||this.disposed)return
     if (run.recoveryPending) {
       await provider.preflight(); await this.runtime.preflight(run.config)
-      for (const task of run.tasks.filter(t => !TERMINAL.has(t.status) && t.baseSha)) await this.runtime.restore?.(task, run)
+      for (const task of this.ownedTasks(run).filter(t => !TERMINAL.has(t.status) && t.baseSha)) await this.runtime.restore?.(task, run)
       delete run.recoveryPending
     }
+    if(run.status==='draining'&&run.recoveryCampaign?.task.status==='ready')this.gradeRecovery(run,run.recoveryCampaign.task)
     run.tickets = await provider.discover(); run.lastPollAt = now(); delete run.error
     if(run.config.ticketIds)run.tickets=run.tickets.map(ticket=>!ticket.exclusion&&!run.config.ticketIds!.includes(ticket.id)?{...ticket,exclusion:'Outside configured ticket selection'}:ticket)
     // Reconcile confirmed delivery/closure even if the previous process died after merge.
@@ -675,17 +801,20 @@ export class CaptainController {
     // Admission counts persisted attempts, including blocked/failed setup. A trial
     // must never substitute another ticket or reset its cap after a restart.
     if (run.config.maxTickets > 0 && run.tasks.length >= run.config.maxTickets && run.tasks.every(t => TERMINAL.has(t.status) && (t.status !== 'merged' || t.closedAt))) {
-      run.status = 'stopped';run.stoppedAt=now(); await this.endLoop(run);await this.save(run); await this.store.release(repositoryKey(run.config)); return
+      run.status = 'stopped';run.stoppedAt=now(); await this.endLoop(run);this.recoveryGradeProviders.get(run.id)?.cancel?.();await this.save(run);const errors=await this.drainWorkers(run,true,'shutdown');await this.recoveryGrades.get(run.id);if(!errors.length)await this.store.release(repositoryKey(run.config)); return
     }
     // A parked blocker needs a new captain decision, not a timed assignment replay.
     if (run.status === 'draining' && this.activeCount(run) === 0) {
-      run.status = 'stopped';run.stoppedAt=now(); await this.endLoop(run);await this.save(run); await this.store.release(repositoryKey(run.config)); return
+      if(this.recoveryGrades.has(run.id)){await this.save(run);return}
+      const recovery=run.recoveryCampaign?.task
+      if(recovery&&!TERMINAL.has(recovery.status)&&await this.runtime.isRunning(recovery.sessionId)){await this.save(run);return}
+      run.status = 'stopped';run.stoppedAt=now(); await this.endLoop(run);await this.save(run);const errors=await this.drainWorkers(run,true,'shutdown');if(!errors.length)await this.store.release(repositoryKey(run.config)); return
     }
     if (run.status !== 'running' || this.disposed) { await this.save(run); return }
     while(true) {
       // Integration or the preceding admission can free capacity or queue owned work.
       await this.dispatchResumes(run)
-      if (run.status !== 'running' || this.disposed || run.intakeMode==='existing-only' || this.activeCount(run) >= run.config.parallelism || run.config.maxTickets > 0 && run.tasks.length >= run.config.maxTickets) break
+      if (run.status !== 'running' || this.disposed || run.intakeMode==='existing-only' || run.backlogHold || needsBacklogRecovery(run) || this.activeCount(run) >= run.config.parallelism || run.config.maxTickets > 0 && run.tasks.length >= run.config.maxTickets) break
       // Scope/order and task states can change while the previous launch awaits.
       const rows=eligibility(run.tickets,run.config.milestones,run.tasks,run.config)
       const eligible = new Set(rows.filter(r=>r.eligible).map(r=>r.ticketId)),ranks=new Map(rows.map(row=>[row.ticketId,row.milestoneRank])),priorities=new Map(rows.map(row=>[row.ticketId,row.priority]))
@@ -705,7 +834,7 @@ export class CaptainController {
   private async launch(run: Run, task: Task, provider: TicketProvider): Promise<void> {
     try {
       if(await this.dependenciesBlocked(run,task,provider))return
-      await provider.claim(task.ticket, run.id)
+      if(task.kind!=='recovery')await provider.claim(task.ticket, run.id)
       if (isStopped(run) || this.disposed) return
       await this.runtime.prepare(task, taskDeliveryConfig(task,run.config)); await this.save(run)
       if (isStopped(run) || this.disposed) return
@@ -722,8 +851,11 @@ export class CaptainController {
       if(await this.dependenciesBlocked(run,task,provider))return
       await this.runtime.stop(task.sessionId)
       if (isStopped(run) || this.disposed) return
+      if(task.incorporateTargetSha){if(!this.runtime.containsTarget||!await this.runtime.containsTarget(task,task.incorporateTargetSha))throw new Error(`Incorporate shared repair ${task.incorporateTargetSha} through a safe rebase/merge, preserve work and rerun exact-head verification`);delete task.incorporateTargetSha}
       const previous = task.reviewHistory?.at(-1)
       const verification=taskDeliveryConfig(task,run.config)
+      const policy=JSON.stringify([verification.reviewBackend??'ocr',verification.ocrAdditionalCheck??false,verification.ocrMaxTokensBudget??1_000_000])
+      const currentPolicy=()=>JSON.stringify([taskDeliveryConfig(task,run.config).reviewBackend??'ocr',taskDeliveryConfig(task,run.config).ocrAdditionalCheck??false,taskDeliveryConfig(task,run.config).ocrMaxTokensBudget??1_000_000])
       const cached = previous?.passed && await this.runtime.isReviewCurrent?.(task, verification, previous)
       if (!cached) { this.phase(task, 'testing'); await this.save(run) }
       const review = cached && previous ? previous : await this.runtime.review(task, verification, async phase => { if (isStopped(run) || this.disposed) throw new Error('Run stopped'); this.phase(task, phase); await this.save(run) })
@@ -731,11 +863,13 @@ export class CaptainController {
       await this.save(run)
       if (isStopped(run) || this.disposed) return
       if (!review.passed) { await this.repair(run, task, review.findings.join('\n') || review.report || 'Verification/review failed'); return }
+      if(policy!==currentPolicy())throw new Error('Human review policy changed during verification; retain the old attempt and repeat the current primary gate')
       if(await this.dependenciesBlocked(run,task,provider))return
       task.headSha = review.headSha; this.phase(task, 'integration'); await this.save(run)
       let pr = await provider.ensurePullRequest(task); task.prUrl = pr.url; await this.save(run)
       if (!pr.merged) pr = await provider.inspectPullRequest(task)
       if (pr.merged && (pr.headSha !== review.headSha || !pr.mergeSha)) throw new Error('Merged pull request does not match the reviewed head or lacks a merge commit')
+      if(policy!==currentPolicy())throw new Error('Human review policy changed before merge; repeat the current primary gate')
       if (!pr.merged && (!pr.checksPassed || pr.headSha !== review.headSha)) { this.phase(task, 'waiting', pr.blockedReason ?? 'Waiting for remote checks on reviewed head'); await this.save(run); return }
       if (isStopped(run) || this.disposed) return
       if (!pr.merged) {
@@ -743,13 +877,15 @@ export class CaptainController {
         if (this.runtime.isReviewCurrent && !await this.runtime.isReviewCurrent(task, verification, review)) { await this.repair(run, task, 'Reviewed head or target branch changed before merge; synchronize and verify again'); return }
         if (isStopped(run) || this.disposed) return
         if(await this.dependenciesBlocked(run,task,provider))return
-        pr = await provider.merge(task, review.headSha)
+        if(policy!==currentPolicy())throw new Error('Review policy changed immediately before merge');pr = await provider.merge(task, review.headSha,()=>!isStopped(run)&&!this.disposed&&policy===currentPolicy())
       }
       if (!pr.merged) { this.phase(task, 'waiting', pr.blockedReason ?? 'Merge queued'); await this.save(run); return }
       if (pr.headSha !== review.headSha || !pr.mergeSha) throw new Error('Cannot confirm exact-head merge')
       task.status = 'merged'; task.mergedSha = pr.mergeSha; task.finishedAt = now(); this.phase(task, 'complete'); delete task.error
       await this.save(run)
-      try { await provider.close(task); task.closedAt = now() } catch (error) { task.error = `Merged; ticket closure pending: ${String(error)}` }
+      if(task.kind==='recovery'){
+        task.closedAt=now();await this.save(run);await this.releaseSharedRecovery(run)
+      }else try { await provider.close(task); task.closedAt = now() } catch (error) { task.error = `Merged; ticket closure pending: ${String(error)}` }
       await this.save(run)
     } catch (error) {
       if (!isStopped(run)) await this.repair(run, task, String(error))
@@ -762,6 +898,7 @@ export class CaptainController {
     return this.dependenciesBlocked(run,task,this.providerFactory(taskDeliveryConfig(task,run.config)))
   }
   private async dependenciesBlocked(run:Run,task:Task,provider:TicketProvider):Promise<boolean> {
+    if(task.kind==='recovery')return false
     if(task.parkingError||this.dependencyQuiescences.has(task.id))return true
     const revision=task.transitionVersion
     let reason:string|undefined
@@ -805,11 +942,14 @@ export class CaptainController {
     for(const run of this.runs.values())try{await this.runtime.coordinatorLoop?.(run,'shutdown')}catch(error){run.coordinatorLoopError=String(error)}
     for (const provider of this.activeProviders.values()) provider.cancel?.()
     for (const provider of this.ownedProviders.values()) provider.cancel?.()
+    for(const provider of this.recoveryGradeProviders.values())provider.cancel?.()
     for(const providers of this.resumeProviders.values())for(const provider of providers)provider.cancel?.()
     for (const run of this.runs.values()) await this.drainWorkers(run, false,'shutdown')
     await this.ticking
     await Promise.all([...this.resumeDispatches.values()])
     await Promise.all([...this.ownedTicks.values()])
+    await Promise.all([...this.recoveryScans.values()])
+    await Promise.all([...this.recoveryGrades.values()])
     // Preserve run status for cold recovery; stop writers before releasing leases.
     const errors: string[] = []
     for (const run of this.runs.values()) errors.push(...await this.drainWorkers(run, false,'shutdown'))
@@ -818,7 +958,7 @@ export class CaptainController {
   }
   private async drainWorkers(run: Run, cancel: boolean,reason: 'stop'|'shutdown'='stop'): Promise<string[]> {
     const errors: string[] = []
-    await Promise.all(run.tasks.filter(t => !TERMINAL.has(t.status)).map(async task => {
+    await Promise.all(this.ownedTasks(run).filter(t => !TERMINAL.has(t.status)).map(async task => {
       try {
         await this.dependencyQuiescences.get(task.id)
         await this.runtime.stop(task.sessionId,reason)

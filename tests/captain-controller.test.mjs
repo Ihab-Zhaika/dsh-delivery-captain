@@ -1092,3 +1092,165 @@ test('existing-only control is coordinator-owned and does not freeze other repos
  await f.controller.control('captain','finish-existing');const second=await f.controller.start('other',{...f.config,repository:'owner/other'});f.setTickets([ticket('1'),ticket('2')]);await f.controller.tick()
  assert.equal(first.tasks.length,1);assert.equal(second.tasks.length,2);assert.equal(second.intakeMode,undefined)
 }))
+test('parked threshold creates one recovery session, fences intake and preserves the ticket roster',()=>fixture(async f=>{
+ f.setTickets(Array.from({length:8},(_,i)=>ticket(String(i+1))))
+ const run=await f.controller.start('captain',{...f.config,parallelism:5,maxTaskMinutes:1440});await f.controller.tick()
+ for(const t of run.tasks){t.status='parked';t.phase='parked';await f.runtime.stop(t.sessionId)}
+ const ids=run.tasks.map(t=>t.id),claims=[];f.provider.claim=async t=>claims.push(t.id)
+ await Promise.all([f.controller.tick(),f.controller.recoverOwned()])
+ assert.equal(run.tasks.length,5);assert.deepEqual(run.tasks.map(t=>t.id),ids);assert.deepEqual(claims,[])
+ assert.equal(run.backlogHold.parked,5);assert.equal(run.backlogHold.threshold,4)
+ assert.equal(run.recoveryCampaign.task.kind,'recovery');assert.equal(f.starts.filter(id=>id===run.recoveryCampaign.task.id).length,1)
+ const recoveryId=run.recoveryCampaign.task.sessionId
+ await f.controller.tick();await f.controller.recoverOwned();assert.equal(run.recoveryCampaign.task.sessionId,recoveryId)
+ assert.equal(f.starts.filter(id=>id===run.recoveryCampaign.task.id).length,1)
+ const view=f.controller.view(recoveryId);assert.equal(view.coordinatorSessionId,'captain');assert.equal(view.recoveryScope.length,5)
+ await assert.rejects(f.controller.control(recoveryId,'allow-new-tickets'),/captain/i)
+ await assert.rejects(f.controller.followup(recoveryId,{title:'Extra',body:'Scope',milestone:'M1',predecessors:[]}),/recovery.*follow.up/i)
+ await f.controller.control('captain','stop');assert.equal(await f.runtime.isRunning(recoveryId),false)
+ assert.equal(run.recoveryCampaign.task.status,'cancelled')
+}))
+
+test('four parked tasks do not create a recovery workspace',()=>fixture(async f=>{
+ f.setTickets(Array.from({length:4},(_,i)=>ticket(String(i+1))))
+ const run=await f.controller.start('captain',{...f.config,parallelism:4,maxTaskMinutes:1440});await f.controller.tick()
+ for(const t of run.tasks){t.status='parked';t.phase='parked';await f.runtime.stop(t.sessionId)}
+ await f.controller.tick();assert.equal(run.recoveryCampaign,undefined);assert.equal(run.backlogHold,undefined)
+}))
+
+async function recoveryFixture(f){
+ f.setTickets(Array.from({length:5},(_,i)=>ticket(String(i+1))))
+ const run=await f.controller.start('captain',{...f.config,parallelism:5,maxTaskMinutes:1440,maxTickets:5})
+ await f.controller.tick();for(const task of run.tasks){task.status='parked';task.phase='parked';await f.runtime.stop(task.sessionId)}
+ return run
+}
+test('failed restore preflight never starts a recovery owner',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);run.recoveryPending=true;f.provider.preflight=async()=>{throw new Error('Provider unavailable')}
+ const starts=f.starts.length;await f.controller.tick();assert.equal(f.starts.length,starts);assert.equal(run.recoveryCampaign,undefined)
+}))
+test('rejected recovery reports do not mutate release selection',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task
+ await assert.rejects(f.controller.report(root.sessionId,{phase:'blocked',ready:true,affectedTaskIds:[run.tasks[0].id]}),/ready and blocked/)
+ assert.deepEqual(run.recoveryCampaign.affectedTaskIds,[])
+ await assert.rejects(f.controller.report(root.sessionId,{phase:'review',affectedTaskIds:['foreign']}),/existing task/)
+ assert.deepEqual(run.recoveryCampaign.affectedTaskIds,[])
+}))
+test('Drain retains the lease while the recovery owner is working, then quiesces it',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task
+ await f.controller.control('captain','drain');await f.controller.tick();assert.equal(run.status,'draining');assert.equal(await f.runtime.isRunning(root.sessionId),true)
+ await f.runtime.stop(root.sessionId);await f.controller.tick();assert.equal(run.status,'stopped');assert.equal(root.status,'cancelled');assert.equal(await f.runtime.isRunning(root.sessionId),false)
+}))
+test('recovery startup retries retain one identity and Pause prevents late admission',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);const prepare=f.runtime.prepare;let release,entered
+ const gate=new Promise(r=>release=r),began=new Promise(r=>entered=r)
+ f.runtime.prepare=async t=>{if(t.kind==='recovery'){entered();await gate}await prepare(t)}
+ const tick=f.controller.tick();await began;const root=run.recoveryCampaign.task,starts=f.starts.length
+ await f.controller.control('captain','pause');release();await tick;assert.equal(f.starts.length,starts)
+ await f.controller.control('captain','resume');await f.controller.recoverOwned();assert.equal(run.recoveryCampaign.task.id,root.id);assert.equal(f.starts.filter(id=>id===root.id).length,1)
+}))
+test('a verified shared merge releases only listed assignments and enforces target incorporation',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.control('captain','finish-existing');await f.controller.tick()
+ const root=run.recoveryCampaign.task,affected=run.tasks[0],unaffected=run.tasks[1];await f.runtime.stop(root.sessionId)
+ f.runtime.assertCaptainDiagnostics=async()=>{throw new Error('Main diagnostics still active')};f.runtime.assertRecoveryDiagnostics=async()=>{}
+ await f.controller.report(root.sessionId,{phase:'review',ready:true,affectedTaskIds:[affected.id]});await f.controller.tick();await f.controller.recoveryGrades.get(run.id)
+ assert.equal(root.status,'merged');assert.equal(affected.status,'running');assert.equal(affected.incorporateTargetSha,'merged');assert.equal(unaffected.status,'parked');assert.equal(run.tasks.length,5)
+ const wakes=f.starts.length;await f.controller.recoverOwned();assert.equal(root.status,'merged');assert.equal(f.starts.length,wakes);assert.equal(run.backlogHold,undefined);assert.equal(run.intakeMode,'existing-only')
+ f.runtime.containsTarget=async()=>false;await f.controller.report(affected.sessionId,{phase:'review',ready:true});await f.controller.tick();assert.equal(affected.status,'running');assert.ok(f.messages.some(m=>m.text.includes('Incorporate shared repair')));assert.equal(f.merges.filter(id=>id===affected.id).length,0)
+ f.runtime.containsTarget=async()=>true;await f.controller.report(affected.sessionId,{phase:'review',ready:true});await f.controller.tick();assert.equal(affected.status,'merged')
+}))
+test('an exact-head merged recovery is reconciled after lost acknowledgement without another review',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId)
+ root.status='ready';root.headSha='head';root.prUrl='https://example.com/pr';root.reviewHistory=[{passed:true,headSha:'head',at:new Date().toISOString(),findings:[],report:'manifest'}]
+ f.runtime.review=async()=>{throw new Error('Unexpected duplicate review')};f.provider.inspectPullRequest=async()=>({id:'1',url:root.prUrl,headSha:'head',merged:true,mergeSha:'merged',checksPassed:true})
+ await f.controller.tick();assert.equal(root.status,'merged');assert.equal(root.mergedSha,'merged');assert.equal(f.merges.length,0)
+}))
+
+test('a recovery release held by fresh dependencies remains pending and retries when proof changes',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task,affected=run.tasks[0];await f.runtime.stop(root.sessionId)
+ f.provider.verifyDependencies=async()=> 'Waiting for actual predecessor';await f.controller.report(root.sessionId,{phase:'review',ready:true,affectedTaskIds:[affected.id]});await f.controller.tick();await f.controller.recoveryGrades.get(run.id)
+ assert.equal(root.status,'merged');assert.equal(run.recoveryReleases[0].queuedAt,undefined);assert.equal(affected.resumeRequested,undefined)
+ f.provider.verifyDependencies=async()=>undefined;await f.controller.recoverOwned();assert.equal(affected.status,'running');assert.ok(run.recoveryReleases[0].queuedAt)
+ const starts=f.starts.length;await f.controller.recoverOwned();assert.equal(f.starts.length,starts)
+}))
+test('verified non-code recovery settles without a repository PR and does not reopen human intake',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.control('captain','finish-existing');await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId)
+ f.runtime.assertRecoveryDiagnostics=async()=>{};f.runtime.recoveryHasChanges=async()=>false
+ await f.controller.settleRecovery('captain','resolved','Completed original reports verified a supported environment repair',[run.tasks[0].id])
+ assert.equal(run.recoveryCampaign.settlement.kind,'resolved');assert.equal(root.status,'parked');assert.equal(run.tasks[0].status,'running');assert.equal(f.merges.length,0);assert.equal(run.intakeMode,'existing-only');assert.equal(run.backlogHold,undefined)
+ const starts=f.starts.length;await f.controller.tick();assert.equal(f.starts.length,starts)
+}))
+test('external settlement cannot release workers and dirty recovery code cannot bypass PR gates',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId)
+ f.runtime.assertRecoveryDiagnostics=async()=>{};f.runtime.recoveryHasChanges=async()=>true
+ await assert.rejects(f.controller.settleRecovery('captain','resolved','Source changed but not reviewed',[run.tasks[0].id]),/gated PR/)
+ f.runtime.recoveryHasChanges=async()=>false
+ await assert.rejects(f.controller.settleRecovery('captain','external','Genuine physical device prerequisite unchanged',[run.tasks[0].id]),/cannot release/)
+ await f.controller.settleRecovery('captain','external','Genuine physical device prerequisites remain unavailable',[])
+ assert.ok(run.backlogHold);assert.equal(run.recoveryReleases,undefined);const starts=f.starts.length;await f.controller.tick();assert.equal(f.starts.length,starts)
+}))
+
+test('three consecutive scheduler failures trigger a recovery owner even below the parked threshold',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();f.provider.discover=async()=>{throw new Error('Runtime transport defect')}
+ for(let i=0;i<3;i++)await f.controller.tick()
+ assert.equal(run.schedulerFailures.count,3);assert.equal(run.recoveryCampaign,undefined)
+ await f.controller.recoverOwned();assert.equal(run.recoveryCampaign.task.kind,'recovery');assert.match(run.backlogHold.reason,/consecutive scheduler failures/);assert.equal(run.tasks.length,1)
+}))
+test('an independent recovery review cannot block existing owned maintenance',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId)
+ let release,entered;const gate=new Promise(r=>release=r),started=new Promise(r=>entered=r)
+ f.runtime.review=async t=>{if(t.kind==='recovery'){entered();await gate}return {passed:true,headSha:'head',findings:[],report:'report'}}
+ await f.controller.report(root.sessionId,{phase:'review',ready:true});await f.controller.tick();await started
+ await f.controller.recoverOwned();assert.equal(run.recoveryCampaign.task.status,'ready');assert.equal(run.tasks.length,5)
+ release();await f.controller.recoveryGrades.get(run.id)
+}))
+
+test('a later explicit WAIT revokes an older pending shared-recovery intent',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task,affected=run.tasks[0];await f.runtime.stop(root.sessionId)
+ f.provider.verifyDependencies=async()=> 'Actual predecessor still open';await f.controller.report(root.sessionId,{phase:'review',ready:true,affectedTaskIds:[affected.id]});await f.controller.tick();await f.controller.recoveryGrades.get(run.id)
+ assert.equal(run.recoveryReleases[0].queuedAt,undefined)
+ await f.controller.message('captain',affected.id,'A later device prerequisite remains unavailable','wait');const starts=f.starts.length
+ f.provider.verifyDependencies=async()=>undefined;await f.controller.recoverOwned()
+ assert.ok(run.recoveryReleases[0].revokedAt);assert.equal(f.starts.length,starts);assert.equal(affected.waitingDecision,'A later device prerequisite remains unavailable')
+}))
+test('settlement rejects owned activity arriving during asynchronous validation',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId)
+ f.runtime.assertRecoveryDiagnostics=async()=>{};f.runtime.recoveryHasChanges=async()=>{await f.runtime.start(root,run);return false}
+ await assert.rejects(f.controller.settleRecovery('captain','external','Verified external acceptance still unavailable',[]),/activity changed/)
+ assert.equal(run.recoveryCampaign.settlement,undefined);assert.notEqual(root.status,'parked')
+}))
+test('a settled campaign stays quiet when unrelated existing work lowers the parked count',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId)
+ f.runtime.assertRecoveryDiagnostics=async()=>{};f.runtime.recoveryHasChanges=async()=>false
+ await f.controller.settleRecovery('captain','resolved','Completed original diagnostics verified a normal environment repair',[run.tasks[0].id])
+ run.tasks[1].status='running';const starts=f.starts.length;await f.controller.recoverOwned()
+ assert.equal(run.tasks.filter(t=>t.status==='parked').length,3);assert.equal(f.starts.length,starts);assert.equal(root.status,'parked');assert.ok(run.recoveryCampaign.settlement)
+}))
+
+test('explicit review backend policy updates existing assignments without waking workers or weakening CI',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,reviewBackend:'ocr'});await f.controller.tick();const task=run.tasks[0],before=f.starts.length,commands=[...task.assignmentConfig.verifyCommands]
+ await f.controller.updatePolicy('captain',{reviewBackend:'agent',ocrAdditionalCheck:false})
+ assert.equal(run.config.reviewBackend,'agent');assert.equal(task.assignmentConfig.reviewBackend,'agent');assert.deepEqual(task.assignmentConfig.verifyCommands,commands);assert.equal(f.starts.length,before);assert.match(run.policyNotice.text,/PRIMARY review/)
+}))
+test('review policy changes during verification invalidate the old result before merge',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,maxTickets:1,reviewBackend:'ocr'});await f.controller.tick();const task=run.tasks[0]
+ let entered,release;const started=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+ f.runtime.review=async()=>{entered();await gate;return {passed:true,headSha:'head',baseSha:'base',findings:[],report:'old OCR pass',backend:'ocr'}}
+ await f.controller.report(task.sessionId,{phase:'review',ready:true});const tick=f.controller.tick();await started
+ await f.controller.updatePolicy('captain',{reviewBackend:'agent',ocrAdditionalCheck:false});release();await tick
+ assert.equal(f.merges.length,0);assert.ok(f.messages.some(m=>m.text.includes('policy changed')));assert.equal(task.reviewHistory.at(-1).backend,'ocr')
+}))
+
+test('unrelated legacy configuration updates preserve implicit OCR review',()=>fixture(async f=>{
+ const run=await f.controller.start('captain',{...f.config,reviewBackend:'ocr'});delete run.config.reviewBackend
+ await f.controller.control('captain','parallelism',3);assert.equal(run.config.reviewBackend,'ocr')
+ delete run.config.reviewBackend;await f.controller.updateMilestones('captain',['M1']);assert.equal(run.config.reviewBackend,'ocr')
+}))
+test('a later WAIT during release persistence cannot be adopted as the old intent baseline',()=>fixture(async f=>{
+ const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task,affected=run.tasks[0];await f.runtime.stop(root.sessionId)
+ f.provider.verifyDependencies=async()=> 'Predecessor still open';await f.controller.report(root.sessionId,{phase:'review',ready:true,affectedTaskIds:[affected.id]});await f.controller.tick();await f.controller.recoveryGrades.get(run.id)
+ f.provider.verifyDependencies=async()=>undefined;const save=f.controller.store.save.bind(f.controller.store);let entered,release,once=false
+ const began=new Promise(r=>entered=r),gate=new Promise(r=>release=r)
+ f.controller.store.save=async state=>{if(!once&&state.recoveryReleases?.length){once=true;entered();await gate}await save(state)}
+ const pending=f.controller.recoverOwned();await began;await f.controller.message('captain',affected.id,'Fresh human device hold must remain','wait');const starts=f.starts.length;release();await pending
+ assert.equal(f.starts.length,starts);assert.equal(affected.waitingDecision,'Fresh human device hold must remain');assert.equal(run.recoveryReleases[0].queuedAt,undefined)
+}))

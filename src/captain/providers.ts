@@ -83,7 +83,7 @@ abstract class Provider<Seed> implements TicketProvider {
   abstract claim(ticket: Ticket, runId: string): Promise<void>
   abstract ensurePullRequest(task: Task): Promise<PullRequest>
   abstract inspectPullRequest(task: Task): Promise<PullRequest>
-  abstract merge(task: Task, expectedHead: string): Promise<PullRequest>
+  abstract merge(task: Task, expectedHead: string, permitted?:()=>boolean): Promise<PullRequest>
   abstract close(task: Task): Promise<void>
   abstract createFollowup(task: Task, input: FollowupInput, permitted?: () => boolean): Promise<string>
   protected async confirmMerge(task: Task, expected: string): Promise<PullRequest> {
@@ -200,9 +200,9 @@ class GithubProvider extends Provider<Row> {
     if (matches.length > 1) throw new Error('Multiple pull requests match worker branch')
     if (matches[0]?.merged_at) { task.prUrl = required(matches[0].html_url, 'PR URL'); return this.inspectPullRequest(task) }
     await this.push(task)
-    const pr = matches[0] ?? object(await this.api(this.endpoint('pulls'), ['--method', 'POST', '-f', `title=${task.ticket.title}`, '-f', `head=${task.branch}`, '-f', `base=${this.config.targetBranch}`, '-f', `body=Closes #${numberId(task.ticket.id)}\n\nDarKingDoom Plugin task ${task.id}`]))
-    const closingLine = `Closes #${numberId(task.ticket.id)}`
-    if (matches[0] && !String(pr.body ?? '').split(/\r?\n/).includes(closingLine)) await this.api(this.endpoint(`pulls/${numberId(pr.number)}`), ['--method', 'PATCH', '-f', `body=${pr.body ?? ''}\n\n${closingLine}`])
+    const closingLine = task.kind==='recovery'?'':`Closes #${numberId(task.ticket.id)}`
+    const pr = matches[0] ?? object(await this.api(this.endpoint('pulls'), ['--method', 'POST', '-f', `title=${task.ticket.title}`, '-f', `head=${task.branch}`, '-f', `base=${this.config.targetBranch}`, '-f', `body=${closingLine}\n\nDarKingDoom Plugin ${task.kind==='recovery'?'shared recovery':'task'} ${task.id}`]))
+    if (matches[0] && closingLine && !String(pr.body ?? '').split(/\r?\n/).includes(closingLine)) await this.api(this.endpoint(`pulls/${numberId(pr.number)}`), ['--method', 'PATCH', '-f', `body=${pr.body ?? ''}\n\n${closingLine}`])
     task.prUrl = required(pr.html_url, 'PR URL')
     return this.inspectPullRequest(task)
   }
@@ -225,11 +225,12 @@ class GithubProvider extends Provider<Row> {
     const checksPassed = identity && pr.state === 'OPEN' && pr.isDraft === false && pr.mergeStateStatus === 'CLEAN' && ['', 'APPROVED', null, undefined].includes(pr.reviewDecision) && goodChecks
     return { id: numberId(pr.number), url: required(pr.url, 'PR URL'), headSha, merged: identity && pr.state === 'MERGED', mergeSha: pr.mergeCommit?.oid, checksPassed, blockedReason: checksPassed ? undefined : 'Remote checks, reviews, branch identity or merge policies are not satisfied' }
   }
-  async merge(task: Task, expectedHead: string): Promise<PullRequest> {
+  async merge(task: Task, expectedHead: string, permitted?:()=>boolean): Promise<PullRequest> {
     const pr = await this.inspectPullRequest(task)
     if (pr.headSha !== expectedHead) throw new Error('Pull request head changed since review')
     if (pr.merged) return this.confirmMerge(task, expectedHead)
     if (!pr.checksPassed) throw new Error(pr.blockedReason)
+    if(permitted&&!permitted())throw new Error('Merge admission revoked by run or review policy change')
     await this.runner('gh', ['pr', 'merge', pr.id, '--repo', this.config.repository, '--merge', '--match-head-commit', expectedHead], { cwd: this.config.workspace })
     return this.mergeResult(task, expectedHead)
   }
@@ -404,8 +405,8 @@ class AzureProvider extends Provider<string> {
     if (matches.length > 1) throw new Error('Multiple pull requests match worker branch')
     if (matches[0]?.status === 'completed') { task.prUrl = this.prUrl(matches[0]); return this.inspectPullRequest(task) }
     await this.push(task)
-    const pr = matches[0] ?? object(await this.az(['repos', 'pr', 'create', '--repository', this.config.repository, '--source-branch', task.branch, '--target-branch', this.config.targetBranch, '--title', task.ticket.title, '--description', `DarKingDoom Plugin task ${task.id}`, '--work-items', numberId(task.ticket.id)]))
-    if (matches[0]) {
+    const pr = matches[0] ?? object(await this.az(['repos', 'pr', 'create', '--repository', this.config.repository, '--source-branch', task.branch, '--target-branch', this.config.targetBranch, '--title', task.ticket.title, '--description', `DarKingDoom Plugin ${task.kind==='recovery'?'shared recovery':'task'} ${task.id}`, ...task.kind==='recovery'?[]:['--work-items', numberId(task.ticket.id)]]))
+    if (matches[0] && task.kind!=='recovery') {
       const linked = array(await this.az(['repos', 'pr', 'work-item', 'list', '--id', numberId(pr.pullRequestId)], false))
       if (!linked.some(x => String(x.id) === task.ticket.id)) await this.az(['repos', 'pr', 'work-item', 'add', '--id', numberId(pr.pullRequestId), '--work-items', numberId(task.ticket.id)], false)
     }
@@ -442,11 +443,12 @@ class AzureProvider extends Provider<string> {
     const checksPassed = identity && pr.status === 'active' && pr.isDraft === false && pr.mergeStatus === 'succeeded' && policiesPassed && statusesPassed && array(pr.reviewers ?? []).every(x => Number(x.vote) >= 0 && (!x.isRequired || Number(x.vote) >= 5))
     return { id: numberId(pr.pullRequestId), url: this.prUrl(pr), headSha, merged: identity && pr.status === 'completed', mergeSha: pr.lastMergeCommit?.commitId, checksPassed, blockedReason: checksPassed ? undefined : 'Azure policies, reviewers, draft, branch identity or merge status block completion' }
   }
-  async merge(task: Task, expectedHead: string): Promise<PullRequest> {
+  async merge(task: Task, expectedHead: string, permitted?:()=>boolean): Promise<PullRequest> {
     const pr = await this.inspectPullRequest(task)
     if (pr.headSha !== expectedHead) throw new Error('Pull request head changed since review')
     if (pr.merged) return this.confirmMerge(task, expectedHead)
     if (!pr.checksPassed) throw new Error(pr.blockedReason)
+    if(permitted&&!permitted())throw new Error('Merge admission revoked by run or review policy change')
     await this.invoke('git', 'pullRequests', [`repositoryId=${this.config.repository}`, `pullRequestId=${pr.id}`], 'PATCH', { status: 'completed', lastMergeSourceCommit: { commitId: expectedHead }, completionOptions: { bypassPolicy: false, deleteSourceBranch: false, transitionWorkItems: false } })
     return this.mergeResult(task, expectedHead)
   }

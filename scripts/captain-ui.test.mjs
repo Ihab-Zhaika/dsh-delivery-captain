@@ -143,7 +143,7 @@ test('live intake policy preserves a draft across polling and posts all policy v
   assert.equal(live('Live OCR token budget').props.value,250000)
   await act(async()=>p.renderer.root.findAllByType('button').find(b=>b.children.includes('Apply policy')).props.onClick())
   await p.settle()
-  assert.deepEqual(p.policyRequests,[{sessionId:'coordinator',includeUnmilestoned:true,includeRequiredPredecessors:true,ocrMaxTokensBudget:250000}])
+  assert.deepEqual(p.policyRequests,[{sessionId:'coordinator',includeUnmilestoned:true,includeRequiredPredecessors:true,ocrMaxTokensBudget:250000,reviewBackend:'ocr',ocrAdditionalCheck:false}])
   assert.match(p.text(),/Policy saved/)
 },true,{policyPass:true}))
 
@@ -352,3 +352,11 @@ test('coordinator can close new intake while keeping existing recovery and expli
  await act(async()=>p.renderer.root.findAllByType('button').find(b=>b.children.includes('Allow new tickets')).props.onClick());await p.settle()
  assert.deepEqual(p.controlRequests[1],{sessionId:'coordinator',action:'allow-new-tickets'});assert.doesNotMatch(p.text(),/Existing tasks only:/)
 },true,{controlPass:true,failFirst:false}))
+
+test('primary agent review and optional OCR are explicit live policy choices',()=>withPollingPanel(async p=>{
+ const select=p.renderer.root.findByProps({'aria-label':'Live primary review backend'})
+ await act(async()=>select.props.onChange({target:{value:'agent'}}))
+ await act(async()=>p.renderer.root.findByProps({'aria-label':'Live optional OCR check'}).props.onChange({target:{checked:false}}))
+ await act(async()=>p.renderer.root.findAllByType('button').find(b=>b.children.includes('Apply policy')).props.onClick());await p.settle()
+ assert.equal(p.policyRequests[0].reviewBackend,'agent');assert.equal(p.policyRequests[0].ocrAdditionalCheck,false);assert.equal(p.policyRequests[0].ocrMaxTokensBudget,1_000_000)
+},true,{policyPass:true,failFirst:false}))

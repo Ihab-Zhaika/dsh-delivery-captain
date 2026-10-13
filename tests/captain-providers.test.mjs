@@ -23,6 +23,31 @@ function fake(respond) {
 }
 test('provider factory exists', () => assert.equal(typeof mod.createProvider, 'function'))
 
+test('GitHub shared recovery PR has no fake closing issue or tracker creation',async()=>{
+ const root={...task,kind:'recovery',ticket:{id:'recovery',title:'Shared delivery repair'}}
+ const f=fake((file,a)=>{
+  if(file==='git')return a[0]==='rev-parse'?'abc':''
+  if(a[1]?.startsWith('repos/owner/repo/pulls?'))return [[]]
+  if(a[1]==='repos/owner/repo/pulls'){assert.ok(a.some(x=>x.startsWith('body=')&&x.includes('shared recovery')));assert.ok(!a.some(x=>x.includes('Closes #')));return {number:9,html_url:root.prUrl}}
+  if(a[0]==='pr'&&a[1]==='view')return pr
+ })
+ const result=await mod.createProvider(config,f.run).ensurePullRequest(root)
+ assert.equal(result.headSha,'abc');assert.ok(!f.calls.some(c=>c.args[1]?.includes('/issues')))
+})
+
+test('Azure shared recovery PR skips work-item attachment and creation',async()=>{
+ const root={...azureTask,kind:'recovery',ticket:{id:'recovery',title:'Shared delivery repair'}}
+ const f=fake((file,a)=>{
+  if(file==='git')return a[0]==='rev-parse'?'abc':''
+  if(a[2]==='list')return []
+  if(a[2]==='create'){assert.equal(a.includes('--work-items'),false);return azurePr}
+  if(a[2]==='show')return azurePr
+  if(a[2]==='policy')return []
+ })
+ assert.equal((await mod.createProvider(azureConfig,f.run).ensurePullRequest(root)).headSha,'abc')
+ assert.ok(!f.calls.some(c=>c.args.includes('work-item')))
+})
+
 test('GitHub closes follow-up creation admission after asynchronous milestone lookup',async()=>{
   let permitted=true
   const f=fake((_file,a)=>{

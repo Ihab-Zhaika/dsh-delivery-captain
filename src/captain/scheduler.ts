@@ -111,6 +111,7 @@ export function validateConfig(raw: unknown): RunConfig {
     return value
   }
   if (c.provider !== 'github' && c.provider !== 'azure') throw new Error('Choose github or azure mode')
+  if(c.reviewBackend!==undefined&&!['agent','ocr'].includes(String(c.reviewBackend)))throw new Error('Review backend must be agent or ocr')
   const workspace = str('workspace')
   if (!isAbsolute(workspace)) throw new Error('Workspace must be an absolute repository path')
   const remote = str('remote', 'origin'), targetBranch = str('targetBranch', 'main')
@@ -124,7 +125,7 @@ export function validateConfig(raw: unknown): RunConfig {
   const result: RunConfig = { provider: c.provider, repository: str('repository'), workspace, remote, targetBranch,
     milestones: c.milestones as string[], includeUnmilestoned:bool('includeUnmilestoned',false),includeRequiredPredecessors:bool('includeRequiredPredecessors',false),ocrMaxTokensBudget:integer('ocrMaxTokensBudget',1_000_000,1,10_000_000),parallelism: integer('parallelism', 2, 1, 32), maxTeamMembers: integer('maxTeamMembers', 3, 1, 16),
     pollSeconds: integer('pollSeconds', 30, 5, 3600), maxRepairRounds: integer('maxRepairRounds', 3, 0, 20), maxTaskMinutes: integer('maxTaskMinutes', 120, 1, 1440),
-    maxTickets: integer('maxTickets', 0, 0, 100000),
+    maxTickets: integer('maxTickets', 0, 0, 100000),parkedRecoveryThreshold:integer('parkedRecoveryThreshold',4,0,1000),reviewBackend:(c.reviewBackend??'agent') as 'agent'|'ocr',ocrAdditionalCheck:bool('ocrAdditionalCheck',false),
     verifyCommands: c.verifyCommands as string[], workerPreset: str('workerPreset', 'standard'), requireBrowser: bool('requireBrowser', false), requireMemory: bool('requireMemory', true),
     ...optional('organization') ? { organization: optional('organization') } : {}, ...optional('project') ? { project: optional('project') } : {}, ...optional('query') ? { query: optional('query') } : {} }
   if(c.ticketIds!==undefined) {

@@ -29,6 +29,9 @@ export interface RunConfig {
     includeUnmilestoned?: boolean;
     includeRequiredPredecessors?: boolean;
     ocrMaxTokensBudget?: number;
+    parkedRecoveryThreshold?: number;
+    reviewBackend?: 'agent' | 'ocr';
+    ocrAdditionalCheck?: boolean;
     parallelism: number;
     maxTeamMembers: number;
     pollSeconds: number;
@@ -70,6 +73,10 @@ export interface Question {
     lastNotifyAttemptAt?: string;
 }
 export interface Task {
+    kind?: 'recovery';
+    incorporateTargetSha?: string;
+    recoveryScopeAt?: string;
+    holdRevision?: number;
     assignmentConfig?: RunConfig;
     budgetStartedAt?: string;
     pendingHumanRetry?: {
@@ -126,6 +133,44 @@ export interface Run {
     config: RunConfig;
     status: 'running' | 'paused' | 'draining' | 'stopped';
     intakeMode?: 'existing-only' | 'new-tickets';
+    backlogHold?: {
+        since: string;
+        parked: number;
+        threshold: number;
+        reason: string;
+    };
+    recoveryCampaign?: {
+        task: Task;
+        fingerprint: string;
+        affectedTaskIds: string[];
+        affectedHoldRevisions?: Record<string, number>;
+        generation?: number;
+        lastAttemptAt?: string;
+        lastSentFingerprint?: string;
+        error?: string;
+        settlement?: {
+            kind: 'resolved' | 'external';
+            at: string;
+            note: string;
+            fingerprint: string;
+        };
+    };
+    recoveryReleases?: Array<{
+        taskId: string;
+        sourceHead?: string;
+        targetSha?: string;
+        note: string;
+        key: string;
+        holdRevision?: number;
+        queuedAt?: string;
+        revokedAt?: string;
+        error?: string;
+    }>;
+    schedulerFailures?: {
+        count: number;
+        at: string;
+        message: string;
+    };
     createdAt: string;
     updatedAt: string;
     tasks: Task[];
@@ -178,7 +223,7 @@ export interface TicketProvider {
     verifyDependencies?(task: Task): Promise<string | undefined>;
     ensurePullRequest(task: Task): Promise<PullRequest>;
     inspectPullRequest(task: Task): Promise<PullRequest>;
-    merge(task: Task, expectedHead: string): Promise<PullRequest>;
+    merge(task: Task, expectedHead: string, permitted?: () => boolean): Promise<PullRequest>;
     close(task: Task): Promise<void>;
     createFollowup(task: Task, input: FollowupInput, permitted?: () => boolean): Promise<string>;
 }
@@ -188,6 +233,9 @@ export interface ReviewResult {
     baseSha?: string;
     report: string;
     findings: string[];
+    backend?: 'agent' | 'ocr';
+    policyStamp?: string;
+    reviewerSessionId?: string;
     failureKind?: 'team-evidence' | 'infrastructure' | 'findings';
 }
 export interface WorkerRuntime {
@@ -197,6 +245,10 @@ export interface WorkerRuntime {
     workspacePath?(sessionId: string): Promise<string | null>;
     evidence?(run: Run): Promise<unknown>;
     assertCaptainDiagnostics?(run: Run): Promise<void>;
+    assertRecoveryDiagnostics?(run: Run): Promise<void>;
+    containsTarget?(task: Task, sha: string): Promise<boolean>;
+    renewRecovery?(task: Task, config: RunConfig, generation: number): Promise<void>;
+    recoveryHasChanges?(task: Task): Promise<boolean>;
     registerWorkspace?(task: Task, run: Run): Promise<void>;
     restore?(task: Task, run: Run): Promise<void>;
     preflight(config: RunConfig): Promise<void>;

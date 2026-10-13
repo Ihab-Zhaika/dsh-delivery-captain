@@ -1,12 +1,14 @@
 # DarKingDoom Plugin for DeepSeek Harness
 
-An explicitly activated, continuous GitHub / Azure DevOps delivery orchestrator. Each ticket gets a Git worktree registered as a **native DSH workspace**, with its dedicated ordinary root session underneath. Workers use the **original installed AgentTeams** with advance approval. Delivery proceeds through implementation, tests, OpenCodeReview, repair, PR checks, merge and closure.
+An explicitly activated, continuous GitHub / Azure DevOps delivery orchestrator. Each ticket gets a Git worktree registered as a **native DSH workspace**, with its dedicated ordinary root session underneath. Workers use the **original installed AgentTeams** with advance approval. Delivery proceeds through implementation, tests, independent agent review (OCR optional), repair, PR checks, merge and closure.
+
+**Backlog recovery:** Above four parked tickets (configurable), or after three consecutive scheduler failures, new intake is held and one dedicated non-ticket recovery workspace/session is created or reused. It investigates shared CI, review, plugin and environment causes, repairs safely or coordinates an existing owner, and releases only affected assignments with fresh proof. The monitor links to it and shows its timings. Human existing-only mode stays closed. See [review and recovery policy](docs/independent-review-policy.md).
 
 Forked from [NanmiCoder/dsh-agent-teams](https://github.com/NanmiCoder/dsh-agent-teams), retaining its history and MIT attribution. Original source remains for provenance and read-only helpers; its plugin entry is not mounted by this package. See [upstream README](README.upstream.md).
 
 ## Install
 
-Development target: **DSH 0.2.0-rc.2**, **original AgentTeams 0.1.23**, **OCR >=1.12.13**, Node **22.19+ or 24+**. OCR must emit the `ocr.run-manifest/v1` coverage contract; incompatible reports fail closed. This fork has not been published to npm.
+Development target: **DSH 0.2.0-rc.2**, **original AgentTeams 0.1.23**, **native fresh-spawn agent review; optional OCR >=1.12.13**, Node **22.19+ or 24+**. OCR must emit the `ocr.run-manifest/v1` coverage contract; incompatible reports fail closed. This fork has not been published to npm.
 
 ```powershell
 git clone https://github.com/Ihab-Zhaika/dsh-delivery-captain.git

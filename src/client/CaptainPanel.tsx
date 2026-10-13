@@ -7,7 +7,7 @@ export interface CaptainOpenDetail { sessionId: string; workspace?: string }
 interface Eligibility { ticketId: string; eligible: boolean; reason: string; state?: string; predecessors?: string[]; scope?: 'milestone'|'unmilestoned'|'predecessor'; requiredFor?: string[] }
 interface Snapshot { run: Run | null; eligibility?: Eligibility[]; role?: 'idle'|'coordinator'|'worker'; coordinatorSessionId?: string | null; coordinatorLoop?:CoordinatorLoopState|null }
 type Action = 'pause' | 'resume' | 'drain' | 'stop' | 'parallelism' | 'loop' | 'save' | 'policy' | 'finish-existing' | 'allow-new-tickets'
-type IntakePolicy = { includeUnmilestoned: boolean; includeRequiredPredecessors: boolean; ocrMaxTokensBudget: number }
+type IntakePolicy = { includeUnmilestoned: boolean; includeRequiredPredecessors: boolean; ocrMaxTokensBudget: number;reviewBackend:'agent'|'ocr';ocrAdditionalCheck:boolean }
 const MAX_OCR_TOKENS_BUDGET = 10_000_000
 
 function validReviewBudget(value: number): boolean {
@@ -15,7 +15,7 @@ function validReviewBudget(value: number): boolean {
 }
 
 function intakePolicy(config: RunConfig): IntakePolicy {
-  return { includeUnmilestoned: config.includeUnmilestoned ?? false, includeRequiredPredecessors: config.includeRequiredPredecessors ?? false, ocrMaxTokensBudget: config.ocrMaxTokensBudget ?? 1_000_000 }
+  return { includeUnmilestoned: config.includeUnmilestoned ?? false, includeRequiredPredecessors: config.includeRequiredPredecessors ?? false, ocrMaxTokensBudget: config.ocrMaxTokensBudget ?? 1_000_000,reviewBackend:config.reviewBackend??'ocr',ocrAdditionalCheck:config.ocrAdditionalCheck??false }
 }
 function scopeLabel(row: Eligibility | undefined): string {
   if (row?.scope === 'predecessor') return row.requiredFor?.length ? `Required by ${row.requiredFor.map(id => `#${id}`).join(', ')}` : 'Required predecessor'
@@ -323,7 +323,10 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
               <label className={css.check}><input type="checkbox" checked={config.includeUnmilestoned ?? false} onChange={event=>set('includeUnmilestoned',event.target.checked)} />Include tickets without a milestone</label>
               <label className={css.check}><input type="checkbox" checked={config.includeRequiredPredecessors ?? false} onChange={event=>set('includeRequiredPredecessors',event.target.checked)} />Include required predecessors outside the selected milestones</label>
               <p className={css.muted}>Milestone order sets priority; dependencies still gate dispatch. Required predecessors can run before the selected tickets that need them.</p>
-              <label>Token budget per OCR review session<input required type="number" min={1} step={1} max={MAX_OCR_TOKENS_BUDGET} value={config.ocrMaxTokensBudget ?? 1_000_000} onChange={event=>set('ocrMaxTokensBudget',Number(event.target.value))} /><small>Each review has its own budget; no shared pool across workers or the run.</small></label>
+              <label>Token budget per independent review session<input required type="number" min={1} step={1} max={MAX_OCR_TOKENS_BUDGET} value={config.ocrMaxTokensBudget ?? 1_000_000} onChange={event=>set('ocrMaxTokensBudget',Number(event.target.value))} /><small>Each review has its own budget; no shared pool across workers or the run.</small></label>
+              <label>Parked recovery threshold<input required type="number" min={0} max={1000} value={config.parkedRecoveryThreshold??4} onChange={event=>set('parkedRecoveryThreshold',Number(event.target.value))} /><small>Above this count, hold new intake and investigate in one dedicated recovery session.</small></label>
+              <label>Primary code review<select value={config.reviewBackend??'agent'} onChange={event=>set('reviewBackend',event.target.value as 'agent'|'ocr')}><option value="agent">Independent agent</option><option value="ocr">OpenCodeReview</option></select></label>
+              <label className={css.check}><input type="checkbox" checked={config.ocrAdditionalCheck??false} onChange={event=>set('ocrAdditionalCheck',event.target.checked)} />Optional additional OCR check</label>
               <div className={css.pair}><label>Remote<input required readOnly value={config.remote} /></label><label>Target branch<input required readOnly value={config.targetBranch} /></label></div>
               <div className={css.pair}><label>Parallel tickets<input required type="number" min={1} max={32} value={config.parallelism} onChange={event => set('parallelism', Number(event.target.value))} /></label><label>Members / team<input required type="number" min={1} max={16} value={config.maxTeamMembers} onChange={event => set('maxTeamMembers', Number(event.target.value))} /></label></div>
               <label>Verification commands<textarea disabled={contextLoading} required rows={3} value={commands} onChange={event => { markDirty();commandsEdited.current = true; setCommands(event.target.value) }} placeholder="Detected repository checks" /><small>{repository?.verificationSource || 'One host command per line, run in each task worktree.'}</small></label>
@@ -367,10 +370,16 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
             <div className={css.fields}>
               <label className={css.check}><input aria-label="Live include tickets without a milestone" type="checkbox" disabled={!policyEditable} checked={policy.includeUnmilestoned} onChange={event=>setPolicyValue('includeUnmilestoned',event.target.checked)} />Include tickets without a milestone</label>
               <label className={css.check}><input aria-label="Live include required predecessors outside the selected milestones" type="checkbox" disabled={!policyEditable} checked={policy.includeRequiredPredecessors} onChange={event=>setPolicyValue('includeRequiredPredecessors',event.target.checked)} />Include required predecessors outside the selected milestones</label>
-              <label>Token budget per OCR review session<input aria-label="Live OCR token budget" required type="number" min={1} step={1} max={MAX_OCR_TOKENS_BUDGET} disabled={!policyEditable} value={policy.ocrMaxTokensBudget} onChange={event=>setPolicyValue('ocrMaxTokensBudget',Number(event.target.value))} /><small>Each review has its own budget; no shared pool across workers or the run.</small></label>
+              <label>Token budget per independent review session<input aria-label="Live OCR token budget" required type="number" min={1} step={1} max={MAX_OCR_TOKENS_BUDGET} disabled={!policyEditable} value={policy.ocrMaxTokensBudget} onChange={event=>setPolicyValue('ocrMaxTokensBudget',Number(event.target.value))} /><small>Each review has its own budget; no shared pool across workers or the run.</small></label>
+              <label>Primary code review<select aria-label="Live primary review backend" disabled={!policyEditable} value={policy.reviewBackend} onChange={event=>setPolicyValue('reviewBackend',event.target.value as 'agent'|'ocr')}><option value="agent">Independent agent</option><option value="ocr">OpenCodeReview</option></select></label>
+              <label className={css.check}><input aria-label="Live optional OCR check" type="checkbox" disabled={!policyEditable} checked={policy.ocrAdditionalCheck} onChange={event=>setPolicyValue('ocrAdditionalCheck',event.target.checked)} />Optional additional OCR check</label>
               <p className={css.muted}>Milestone order sets priority; dependencies still gate dispatch. Intake changes apply to new dispatch. Budget changes apply to future OCR review sessions.</p>
               <button type="button" disabled={!policyEditable||!validReviewBudget(policy.ocrMaxTokensBudget)} onClick={()=>void mutate('policy')}>Apply policy</button>
             </div>
+          </section>}
+          {run && <section className={css.card}><div className={css.sectionTitle}><h2>Backlog recovery</h2><span>{run.tasks.filter(t=>t.status==='parked').length} parked / threshold {run.config.parkedRecoveryThreshold??4}</span></div>
+            <p>{run.backlogHold?run.backlogHold.reason:'New ticket intake is protected when parked work exceeds the threshold.'}</p>
+            {run.recoveryCampaign && <><p className={css.authorization}>One dedicated recovery session examines shared CI, review, plugin and environment causes. It does not create a ticket or waive delivery gates.</p><div className={css.links}><button onClick={()=>void navigate(run.recoveryCampaign!.task.sessionId)}>Recovery session ↗</button>{webUrl(run.recoveryCampaign.task.prUrl)&&<a href={webUrl(run.recoveryCampaign.task.prUrl)} target="_blank" rel="noreferrer">Shared repair PR ↗</a>}<span>{run.recoveryCampaign.task.status} · {run.recoveryCampaign.task.phase}</span></div><div className={css.phaseTotals}>{phaseDurations(run.recoveryCampaign.task,now).map(row=><span key={row.phase}>{row.phase}<strong>{duration(row.milliseconds)}</strong></span>)}</div>{run.recoveryCampaign.error&&<p role="alert">{run.recoveryCampaign.error}</p>}</>}
           </section>}
           <section className={css.card}><div className={css.sectionTitle}><h2>Delivery queue</h2><span>{run?.lastPollAt ? `Last discovery ${new Date(run.lastPollAt).toLocaleTimeString()}` : 'Awaiting discovery'}</span></div>
             <div className={css.tableScroll}><table><thead><tr><th>Ticket / task</th><th>Milestone</th><th>Status</th><th>Phase</th><th>Elapsed</th><th>Reviews</th><th>Open</th></tr></thead><tbody>
