@@ -8,9 +8,9 @@
 
 **Files:** src/captain/types.ts, controller.ts, captain.ts, src/client/CaptainPanel.tsx, tests/captain-controller.test.mjs, scripts/captain-ui.test.mjs, README.md, validation notes.
 
-- [ ] RED tests: no new admission under mode, in-flight discovery fence, existing blocked/parked recovery, persisted Pause/Resume, no follow-up creation, explicit reopening preserves trial bounds and separate sessions.
-- [ ] Implement mode controls and admission/follow-up guards; preserve budget and lifecycle semantics.
-- [ ] Add coordinator-only UI toggle/status and dynamic leadership instruction.
-- [ ] Review, typecheck, meaningful tests, build/pack/artifact validation.
-- [ ] Safely deploy preserving existing records and set this run existing-only; update the existing heartbeat to respect the latest user instruction.
+- [x] RED tests: no new admission under mode, in-flight discovery fence, existing blocked/parked recovery, persisted Pause/Resume, no follow-up creation, explicit reopening preserves trial bounds and separate sessions.
+- [x] Implement mode controls and admission/follow-up guards; preserve budget and lifecycle semantics.
+- [x] Add coordinator-only UI toggle/status, native control and dynamic leadership instruction.
+- [x] Review, typecheck, meaningful tests, build/pack/artifact validation (302 regressions).
+- [x] Safely deploy preserving existing records and set this run existing-only; update the existing heartbeat to respect the latest user instruction.
 - [ ] Audit interrupted OCR holds using existing original diagnostic evidence; require actual owned quiescence before a fresh review, preserve incomplete old evidence and all final gates. No timer-only messages or invented old completion.
