@@ -244,13 +244,17 @@ test('monitor separates reserved task slots from live execution and exposes queu
   assert.equal(p.evidenceRequests.length,1)
   assert.equal(p.evidenceRequests[0],'/api/darkingdoom/evidence?sessionId=coordinator')
   assert.match(p.text(),/Native execution evidence/)
+  assert.match(p.text(),/PID 70920/)
+  assert.match(p.text(),/module abcdef012345/)
+  assert.match(p.text(),/source 123456789abc/)
+  assert.doesNotMatch(p.text(),/private\/plugin/)
   const nativeText=p.renderer.root.findAllByType('p').map(node=>node.children.join(' ')).filter(text=>/Root idle/.test(text)).join('\n')
   assert.match(nativeText,/Root idle · 0 queued next-turn messages · 3 queued next-step messages/,nativeText)
   assert.match(p.text(),/queued input is not proof of a running model stream/i)
   const reservation=p.renderer.root.findAllByType('small').map(node=>node.children.join(' ').replace(/\s+/g,' ').trim()).find(text=>text.includes('Execution reservation'))
   assert.equal(reservation,'Execution reservation: owned activity or pending input observed')
   assert.doesNotMatch(p.text(),/queued secret prompt/)
-},true,{failFirst:false,nativeEvidence:{host:'host-1',workers:[{taskId:'task',sessionId:'worker',lifecycle:{available:true,status:'idle',observedAt:'2026-10-14T12:00:00.000Z',inbox:{readable:true,nextTurn:0,nextStep:3,content:'queued secret prompt'}},execution:{active:true,observedAt:'2026-10-14T12:00:00.000Z'},coordination:{status:'running',phase:'waiting',unfinishedTeamTasks:2}}]}}))
+},true,{failFirst:false,nativeEvidence:{host:{loadedAt:'2026-10-14T12:00:00.000Z',pid:70920,moduleUrl:'file:///C:/private/plugin/runtime.js',moduleSha256:'abcdef0123456789abcdef0123456789',build:{schema:1,source:'123456789abcdef0',output:'987654321abcdef0'}},workers:[{taskId:'task',sessionId:'worker',lifecycle:{available:true,status:'idle',observedAt:'2026-10-14T12:00:00.000Z',inbox:{readable:true,nextTurn:0,nextStep:3,content:'queued secret prompt'}},execution:{active:true,observedAt:'2026-10-14T12:00:00.000Z'},coordination:{status:'running',phase:'waiting',unfinishedTeamTasks:2}}]}}))
 
 test('eligibility graph lays out prerequisites before dependents and retains missing/cyclic nodes',()=>{
   const graph=ui.eligibilityGraph([{id:'1',title:'child',predecessors:['2']},{id:'2',title:'root',predecessors:[]},{id:'3',title:'missing',predecessors:['9']},{id:'4',title:'cycle',predecessors:['5']},{id:'5',title:'cycle',predecessors:['4']}])

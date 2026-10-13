@@ -12,7 +12,8 @@ interface NativeWorkerEvidence {
   execution?:{active:boolean|null;observedAt?:string;error?:string};
   coordination?:{status?:string;phase?:string;reason?:string|null;decision?:string|null;unfinishedTeamTasks?:number|null};
 }
-interface NativeEvidence {host?:string;workers:NativeWorkerEvidence[]}
+interface NativeHostEvidence {pid?:number;moduleSha256?:string;build?:{source?:string}|null}
+interface NativeEvidence {host?:string|NativeHostEvidence;workers:NativeWorkerEvidence[]}
 type Action = 'pause' | 'resume' | 'drain' | 'stop' | 'parallelism' | 'loop' | 'save' | 'policy' | 'finish-existing' | 'allow-new-tickets'
 type IntakePolicy = { includeUnmilestoned: boolean; includeRequiredPredecessors: boolean; ocrMaxTokensBudget: number;reviewBackend:'agent'|'ocr';ocrAdditionalCheck:boolean }
 const MAX_OCR_TOKENS_BUDGET = 10_000_000
@@ -55,6 +56,16 @@ export function reviewExport(task: Pick<Task, 'id' | 'ticket'>, review: ReviewEv
   let report: unknown = review.report
   try { report = JSON.parse(review.report) } catch { /* Failed gates may retain plain diagnostic text. */ }
   return JSON.stringify({ taskId: task.id, ticketId: task.ticket.id, at: review.at, passed: review.passed, headSha: review.headSha, findings: review.findings, report }, null, 2)
+}
+
+function nativeHostSummary(host:NativeEvidence['host']):string {
+  if(typeof host==='string')return host
+  if(!host||typeof host!=='object')return 'unknown'
+  const parts:string[]=[]
+  if(typeof host.pid==='number')parts.push(`PID ${host.pid}`)
+  if(typeof host.moduleSha256==='string')parts.push(`module ${host.moduleSha256.slice(0,12)}`)
+  if(typeof host.build?.source==='string')parts.push(`source ${host.build.source.slice(0,12)}`)
+  return parts.join(' · ')||'unknown'
 }
 
 function ReviewEvidenceRow({ task, review, index }: { task: Task; review: ReviewEvidence; index: number }) {
@@ -390,7 +401,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
             <button type="button" disabled={!loaded||nativeEvidenceLoading||!run} onClick={()=>void inspectNativeActivity()}>{nativeEvidenceLoading?'Inspecting…':'Inspect native activity'}</button>
             {nativeEvidenceError&&<p className={css.error} role="alert">Native activity unavailable: {nativeEvidenceError}</p>}
             {nativeEvidence&&<div className={css.fields}>
-              <p className={css.muted}>Host {nativeEvidence.host??'unknown'} · read-only evidence; no queued message was sent or changed.</p>
+              <p className={css.muted}>Host {nativeHostSummary(nativeEvidence.host)} · read-only evidence; no queued message was sent or changed.</p>
               {nativeEvidence.workers.map(worker=>{
                 const task=run?.tasks.find(item=>item.id===worker.taskId)
                 const inbox=worker.lifecycle?.inbox
