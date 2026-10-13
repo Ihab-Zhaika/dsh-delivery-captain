@@ -82,10 +82,11 @@ export class CaptainController {
     const run = this.state(sessionId)
     if (!run) return { role: 'idle' as const, run: null, coordinatorSessionId: null }
     if (run.captainSessionId === sessionId) return { role: 'coordinator' as const, run, coordinatorSessionId: sessionId }
-    const tasks = this.ownedTasks(run).filter(t => t.sessionId === sessionId)
+    const publicTask=(task:Task):Task=>{const value={...task};delete value.pendingInputWake;return value}
+    const tasks = this.ownedTasks(run).filter(t => t.sessionId === sessionId).map(publicTask)
     return { role: 'worker' as const, coordinatorSessionId: run.captainSessionId,
-      ...tasks[0]?.kind==='recovery'?{recoveryScope:run.tasks}:{},
-      run: { ...run, tasks, tickets: tasks.map(t => t.ticket), questions: run.questions.filter(q => tasks.some(t => t.id === q.taskId)),maintenanceReviewHistory:undefined,recoveryCampaign:tasks[0]?.kind==='recovery'?run.recoveryCampaign:undefined,recoveryReleases:run.recoveryReleases?.filter(release=>tasks.some(task=>task.id===release.taskId)) } }
+      ...tasks[0]?.kind==='recovery'?{recoveryScope:run.tasks.map(publicTask)}:{},
+      run: { ...run, tasks, tickets: tasks.map(t => t.ticket), questions: run.questions.filter(q => tasks.some(t => t.id === q.taskId)),maintenanceReviewHistory:undefined,recoveryCampaign:tasks[0]?.kind==='recovery'&&run.recoveryCampaign?{...run.recoveryCampaign,task:publicTask(run.recoveryCampaign.task)}:undefined,recoveryReleases:run.recoveryReleases?.filter(release=>tasks.some(task=>task.id===release.taskId)) } }
   }
   async sessionView(sessionId:string) {
     const seen=new Set<string>();let id:string|null=sessionId
@@ -307,6 +308,7 @@ export class CaptainController {
     if(task.dependencyBlocked) {
       task.phases.push({phase:task.phase,at:now(),note:`Report retained during dependency hold; requested ${report.phase}${report.ready?' ready':''}: ${report.note??''}`});await this.save(run);return task
     }
+    delete task.pendingInputWake
     task.transitionVersion=(task.transitionVersion??0)+1
     delete task.resumeRequested
     delete task.idleCheckpointAt
@@ -387,7 +389,7 @@ export class CaptainController {
       if(action==='wait'){task.status=previousStatus;task.executionActive=true;if(previousStatus!=='blocked')this.phase(task,'waiting')}
     else {this.phase(task,'analysis');delete task.blockedSince;delete task.error;delete task.idleCheckpointAt;delete task.waitingDecision}
     }
-    q.deliveredAt = now(); delete q.deliveryError; task.lastWakeAt = now(); await this.save(run)
+    q.deliveredAt = now(); delete q.deliveryError; task.lastWakeAt = now();delete task.pendingInputWake; await this.save(run)
   }
 
   async message(sessionId: string, taskId: string, text: string, action: 'resume' | 'wait' = 'resume'): Promise<void> {
@@ -418,7 +420,7 @@ export class CaptainController {
     if(this.dependencyQuiescences.has(task.id)||task.dependencyBlocked&&task.parkingError)throw new Error('Guidance not delivered: dependency quiescence is pending')
     await this.runtime.send(task.sessionId, `Captain guidance: ${text}${action==='wait'?'\nDecision: wait. Preserve the current team and holds; do not retry unchanged work.':''}`,`guidance:${task.id}:${hash}`)
     if (isStopped(run) || this.disposed) { await this.runtime.stop(task.sessionId); return }
-    task.lastGuidanceHash=hash;task.lastWakeAt=now()
+    task.lastGuidanceHash=hash;task.lastWakeAt=now();delete task.pendingInputWake
     if(!TERMINAL.has(task.status)&&task.transitionVersion===version){
       if(action==='wait'){task.holdRevision=(task.holdRevision??0)+1;task.status=previousStatus;task.executionActive=true;if(previousStatus!=='blocked')this.phase(task,'waiting')}
       else{task.status='running';this.phase(task,'analysis');delete task.blockedSince;delete task.error;delete task.idleCheckpointAt;delete task.waitingDecision}
@@ -444,7 +446,8 @@ export class CaptainController {
     const pendingAnswers=human?run.questions.filter(q=>q.taskId===task.id&&q.answer&&!q.deliveredAt&&!q.recordedAt&&!q.supersededAt).map(q=>({q,intent:questionIntent(q)})):[]
     const previousStatus=task.status
     const idleWait=task.error===IDLE_WAIT_REASON||task.phase==='waiting'
-    if(task.status!=='parked'&&await this.runtime.isRunning(task.sessionId,idleWait?{ignoreWaitingCaptain:true}:undefined))throw new Error('Worker is already executing; retry was not duplicated')
+    const activityOptions={...(idleWait?{ignoreWaitingCaptain:true}:{}),...(task.pendingInputWake?{ignoreQueuedInputFingerprint:task.pendingInputWake.fingerprint}:{})}
+    if(task.status!=='parked'&&await this.runtime.isRunning(task.sessionId,Object.keys(activityOptions).length?activityOptions:undefined))throw new Error('Worker is already executing; retry was not duplicated')
     if(!human&&!verifiedRecovery)await this.diagnostics(run,task)
     const newerWait=human&&run.questions.some(q=>q.taskId===task.id&&q.answer&&q.action==='wait'&&!q.supersededAt&&!q.deliveredAt&&!q.recordedAt&&!pendingAnswers.some(old=>old.q===q&&old.intent===questionIntent(q)))
     if(isStopped(run)||this.disposed||run.status!=='running'||task.status!==previousStatus||task.transitionVersion!==version||(task.holdRevision??0)!==hold||newerWait||expectedHold!==undefined&&(task.holdRevision??0)!==expectedHold||task.parkingError||this.dependencyQuiescences.has(task.id))throw new Error('Task changed during resumption validation or has not quiesced')
@@ -488,10 +491,33 @@ export class CaptainController {
       const version=task.transitionVersion
       let executing=true,confirmed=false
       const idleWait=task.error===IDLE_WAIT_REASON
-      try {executing=await this.runtime.isRunning(task.sessionId,idleWait?{ignoreWaitingCaptain:true}:undefined);confirmed=true}catch{/* Unknown jobs retain capacity. */}
+      const activityOptions={...(idleWait?{ignoreWaitingCaptain:true}:{}),...(task.pendingInputWake?{ignoreQueuedInputFingerprint:task.pendingInputWake.fingerprint}:{})}
+      try {executing=await this.runtime.isRunning(task.sessionId,Object.keys(activityOptions).length?activityOptions:undefined);confirmed=true}catch{/* Unknown jobs retain capacity. */}
       if(this.disposed||run.status!=='running')return
       if(task.status!=='blocked'||task.transitionVersion!==version)continue
       const idleHold=task.error===IDLE_WAIT_REASON
+      const otherActive=this.activeCount(run)-(task.executionActive?1:0)
+      const queuedInputHold=task.error?.startsWith('Existing queued input')||task.error?.startsWith('Changed queued input')
+      if(confirmed&&executing&&task.pendingInputWake&&!task.resumeRequested&&queuedInputHold&&Date.now()<=taskDeadline(task,taskDeliveryConfig(task,run.config).maxTaskMinutes)){
+        const oldFingerprint=task.pendingInputWake.fingerprint
+        let wake
+        try{wake=await this.runtime.wakeQueuedInput?.(task.sessionId,oldFingerprint,otherActive<run.config.parallelism)}catch{/* Keep the current hold and reserve conservatively below. */}
+        if(this.disposed||run.status!=='running')return
+        if(task.status!=='blocked'||task.transitionVersion!==version)continue
+        if(wake?.kind==='woke'&&wake.fingerprint&&wake.fingerprint!==oldFingerprint){
+          task.transitionVersion=(task.transitionVersion??0)+1;task.status='running';task.executionActive=true;task.pendingInputWake={fingerprint:wake.fingerprint,at:now()};task.lastWakeAt=now();delete task.blockedSince;delete task.error
+          this.phase(task,'analysis','Changed native inbox input arrived; re-armed it in the same existing task session')
+          await this.save(run);continue
+        }
+        if(['queued','changed','empty','failed','already-attempted'].includes(wake?.kind??'')){
+          task.executionActive=false
+          if(wake?.kind==='queued'||wake?.kind==='changed')task.error='Existing queued input changed and is waiting for an available same-session wake slot; inbox preserved'
+          if(wake?.kind==='empty'){delete task.pendingInputWake;task.error='Existing queued input disappeared before same-session wake; preserve the hold for diagnosis'}
+          if(wake?.kind==='failed'&&wake.fingerprint){task.pendingInputWake={fingerprint:wake.fingerprint,at:now()};task.error='Changed queued input could not be re-armed; preserve it and wait for another concrete solution'}
+          await this.save(run);continue
+        }
+        if(wake?.kind==='unknown'||!wake){task.executionActive=true;task.error='Changed queued inbox is held because owned activity evidence could not be verified';await this.save(run);await this.notifyBlocker(run,task);continue}
+      }
       if(confirmed&&executing&&idleHold&&!task.resumeRequested&&!task.dependencyBlocked){
         task.transitionVersion=(task.transitionVersion??0)+1;task.status='running';task.executionActive=true;delete task.blockedSince;delete task.error
         this.phase(task,'waiting','Confirmed owned native activity; corrected prior automatic idle observation without replaying work');await this.save(run)
@@ -503,13 +529,14 @@ export class CaptainController {
       // Incomplete initial setup still follows claim/fetch admission below.
       if(task.status!=='blocked'||!task.resumeRequested||!task.baseSha||task.parkingError||task.prUrl&&task.headSha&&task.reviewHistory?.some(r=>r.passed&&r.headSha===task.headSha))continue
       const version=task.transitionVersion
-      const idleWait=task.error===IDLE_WAIT_REASON||task.phase==='waiting'&&task.resumeRequested===true
-      const executing=await this.runtime.isRunning(task.sessionId,idleWait?{ignoreWaitingCaptain:true}:undefined)
+      const idleWait=task.error===IDLE_WAIT_REASON||task.phase==='waiting'&&task.resumeRequested===true||!!task.pendingInputWake&&task.resumeRequested===true
+      const activityOptions={...(idleWait?{ignoreWaitingCaptain:true}:{}),...(task.pendingInputWake?{ignoreQueuedInputFingerprint:task.pendingInputWake.fingerprint}:{})}
+      const executing=await this.runtime.isRunning(task.sessionId,Object.keys(activityOptions).length?activityOptions:undefined)
       if(this.disposed||run.status!=='running')return
       if(task.status!=='blocked'||!task.resumeRequested||task.transitionVersion!==version)continue
       task.executionActive=executing
       if(executing||task.kind!=='recovery'&&this.activeCount(run)>=run.config.parallelism)continue
-      const waitingRoot=idleWait&&await this.runtime.isRunning(task.sessionId)
+      const waitingRoot=(idleWait||task.pendingInputWake!==undefined)&&await this.runtime.isRunning(task.sessionId)
       if(waitingRoot){
         const reason=task.waitingDecision??task.error??'A changed prerequisite was verified'
         delete task.resumeRequested;task.status='running';task.executionActive=true;task.lastWakeAt=now();delete task.blockedSince;delete task.error;delete task.idleCheckpointAt;delete task.waitingDecision
@@ -518,7 +545,7 @@ export class CaptainController {
         try{
           const delivered=await this.runtime.send(task.sessionId,`Captain resumed this existing delivery assignment with changed evidence: ${reason}\nContinue in the same worktree and original AgentTeams team. Preserve every failed attempt and receipt; do not create a ticket, team or worktree.`,`resume-waiting:${task.id}:${revision}`,()=>run.status==='running'&&task.status==='running'&&task.transitionVersion===revision)
           if(delivered===false)throw new Error('Native waiting-session steer was not admitted')
-          if(task.status==='running'&&task.transitionVersion===revision){delete task.pendingHumanRetry;await this.save(run)}
+          if(task.status==='running'&&task.transitionVersion===revision){delete task.pendingHumanRetry;delete task.pendingInputWake;await this.save(run)}
         }catch(error){
           if(task.status==='running'&&task.transitionVersion===revision){task.status='blocked';task.executionActive=false;task.resumeRequested=true;task.error=IDLE_WAIT_REASON;task.waitingDecision=reason;this.phase(task,'waiting',`Changed-evidence steer was not admitted: ${String(error)}`);await this.save(run)}
         }
@@ -817,7 +844,28 @@ export class CaptainController {
     const version=task.transitionVersion,phase=task.phase
     let executing:boolean
     try{executing=await this.runtime.isRunning(task.sessionId,phase==='waiting'?{ignoreWaitingCaptain:true}:undefined)}catch{return}
-    if(this.disposed||!['running','draining'].includes(run.status)||task.transitionVersion!==version||task.status!=='running'||task.phase!==phase||executing)return
+    if(this.disposed||!['running','draining'].includes(run.status)||task.transitionVersion!==version||task.status!=='running'||task.phase!==phase)return
+    if(executing){
+      let wake
+      try{wake=await this.runtime.wakeQueuedInput?.(task.sessionId,task.pendingInputWake?.fingerprint)}catch{return}
+      if(this.disposed||!['running','draining'].includes(run.status)||task.transitionVersion!==version||task.status!=='running'||task.phase!==phase)return
+      if(wake?.kind==='woke'&&wake.fingerprint){
+        task.pendingInputWake={fingerprint:wake.fingerprint,at:now()};task.lastWakeAt=now();task.executionActive=true;delete task.idleCheckpointAt
+        task.phases.push({phase:task.phase,at:now(),note:'Re-armed the exact existing queued inbox input in the same session; no prompt or task was added'})
+        await this.save(run);return
+      }
+      if(wake?.kind==='already-attempted'||wake?.kind==='failed'){
+        task.transitionVersion=(task.transitionVersion??0)+1;task.status='blocked';task.executionActive=false;task.blockedSince??=now()
+        task.error=wake.kind==='already-attempted'?'Existing queued input remained idle after one same-session wake; inbox preserved and no retry repeated':'Existing queued input could not be re-armed through the native idle-session API; inbox preserved'
+        this.phase(task,'blocked',task.error);await this.save(run);await this.notifyBlocker(run,task);return
+      }
+      if(wake?.kind==='unknown'||!wake){
+        task.transitionVersion=(task.transitionVersion??0)+1;task.status='blocked';task.executionActive=true;task.blockedSince??=now()
+        task.error='Queued native input is held because exact owned descendant/job activity could not be verified'
+        this.phase(task,'blocked',task.error);await this.save(run);await this.notifyBlocker(run,task);return
+      }
+      return
+    }
     if(phase==='waiting'||phase==='blocked') {
       let blockedAt=now()
       if(phase==='blocked')for(const entry of [...task.phases].reverse()){
@@ -825,7 +873,12 @@ export class CaptainController {
         if(Number.isFinite(Date.parse(entry.at))&&Date.parse(entry.at)<=Date.parse(blockedAt))blockedAt=entry.at
       }
       task.transitionVersion=(task.transitionVersion??0)+1;task.status='blocked';task.blockedSince=phase==='waiting'?blockedAt:task.blockedSince??blockedAt;task.executionActive=false
-      task.error??=phase==='blocked'?(task.phases.at(-1)?.note??'Worker reported a blocked phase'):IDLE_WAIT_REASON
+      task.error??=task.pendingInputWake?'Existing queued input was consumed but the worker did not report new progress':phase==='blocked'?(task.phases.at(-1)?.note??'Worker reported a blocked phase'):IDLE_WAIT_REASON
+      this.phase(task,'blocked',task.error);await this.save(run);await this.notifyBlocker(run,task);return
+    }
+    if(task.pendingInputWake){
+      task.transitionVersion=(task.transitionVersion??0)+1;task.status='blocked';task.executionActive=false;task.blockedSince??=now()
+      task.error='Existing queued input was consumed but the worker did not report new progress; no timer prompt was added'
       this.phase(task,'blocked',task.error);await this.save(run);await this.notifyBlocker(run,task);return
     }
     if(task.idleCheckpointAt){task.status='blocked';task.blockedSince??=now();task.error??='Worker is idle after one recovery checkpoint; diagnose its team and pending work';this.phase(task,'blocked',task.error);await this.save(run);await this.notifyBlocker(run,task);return}

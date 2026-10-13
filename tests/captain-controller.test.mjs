@@ -53,9 +53,11 @@ test('failed native loop completion cannot prevent Stop from cancelling workers'
 test('worker view contains only its task, origin and questions; controls stay coordinator-owned',()=>fixture(async f=>{
   const run=await f.controller.start('captain',f.config);await f.controller.tick()
   const task=run.tasks[0]
+  task.pendingInputWake={fingerprint:'private-queue-fingerprint',at:'now'}
   const worker=f.controller.view(task.sessionId)
   assert.equal(worker.role,'worker');assert.equal(worker.coordinatorSessionId,'captain')
   assert.deepEqual(worker.run.tasks.map(t=>t.id),[task.id]);assert.deepEqual(worker.run.tickets.map(t=>t.id),[task.ticket.id])
+  assert.equal(worker.run.tasks[0].pendingInputWake,undefined,'opaque queue fingerprints stay within coordinator state')
   assert.equal(f.controller.view('captain').role,'coordinator');assert.equal(f.controller.view('other').run,null)
   await assert.rejects(f.controller.control(task.sessionId,'stop'),/captain/)
 }))
@@ -572,7 +574,7 @@ test('waiting ticket keeps its slot while an owned original member is still acti
   const run=await f.controller.start('captain',{...f.config,maxTickets:2,parallelism:1});await f.controller.tick();const task=run.tasks[0]
   await f.controller.report(task.sessionId,{phase:'waiting',note:'Original member is still performing scoped work'})
   task.lastWakeAt='2000-01-01'
-  f.runtime.isRunning=async(_id,options)=>options?.ignoreWaitingCaptain===true
+  f.runtime.isRunning=async(_id,options)=>options?.ignoreWaitingCaptain===true;f.runtime.wakeQueuedInput=async()=>({kind:'busy'})
   await f.controller.tick()
   assert.equal(task.status,'running');assert.equal(run.tasks.length,1);assert.equal(f.starts.length,1)
 }))
@@ -945,7 +947,7 @@ test('idle waiting workers enter the blocker clock without a timer-only wake and
 test('waiting roots retain capacity while owned members execute or activity cannot be established',()=>fixture(async f=>{
   f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1,maxTaskMinutes:480});await f.controller.tick();const task=run.tasks[0]
   await f.controller.report(task.sessionId,{phase:'waiting',note:'Waiting on actual member work'});task.lastWakeAt=new Date(Date.now()-61000).toISOString()
-  f.runtime.isRunning=async()=>true;await f.controller.tick();assert.equal(task.status,'running');assert.equal(task.blockedSince,undefined)
+  f.runtime.isRunning=async()=>true;f.runtime.wakeQueuedInput=async()=>({kind:'busy'});await f.controller.tick();assert.equal(task.status,'running');assert.equal(task.blockedSince,undefined)
   f.runtime.isRunning=async()=>{throw new Error('Native activity unavailable')};await f.controller.tick();assert.equal(task.status,'running');assert.equal(task.blockedSince,undefined)
 }))
 
@@ -1059,6 +1061,57 @@ test('startup rejection rolls back an unadmitted idle checkpoint',()=>fixture(as
  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
  f.runtime.isRunning=async()=>false;task.lastWakeAt=new Date(Date.now()-61000).toISOString();f.runtime.start=async()=>{throw new Error('Native worker request was not admitted')}
  await f.controller.tick();assert.equal(task.idleCheckpointAt,undefined);assert.equal(task.recoveryAttempts,0)
+}))
+test('idle owned sessions re-arm existing queued input without inserting a controller prompt',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ await f.controller.report(task.sessionId,{phase:'waiting',note:'The original team is waiting on queued controller input'})
+ task.lastWakeAt='2000-01-01';f.runtime.isRunning=async()=>true;let wakes=0
+ f.runtime.wakeQueuedInput=async(sessionId,previous)=>{wakes++;assert.equal(sessionId,task.sessionId);assert.equal(previous,undefined);return{kind:'woke',fingerprint:'a'.repeat(64)}}
+ const messages=f.messages.length,starts=f.starts.length;await f.controller.recoverOwned()
+ assert.equal(wakes,1);assert.equal(task.status,'running');assert.equal(task.pendingInputWake.fingerprint,'a'.repeat(64));assert.equal(task.idleCheckpointAt,undefined)
+ assert.equal(f.messages.length,messages);assert.equal(f.starts.length,starts);assert.match(task.phases.at(-1).note,/existing queued inbox input/)
+}))
+test('unknown idle inbox ownership becomes a visible fail-closed hold with capacity reserved',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ task.lastWakeAt='2000-01-01';f.runtime.isRunning=async()=>true;f.runtime.wakeQueuedInput=async()=>({kind:'unknown'})
+ const starts=f.starts.length,messages=f.messages.length;await f.controller.recoverOwned()
+ assert.equal(task.status,'blocked');assert.equal(task.executionActive,true);assert.match(task.error,/owned descendant\/job activity could not be verified/)
+ assert.equal(f.starts.length,starts);assert.equal(f.messages.filter(message=>message.id===task.sessionId).length,messages)
+}))
+test('an unchanged inbox wake is attempted once then blocks and releases its task slot',()=>fixture(async f=>{
+ f.setTickets([ticket('1'),ticket('2')]);const run=await f.controller.start('captain',{...f.config,maxTickets:2,parallelism:1});await f.controller.tick();const task=run.tasks[0]
+ task.lastWakeAt='2000-01-01';f.runtime.isRunning=async(_id,options)=>options?.ignoreQueuedInputFingerprint?false:true;let wakes=0
+ f.runtime.wakeQueuedInput=async(_sessionId,previous)=>{wakes++;return previous?{kind:'already-attempted',fingerprint:previous}:{kind:'woke',fingerprint:'b'.repeat(64)}}
+ await f.controller.recoverOwned();assert.equal(task.status,'running');assert.equal(task.pendingInputWake.fingerprint,'b'.repeat(64))
+ task.lastWakeAt='2000-01-01';await f.controller.recoverOwned()
+ assert.equal(task.status,'blocked');assert.equal(task.executionActive,false);assert.match(task.error,/one same-session wake/);assert.equal(wakes,2)
+ await f.controller.recoverOwned();assert.equal(wakes,2);assert.equal(task.executionActive,false);assert.equal(run.tasks.length,1)
+}))
+test('consumed queued input without a worker report becomes a hold instead of a timer prompt',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]
+ task.lastWakeAt='2000-01-01';let active=true;f.runtime.isRunning=async()=>active;f.runtime.wakeQueuedInput=async()=>({kind:'woke',fingerprint:'c'.repeat(64)})
+ await f.controller.recoverOwned();assert.equal(task.status,'running');assert.equal(task.pendingInputWake.fingerprint,'c'.repeat(64))
+ active=false;task.lastWakeAt='2000-01-01';const starts=f.starts.length,workerMessages=f.messages.filter(message=>message.id===task.sessionId).length;await f.controller.recoverOwned()
+ assert.equal(task.status,'blocked');assert.equal(task.executionActive,false);assert.match(task.error,/consumed but the worker did not report/)
+ assert.equal(f.starts.length,starts);assert.equal(f.messages.filter(message=>message.id===task.sessionId).length,workerMessages)
+}))
+test('a changed native inbox batch resumes only the same held task when a slot is free',()=>fixture(async f=>{
+ f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1,parallelism:1});await f.controller.tick();const task=run.tasks[0]
+ task.status='blocked';task.phase='blocked';task.executionActive=false;task.error='Existing queued input remained idle after one same-session wake; inbox preserved and no retry repeated';task.pendingInputWake={fingerprint:'a'.repeat(64),at:'old'};task.blockedSince='old'
+ f.runtime.isRunning=async(_id,options)=>options?.ignoreQueuedInputFingerprint==='a'.repeat(64)?true:false
+ f.runtime.wakeQueuedInput=async(_sessionId,previous)=>previous==='a'.repeat(64)?{kind:'woke',fingerprint:'b'.repeat(64)}:{kind:'already-attempted',fingerprint:previous}
+ const starts=f.starts.length,messages=f.messages.length;await f.controller.recoverOwned()
+ assert.equal(task.status,'running');assert.equal(task.phase,'analysis');assert.equal(task.pendingInputWake.fingerprint,'b'.repeat(64));assert.equal(task.executionActive,true)
+ assert.equal(f.starts.length,starts);assert.equal(f.messages.length,messages);assert.equal(run.tasks.length,1)
+}))
+test('a changed inbox remains queued without overbooking when all ticket slots are occupied',()=>fixture(async f=>{
+ f.setTickets([ticket('1'),ticket('2')]);const run=await f.controller.start('captain',{...f.config,maxTickets:2,parallelism:2});await f.controller.tick();const [held,active]=run.tasks
+ held.status='blocked';held.phase='blocked';held.executionActive=false;held.error='Existing queued input remained idle after one same-session wake; inbox preserved and no retry repeated';held.pendingInputWake={fingerprint:'a'.repeat(64),at:'old'};held.blockedSince='old'
+ run.config.parallelism=1;let otherActive=true;f.runtime.isRunning=async id=>id===held.sessionId?true:otherActive;const allow=[]
+ f.runtime.wakeQueuedInput=async(_sessionId,previous,allowed)=>{allow.push(allowed);return allowed?{kind:'woke',fingerprint:'b'.repeat(64)}:{kind:'queued',fingerprint:'b'.repeat(64)}}
+ await f.controller.recoverOwned();assert.deepEqual(allow,[false]);assert.equal(held.status,'blocked');assert.equal(held.executionActive,false);assert.equal(active.status,'running')
+ otherActive=false;active.status='blocked';active.executionActive=false
+ await f.controller.recoverOwned();assert.deepEqual(allow,[false,true]);assert.equal(held.status,'running');assert.equal(held.pendingInputWake.fingerprint,'b'.repeat(64));assert.equal(active.status,'blocked')
 }))
 test('owned maintenance runs while a paused-started intake scan remains in flight',()=>fixture(async f=>{
  f.setTickets([ticket('1')]);const run=await f.controller.start('captain',{...f.config,maxTickets:1});await f.controller.tick();const task=run.tasks[0]

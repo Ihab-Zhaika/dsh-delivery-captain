@@ -135,6 +135,11 @@ export interface Task {
     blockerNotifiedAt?: string;
     lastBlockerNotifyAttemptAt?: string;
     lastGuidanceHash?: string;
+    /** Exact existing native inbox batch that was re-armed once after an idle root. */
+    pendingInputWake?: {
+        fingerprint: string;
+        at: string;
+    };
     reviewHistory?: Array<ReviewResult & {
         at: string;
     }>;
@@ -281,6 +286,10 @@ export interface RecoveryMaintenance {
     incorporated: boolean;
     loaded: boolean;
 }
+export type QueuedInputWake = {
+    kind: 'woke' | 'queued' | 'already-attempted' | 'busy' | 'empty' | 'changed' | 'failed' | 'unknown';
+    fingerprint?: string;
+};
 export interface WorkerRuntime {
     coordinatorLoop?(run: Run, action: CoordinatorLoopAction): Promise<void>;
     coordinatorLoopState?(run: Run): CoordinatorLoopState;
@@ -305,6 +314,8 @@ export interface WorkerRuntime {
     start(task: Task, run: Run): Promise<void | boolean>;
     send(sessionId: string, text: string, deliveryKey?: string, permitted?: () => boolean): Promise<void | boolean>;
     stop(sessionId: string, reason?: 'stop' | 'shutdown'): Promise<void>;
+    /** Re-arm one exact existing idle-root inbox item without inserting new prompt content. */
+    wakeQueuedInput?(sessionId: string, previousFingerprint?: string, allowWake?: boolean): Promise<QueuedInputWake>;
     /**
      * Exact owned activity check. `ignoreWaitingCaptain` is reserved for the
      * controller's long-idle `phase === 'waiting'` capacity check: it excludes
@@ -314,6 +325,7 @@ export interface WorkerRuntime {
      */
     isRunning(sessionId: string, options?: {
         ignoreWaitingCaptain?: boolean;
+        ignoreQueuedInputFingerprint?: string;
     }): Promise<boolean>;
     review(task: Task, config: RunConfig, onPhase?: (phase: Phase) => Promise<void>): Promise<ReviewResult>;
     isReviewCurrent?(task: Task, config: RunConfig, review: ReviewResult): Promise<boolean>;

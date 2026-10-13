@@ -412,7 +412,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
                 return <article key={worker.taskId} className={css.reviewRecord}>
                   <strong>#{task?.ticket.id??worker.taskId}</strong>
                   <p>{queuedIdle?`Root idle · ${inbox!.nextTurn??0} queued next-turn messages · ${inbox!.nextStep??0} queued next-step messages`: `Root ${worker.lifecycle?.status??'status unavailable'} · ${activity}`}</p>
-                  {queuedIdle&&<p className={css.muted}>Queued input is not proof of a running model stream. Capacity remains reserved until owned jobs, descendants, and the inbox are safely settled.</p>}
+                  {queuedIdle&&<p className={css.muted}>Queued input is not proof of a running model stream. The controller re-arms each unchanged inbox batch once in that session; if it stays idle, it preserves the queue, records a blocker and releases the slot. New input can trigger a fresh attempt.</p>}
                   {queuedIdle&&<small>Execution reservation: {activity}</small>}
                   {worker.execution?.error&&<p className={css.error} role="alert">Activity evidence failed: {worker.execution.error}</p>}
                   {worker.coordination?.unfinishedTeamTasks!==undefined&&<small>{worker.coordination.unfinishedTeamTasks} unfinished original-team tasks · phase {worker.coordination.phase??'unknown'}</small>}
