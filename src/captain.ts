@@ -11,7 +11,7 @@ import { authenticatedWebRoutes, readJsonRequest, RequestBodyError, type WebRout
 import { CaptainController } from './captain/controller.ts'
 import { RunStore } from './captain/store.ts'
 import { createProvider } from './captain/providers.ts'
-import { createRuntime, configureFullAccess } from './captain/runtime.ts'
+import { createRuntime, configureFullAccess, deliveryOwner, installDeliveryPolicy } from './captain/runtime.ts'
 import { eligibility, validateConfig, phaseDurations } from './captain/scheduler.ts'
 import type { Phase } from './captain/types.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -39,6 +39,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const directory = resolve(config.stateDirectory ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'darkingdoom'))
   const runtime = createRuntime(ctx)
   const controller = new CaptainController(new RunStore(directory), runtime, createProvider)
+  if(ctx.agents&&ctx.systemPrompt)installDeliveryPolicy(ctx,()=>controller.all())
   await controller.restore()
   for (const run of controller.all()) if (run.status !== 'stopped') await configureFullAccess(ctx, run.captainSessionId)
   let disposed = false
@@ -74,9 +75,19 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ctx.tools.register(defineTool({ name: 'darkingdoom_status', description: 'Read your activated delivery run or assigned task. Does not activate a session.', parameters: {},
     output: { schema: { type: 'string' }, render: (_a, value) => [{ type: 'text', text: value as string }] },
     async execute(_args, exec) {
-      const view = await controller.sessionView(callerId(exec.agent)), run=view.run
-      if (!run) throw new Error('DarKingDoom Plugin is not enabled for this session')
-      return JSON.stringify({...view,coordinatorLoop:controller.loopState(run.captainSessionId),hostEvidence:await runtime.evidence?.(run),eligibility:eligibility(run.tickets,run.config.milestones,run.tasks,run.config)},null,2)
+      const agent=exec.agent
+      if(!agent||ctx.agents.get(agent.id)!==agent||agent.session.id!==agent.id)throw new Error('DarKingDoom status requires an exact registered caller')
+      const direct=controller.state(callerId(agent))
+      const owner=direct?.captainSessionId===agent.id?undefined:await deliveryOwner(ctx,controller.all(),agent)
+      const full=direct?.captainSessionId===agent.id?direct:owner?.run
+      if(!full)throw new Error('DarKingDoom Plugin is not enabled for this exact session')
+      const revision=JSON.stringify([full.id,full.status,full.coordinatorRevision,full.recoveryCampaign,full.tasks.map(task=>[task.id,task.sessionId,task.status,task.transitionVersion,task.holdRevision])])
+      const view=controller.view(owner?.task.sessionId??agent.id),visible=view.run
+      if(!visible)throw new Error('DarKingDoom caller projection is unavailable')
+      const authorized=owner?.task.kind==='recovery'?full:visible
+      const hostEvidence=await runtime.evidence?.(authorized)
+      if(ctx.agents.get(agent.id)!==agent||revision!==JSON.stringify([full.id,full.status,full.coordinatorRevision,full.recoveryCampaign,full.tasks.map(task=>[task.id,task.sessionId,task.status,task.transitionVersion,task.holdRevision])])||owner?.stamp!==(owner? (await deliveryOwner(ctx,controller.all(),agent))?.stamp:undefined))throw new Error('DarKingDoom status ownership changed during audit')
+      return JSON.stringify({...view,coordinatorLoop:controller.loopState(full.captainSessionId),hostEvidence,eligibility:eligibility(authorized.tickets,authorized.config.milestones,authorized.tasks,authorized.config)},null,2)
     } }))
   ctx.tools.register(defineTool({name:'darkingdoom_wait',description:'Activated coordinator quietly waits when all current decisions are settled. Disarms native continuation until a new delivery event, without stopping the run or waking workers.',parameters:{},output:{schema:{type:'string'},render:(_a,value)=>[{type:'text',text:value as string}]},
     async execute(_args,exec){await controller.wait(callerId(exec.agent));return 'Coordinator loop is waiting for new delivery events. Finish this turn; do not poll or repeatedly prompt workers.'}}))

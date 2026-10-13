@@ -12,8 +12,8 @@
  *   instance or require a specifier the frozen module table cannot answer.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
-import { basename, dirname, resolve as resolvePath, sep } from 'node:path'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep, win32, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { transform } from 'lightningcss'
 import { defineConfig, type UserConfig } from 'tsdown'
@@ -44,6 +44,16 @@ const GENERATED_REMOTE = /^@deepseek-ai\/dsh-[a-z0-9]+(?:-[a-z0-9]+)*\/remote$/
 /** Virtual-id wrapper keeping module CSS away from tsdown's own css pipeline. */
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
+const PROJECT_ROOT = realpathSync(dirname(fileURLToPath(import.meta.url)))
+const cssFiles = new Map<string, string>()
+
+/** Pure repository identity normalization; filesystem identity is checked separately. */
+export function cssRelativeIdentity(root: string, file: string): string {
+  const paths = /^[a-zA-Z]:[\\/]/.test(root) ? win32 : posix
+  const local = paths.relative(root, file)
+  if (!paths.isAbsolute(file) || !local || local === '..' || local.startsWith(`..${paths.sep}`) || paths.isAbsolute(local) || local.includes('\0') || !local.endsWith('.module.css')) throw new Error('CSS module is outside the package root or invalid')
+  return local.split(paths.sep).join('/')
+}
 
 /**
  * Module id this bundle registers under via `__ModuleLoader__.load`. The host
@@ -90,16 +100,22 @@ const config: UserConfig = {
     name: 'dsh-css-modules-inline',
     resolveId(source: string, importer: string | undefined) {
       if (!source.endsWith('.module.css')) return null
-      const abs = importer !== undefined ? sourceAssetPath(source, importer) : source
-      return CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
+      const abs = sourceAssetPath(source, importer)
+      const virtual = CSS_VIRTUAL_PREFIX + cssRelativeIdentity(PROJECT_ROOT, abs) + CSS_VIRTUAL_SUFFIX
+      const registered = cssFiles.get(virtual)
+      if (registered !== undefined && registered !== abs) throw new Error('Ambiguous CSS virtual module identity')
+      cssFiles.set(virtual, abs)
+      return virtual
     },
     async load(virtualId: string) {
       if (!virtualId.startsWith(CSS_VIRTUAL_PREFIX)) return null
-      const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+      const fileId = cssFiles.get(virtualId)
+      if (!fileId || !virtualId.endsWith(CSS_VIRTUAL_SUFFIX) || realpathSync(fileId) !== fileId || virtualId !== CSS_VIRTUAL_PREFIX + cssRelativeIdentity(PROJECT_ROOT, fileId) + CSS_VIRTUAL_SUFFIX) throw new Error('Unknown or changed CSS virtual module identity')
       this.addWatchFile(fileId)
       const source = readFileSync(fileId)
       const { code, exports: cssExports } = transform({
         filename: fileId,
+        projectRoot: PROJECT_ROOT,
         code: source,
         cssModules: { pattern: '[hash]_[local]' },
         minify: true,
@@ -132,19 +148,18 @@ const config: UserConfig = {
   },
 }
 
-/** Resolve an emitted JS asset import against its source-tree counterpart. */
-function sourceAssetPath(source: string, importer: string): string {
+/** Resolve the known package's emitted asset against its source counterpart; never guess outside it. */
+function sourceAssetPath(source: string, importer: string | undefined): string {
+  if (source.includes('\0') || !source.endsWith('.module.css') || importer === undefined || !isAbsolute(importer)) throw new Error('CSS module needs a valid absolute package importer')
+  cssRelativeIdentity(PROJECT_ROOT, resolvePath(dirname(importer), source))
   const emitted = resolvePath(dirname(importer), source)
-  if (existsSync(emitted)) return emitted
-  // tsc output mirrors `src/` under `lib/`; the css sources live in `src/`.
-  // Rebase a `lib/`-rooted candidate onto its `src/` counterpart.
-  const marker = `${sep}lib${sep}`
-  const srcIndex = emitted.indexOf(marker)
-  if (srcIndex !== -1) {
-    const srcPath = `${emitted.slice(0, srcIndex)}${sep}src${sep}${emitted.slice(srcIndex + marker.length)}`
-    if (existsSync(srcPath)) return srcPath
-  }
-  return source
+  const local = relative(PROJECT_ROOT, emitted)
+  const candidate = existsSync(emitted) ? emitted : local.startsWith(`lib${sep}`) ? resolvePath(PROJECT_ROOT, 'src', local.slice(4)) : emitted
+  if (!existsSync(candidate)) throw new Error(`Missing CSS module: ${candidate}`)
+  const canonical = realpathSync(candidate)
+  cssRelativeIdentity(PROJECT_ROOT, canonical)
+  if (canonical !== candidate) throw new Error('CSS module symlink or canonical identity changed')
+  return canonical
 }
 
 export default config

@@ -687,6 +687,21 @@ test('a newly resident idle child with a background job is checked after catalog
  assert.equal(await rt.isRunning(root.id),true)
 })
 
+test('A recovery evidence deduplicates exact owners and refuses conflicting campaign identity', async () => {
+  const h=host(),rt=runtime.createRuntime(h.ctx),item=task({worktree:'/worker',kind:'recovery'})
+  await rt.restore(item,{config});h.agents.get(item.sessionId).status='idle';h.ctx.subagents.listDescendants=async()=>[];h.ctx.jobs={list:()=>[]}
+  const evidence=await rt.evidence({config,tasks:[item],recoveryCampaign:{task:item}})
+  assert.equal(evidence.workers.length,1)
+  await assert.rejects(rt.evidence({config,tasks:[item],recoveryCampaign:{task:{...item,sessionId:'other'}}}),/conflicting.*owner/i)
+})
+test('A shared incorporation uses effective backend and merge only without history rewriting', () => {
+  for(const backend of ['agent','ocr']){
+    const text=runtime.workerResumePrompt(task({incorporateTargetSha:'shared',assignmentConfig:{...config,reviewBackend:backend,ocrAdditionalCheck:false,ocrMaxTokensBudget:5_000_000}}))
+    assert.match(text,/merge.*EXISTING/i);assert.match(text,/no rebase/i);assert.match(text,/dirty/i);assert.match(text,/target-ancestor/)
+    if(backend==='agent'){assert.match(text,/PRIMARY/);assert.doesNotMatch(text,/complete independent exact-head OCR/)}else assert.match(text,/--max-tokens-budget 5000000/)
+  }
+})
+
 test('automatic delivery permits original atomic edits only to owned never-started pending tasks',async t=>{
  const root=await repo(t),h=host(),item=task({worktree:root}),rt=runtime.createRuntime(h.ctx),team=await seedTeam(root,h,item,false)
  team.tasks.push({id:'t2',subject:'Repair',status:'pending',attempt:0,assignee:'implementer',dependencies:['t1'],createdAt:Date.now(),updatedAt:Date.now()});team.taskSeq=2
