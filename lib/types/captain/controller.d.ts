@@ -42,19 +42,7 @@ export declare class CaptainController {
             tasks: Task[];
             tickets: import("./types.ts").Ticket[];
             questions: Question[];
-            version: 1;
-            id: string;
-            captainSessionId: string;
-            config: RunConfig;
-            status: "running" | "paused" | "draining" | "stopped";
-            intakeMode?: "existing-only" | "new-tickets";
-            backlogHold?: {
-                since: string;
-                parked: number;
-                threshold: number;
-                reason: string;
-            };
-            recoveryCampaign?: {
+            recoveryCampaign: {
                 task: Task;
                 fingerprint: string;
                 affectedTaskIds: string[];
@@ -69,8 +57,8 @@ export declare class CaptainController {
                     note: string;
                     fingerprint: string;
                 };
-            };
-            recoveryReleases?: Array<{
+            } | undefined;
+            recoveryReleases: {
                 taskId: string;
                 sourceHead?: string;
                 targetSha?: string;
@@ -80,7 +68,19 @@ export declare class CaptainController {
                 queuedAt?: string;
                 revokedAt?: string;
                 error?: string;
-            }>;
+            }[] | undefined;
+            version: 1;
+            id: string;
+            captainSessionId: string;
+            config: RunConfig;
+            status: "running" | "paused" | "draining" | "stopped";
+            intakeMode?: "existing-only" | "new-tickets";
+            backlogHold?: {
+                since: string;
+                parked: number;
+                threshold: number;
+                reason: string;
+            };
             schedulerFailures?: {
                 count: number;
                 at: string;
@@ -115,10 +115,77 @@ export declare class CaptainController {
         run: Run;
         coordinatorSessionId: string;
     } | {
+        run: Run;
+        role: "worker";
+        coordinatorSessionId: string;
+    } | {
         run: {
             tasks: Task[];
             tickets: import("./types.ts").Ticket[];
             questions: Question[];
+            recoveryCampaign: {
+                task: Task;
+                fingerprint: string;
+                affectedTaskIds: string[];
+                affectedHoldRevisions?: Record<string, number>;
+                generation?: number;
+                lastAttemptAt?: string;
+                lastSentFingerprint?: string;
+                error?: string;
+                settlement?: {
+                    kind: "resolved" | "external";
+                    at: string;
+                    note: string;
+                    fingerprint: string;
+                };
+            } | undefined;
+            recoveryReleases: {
+                taskId: string;
+                sourceHead?: string;
+                targetSha?: string;
+                note: string;
+                key: string;
+                holdRevision?: number;
+                queuedAt?: string;
+                revokedAt?: string;
+                error?: string;
+            }[] | undefined;
+            version: 1;
+            id: string;
+            captainSessionId: string;
+            config: RunConfig;
+            status: "running" | "paused" | "draining" | "stopped";
+            intakeMode?: "existing-only" | "new-tickets";
+            backlogHold?: {
+                since: string;
+                parked: number;
+                threshold: number;
+                reason: string;
+            };
+            schedulerFailures?: {
+                count: number;
+                at: string;
+                message: string;
+            };
+            createdAt: string;
+            updatedAt: string;
+            error?: string;
+            lastPollAt?: string;
+            recoveryPending?: boolean;
+            policyNotice?: {
+                revision: number;
+                text: string;
+                deliveredAt?: string;
+            };
+            stoppedAt?: string;
+            coordinatorGoalId?: string;
+            coordinatorWaiting?: boolean;
+            coordinatorLoopError?: string;
+            coordinatorRevision?: number;
+        } | {
+            tasks: never[];
+            tickets: never[];
+            questions: never[];
             version: 1;
             id: string;
             captainSessionId: string;
@@ -179,8 +246,8 @@ export declare class CaptainController {
             coordinatorLoopError?: string;
             coordinatorRevision?: number;
         };
-        recoveryScope?: Task[] | undefined;
         role: "worker";
+        recoveryScope?: Task[] | undefined;
         coordinatorSessionId: string;
     }>;
     all(): Run[];

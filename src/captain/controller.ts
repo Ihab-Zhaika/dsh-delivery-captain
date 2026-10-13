@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path'
 import type { FollowupInput, Phase, Question, Run, RunConfig, Task, TicketProvider, WorkerRuntime } from './types.ts'
 import { eligibility, validateConfig, taskDeliveryConfig, taskDeadline, dependencyBlocker } from './scheduler.ts'
 import { RunStore } from './store.ts'
+import { incorporationInstructions } from './runtime.ts'
 import {backlogFingerprint,needsBacklogRecovery,backlogRecoveryReason,recoveryTask,recoveryFacts} from './backlog.ts'
 
 const TERMINAL = new Set<Task['status']>(['merged', 'failed', 'cancelled'])
@@ -82,7 +83,7 @@ export class CaptainController {
     const tasks = this.ownedTasks(run).filter(t => t.sessionId === sessionId)
     return { role: 'worker' as const, coordinatorSessionId: run.captainSessionId,
       ...tasks[0]?.kind==='recovery'?{recoveryScope:run.tasks}:{},
-      run: { ...run, tasks, tickets: tasks.map(t => t.ticket), questions: run.questions.filter(q => tasks.some(t => t.id === q.taskId)) } }
+      run: { ...run, tasks, tickets: tasks.map(t => t.ticket), questions: run.questions.filter(q => tasks.some(t => t.id === q.taskId)),recoveryCampaign:tasks[0]?.kind==='recovery'?run.recoveryCampaign:undefined,recoveryReleases:run.recoveryReleases?.filter(release=>tasks.some(task=>task.id===release.taskId)) } }
   }
   async sessionView(sessionId:string) {
     const seen=new Set<string>();let id:string|null=sessionId
@@ -640,7 +641,7 @@ export class CaptainController {
   private async releaseSharedRecovery(run:Run):Promise<void>{
     const campaign=run.recoveryCampaign,repair=campaign?.task
     if(!campaign||repair?.status!=='merged'||!repair.mergedSha||!repair.prUrl)return
-    for(const id of campaign.affectedTaskIds){const key=`${repair.id}:${repair.mergedSha}:${id}`;if(!run.recoveryReleases?.some(r=>r.key===key))(run.recoveryReleases??=[]).push({taskId:id,sourceHead:repair.headSha,targetSha:repair.mergedSha,holdRevision:campaign.affectedHoldRevisions?.[id]??0,key,note:`Verified shared recovery PR ${repair.prUrl} merged at ${repair.mergedSha}. Incorporate that target commit safely into this existing branch, preserve source/teams/history, resolve conflicts and rerun complete exact-head OCR/CI; unchanged external acceptance remains required.`})}
+    for(const id of campaign.affectedTaskIds){const key=`${repair.id}:${repair.mergedSha}:${id}`;if(!run.recoveryReleases?.some(r=>r.key===key))(run.recoveryReleases??=[]).push({taskId:id,sourceHead:repair.headSha,targetSha:repair.mergedSha,holdRevision:campaign.affectedHoldRevisions?.[id]??0,key,note:`Verified shared recovery PR ${repair.prUrl} merged at ${repair.mergedSha}. Safely merge into this existing branch; no rebase or history rewrite. ${incorporationInstructions(taskDeliveryConfig(run.tasks.find(task=>task.id===id)!,run.config))} Unchanged external acceptance remains required.`})}
     await this.save(run);await this.dispatchRecoveryReleases(run)
   }
   private async dispatchRecoveryReleases(run:Run):Promise<void>{
@@ -851,7 +852,7 @@ export class CaptainController {
       if(await this.dependenciesBlocked(run,task,provider))return
       await this.runtime.stop(task.sessionId)
       if (isStopped(run) || this.disposed) return
-      if(task.incorporateTargetSha){if(!this.runtime.containsTarget||!await this.runtime.containsTarget(task,task.incorporateTargetSha))throw new Error(`Incorporate shared repair ${task.incorporateTargetSha} through a safe rebase/merge, preserve work and rerun exact-head verification`);delete task.incorporateTargetSha}
+      if(task.incorporateTargetSha){if(!this.runtime.containsTarget||!await this.runtime.containsTarget(task,task.incorporateTargetSha))throw new Error(`Incorporate shared repair ${task.incorporateTargetSha} through a safe merge (no rebase or history rewrite), preserve work and rerun exact-head verification`);delete task.incorporateTargetSha}
       const previous = task.reviewHistory?.at(-1)
       const verification=taskDeliveryConfig(task,run.config)
       const policy=JSON.stringify([verification.reviewBackend??'ocr',verification.ocrAdditionalCheck??false,verification.ocrMaxTokensBudget??1_000_000])

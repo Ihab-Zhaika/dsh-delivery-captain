@@ -1158,6 +1158,14 @@ test('a verified shared merge releases only listed assignments and enforces targ
  f.runtime.containsTarget=async()=>false;await f.controller.report(affected.sessionId,{phase:'review',ready:true});await f.controller.tick();assert.equal(affected.status,'running');assert.ok(f.messages.some(m=>m.text.includes('Incorporate shared repair')));assert.equal(f.merges.filter(id=>id===affected.id).length,0)
  f.runtime.containsTarget=async()=>true;await f.controller.report(affected.sessionId,{phase:'review',ready:true});await f.controller.tick();assert.equal(affected.status,'merged')
 }))
+test('A future shared release instructions use each current review policy and merge only',()=>fixture(async f=>{
+  const run=await recoveryFixture(f);await f.controller.tick();const repair=run.recoveryCampaign.task,affected=run.tasks[0]
+  affected.assignmentConfig={...affected.assignmentConfig,reviewBackend:'agent',ocrAdditionalCheck:false,ocrMaxTokensBudget:5_000_000}
+  await f.runtime.stop(repair.sessionId);await f.controller.report(repair.sessionId,{phase:'review',ready:true,affectedTaskIds:[affected.id]});await f.controller.tick();await f.controller.recoveryGrades.get(run.id)
+  const text=run.recoveryReleases[0].note
+  assert.match(text,/merge.*existing branch/i);assert.match(text,/no rebase/i);assert.match(text,/PRIMARY/);assert.match(text,/OWN 5000000/);assert.doesNotMatch(text,/rerun complete exact-head OCR\/CI/)
+}))
+
 test('an exact-head merged recovery is reconciled after lost acknowledgement without another review',()=>fixture(async f=>{
  const run=await recoveryFixture(f);await f.controller.tick();const root=run.recoveryCampaign.task;await f.runtime.stop(root.sessionId)
  root.status='ready';root.headSha='head';root.prUrl='https://example.com/pr';root.reviewHistory=[{passed:true,headSha:'head',at:new Date().toISOString(),findings:[],report:'manifest'}]
