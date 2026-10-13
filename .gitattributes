@@ -1,0 +1,8 @@
+src/** text=auto eol=lf
+lib/** text=auto eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.ts text eol=lf
+*.md text eol=lf
+scripts/*.mjs text eol=lf

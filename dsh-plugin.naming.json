@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "policy": "dsh-plugin-naming/v1",
+  "plugin": { "namespace": "ihab-zhaika", "name": "darkingdoom", "coordinate": "ihab-zhaika/darkingdoom", "packageName": "@ihab-zhaika/dsh-darkingdoom" },
+  "names": {
+    "pluginNames": ["darkingdoom"], "loaderIds": ["darkingdoom"], "services": [],
+    "tools": ["darkingdoom_status", "darkingdoom_report", "darkingdoom_question", "darkingdoom_answer", "darkingdoom_message", "darkingdoom_followup"],
+    "commands": ["darkingdoom"], "skills": [], "skillProviders": [], "events": [], "settingsNamespaces": [],
+    "routes": [{"kind":"exact","path":"/api/darkingdoom/state"},{"kind":"exact","path":"/api/darkingdoom/start"},{"kind":"exact","path":"/api/darkingdoom/control"}]
+  }
+}

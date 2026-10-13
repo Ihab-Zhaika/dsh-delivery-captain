@@ -1,259 +1,177 @@
-<p align="right">
-  <strong>English</strong> · <a href="./README_ZH.md">简体中文</a>
-</p>
+# DarKingDoom Plugin for DeepSeek Harness
 
-<p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="dsh-agent-teams turns one DeepSeek Harness session into a coordinated multi-agent team">
-</p>
+An explicitly activated, continuous GitHub / Azure DevOps delivery orchestrator. Each ticket gets a Git worktree registered as a **native DSH workspace**, with its dedicated ordinary root session underneath. Workers use the **original installed AgentTeams** with advance approval. Delivery proceeds through implementation, tests, independent agent review (OCR optional), repair, PR checks, merge and closure.
 
-<div align="center">
+**Backlog recovery:** Above four parked tickets (configurable), or after three consecutive scheduler failures, new intake is held and one dedicated non-ticket recovery workspace/session is created or reused. It investigates shared CI, review, plugin and environment causes, repairs safely or coordinates an existing owner, and releases only affected assignments with fresh proof. The monitor links to it and shows its timings. Human existing-only mode stays closed. See [review and recovery policy](docs/independent-review-policy.md).
 
-[![AtomGit](https://atomgit.com/NanmiCoder/dsh-agent-teams/star/new_badge.svg)](https://atomgit.com/NanmiCoder/dsh-agent-teams)
+Forked from [NanmiCoder/dsh-agent-teams](https://github.com/NanmiCoder/dsh-agent-teams), retaining its history and MIT attribution. Original source remains for provenance and read-only helpers; its plugin entry is not mounted by this package. See [upstream README](README.upstream.md).
 
-</div>
+## Install
 
-<p align="center">
-  <a href="https://dshfind.com/en/plugins/NanmiCoder/dsh-agent-teams?ref=badge"><img src="https://img.shields.io/badge/recommended%20by-dshfind-FFD700?style=flat-square" alt="Recommended by dshfind"></a>
-  <a href="https://dshfind.com/en/plugins/NanmiCoder/dsh-agent-teams?ref=badge"><img src="https://dshfind.com/api/badge/NanmiCoder/dsh-agent-teams?lang=en" alt="dshfind score"></a>
-  <a href="https://dshfind.com/en/plugins/NanmiCoder/dsh-agent-teams?ref=badge"><img src="https://dshfind.com/api/badge/NanmiCoder/dsh-agent-teams?metric=downloads&amp;lang=en" alt="dshfind downloads"></a>
-</p>
+Development target: **DSH 0.2.0-rc.2**, **original AgentTeams 0.1.23**, **native fresh-spawn agent review; optional OCR >=1.12.13**, Node **22.19+ or 24+**. OCR must emit the `ocr.run-manifest/v1` coverage contract; incompatible reports fail closed. This fork has not been published to npm.
 
-<p align="center">
-  <a href="https://www.npmjs.com/package/@nanmicoder/dsh-agent-teams"><img src="https://img.shields.io/npm/v/@nanmicoder/dsh-agent-teams?style=flat-square&amp;color=5B4CF0" alt="npm version"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-0B7285?style=flat-square" alt="MIT license"></a>
-  <a href="./cordis.patch.yml"><img src="https://img.shields.io/badge/DSH-Web%20%2B%20Headless-5B4CF0?style=flat-square" alt="DSH Web and Headless"></a>
-</p>
-
-## One prompt. A working team.
-
-`dsh-agent-teams` turns the current DeepSeek Harness session into a captain that can assemble durable sub-agents, split a goal into dependency-aware tasks, and coordinate work through direct messages.
-
-Ask in natural language. The plugin provides the team protocol, 14 coordination tools, persistent state, an automatic shared-task scheduler, and a live Web UI—without requiring a separate workflow engine.
-
-<p align="center">
-  <img src="./assets/readme/workspace.png" width="100%" alt="AgentTeams native workspace with members, task dependencies, and progress">
-</p>
-
-## Releases
-
-[v0.1.23](./release-notes/v0.1.23.md) fixes team identity, member model routing, quality and repair gates, and cold fork recovery, and adds owner-configured member tool policies. This plugin release uses npm `latest`; the recommended host remains Harness `0.2.0-rc.2` (its `next` channel). See the exact [support matrix](./compatibility.json).
-
-## Why AgentTeams?
-
-| Capability | What it changes |
-| --- | --- |
-| **Captain-led delegation** | The current session creates the team, assigns roles, and consolidates the final result. |
-| **Durable members** | Members are continuable DSH sub-agents that can be woken for focused follow-up turns. |
-| **Dependency-aware tasks** | Tasks move through explicit states and cannot be claimed before their dependencies finish. |
-| **Automatic reuse and safe takeover** | Idle members claim the next ready task; reassignment revokes stale attempts before new work starts, and cold recovery retries stranded open attempts. |
-| **Direct messaging** | Members send durable mailbox messages directly to teammates or the captain—no relay required. |
-| **Live activity panel** | The Web UI combines segmented progress, a collapsible roster, and an interactive task DAG; running tasks show the member's model, and completed archives retain their full member and task history. |
-| **Plan before execution** | Normal `/agent-teams` runs stage an unspawned roster and DAG first. The Web panel uses the host model catalog for member routes. Returning to chat stops the planning turn, asks what should change, and revises the same draft; discarding archives the draft, aborts the turn, and explicitly prevents automatic recreation. Only **Approve & Run** enables scheduling; each member starts with its first ready task. |
-| **Quality gates** | Opt-in quality tasks support requirements → implementation → verification → review → integration contracts, automatic repair/re-review, and explicit resume. Scope control is a completion-time audit, not host write interception. See [docs/quality-gates.md](./docs/quality-gates.md). |
-
-The conversation card and activity panel use Harness's official locale service. They follow live language changes between English and Simplified Chinese—including status labels, dynamic summaries, controls, archive markers, and accessibility text—without a page reload or a separate plugin setting.
-
-## Install and choose versions
-
-**Recommended pair: DeepSeek Harness `0.2.0-rc.2` + AgentTeams `0.1.23`. The host remains an RC.**
-
-| Use case | DeepSeek Harness | AgentTeams plugin |
-| --- | --- | --- |
-| **Recommended** | **`0.2.0-rc.2`** | **`0.1.23`** |
-| Previous recommended RC | `0.1.7-rc.2` | `0.1.23` |
-| Legacy RC | `0.1.5-rc.1`, `0.1.5-rc.2`, `0.1.5-rc.3` | `0.1.23` |
-| Retaining an older RC | `0.1.2-rc.1` | `0.1.23` |
-| Developer Alpha testing | `0.1.2-alpha.5` | `0.1.23` |
-| Retaining an older Alpha | `0.1.2-alpha.2` | `0.1.23` |
-
-### Desktop app
-
-In the app sidebar, open **Plugins → Add plugin** and enter the npm package spec:
-
-```text
-@nanmicoder/dsh-agent-teams@0.1.23
-```
-
-Install it, then choose **Enable now**. If the host asks for a restart, restart the desktop app. Use the package spec above for the published build; an npm or GitHub webpage URL is not the same install source. For Git installation, use a commit containing the verified build outputs described below.
-
-The desktop app supplies its own Harness core and package manager. Upgrading the global CLI does not upgrade that core, and an ordinary standalone CLI cannot manage its desktop profile. The CLI carrier installed by the desktop app can manage that profile in `0.2.0-rc.2`. Check the embedded core against the compatibility list. Harness `0.2.0-rc.2` is now the exact published target; its RC status is unchanged. The earlier source-only `0.2.0` prediction is no longer a support declaration. See the [release migration evidence](./docs/harness-0.2.0-rc.2/README.md).
-
-### CLI / Web: 1. Install DeepSeek Harness
-
-```sh
-npm install --global @deepseek-ai/dsh@0.2.0-rc.2
-dsh --version
-```
-
-Skip this if you already run this version. Alpha is opt-in: select an exact Alpha version from the table and lock all host dependencies as described in the [maintenance guide](./docs/maintenance-workflow.md).
-
-### CLI / Web: 2. Install the AgentTeams plugin
-
-Install or upgrade from npm (pinned to this `latest` release):
-
-```sh
-dsh plugin --profile web add --save-exact @nanmicoder/dsh-agent-teams@0.1.23
-```
-
-For a CLI-managed installation, replace `web` with your active CLI profile. **Stop and restart that profile's Harness process, then refresh the browser.** Installing the plugin does not upgrade Harness; the host and plugin have independent `latest` channels.
-
-For Git installation, use a Git package spec pinned to a commit containing the verified server, client, and type build outputs in `lib/`, rather than an npm webpage URL. The repository distributes these outputs so installation does not need a `prepare` hook or build-script approval. Source maintainers must run `pnpm build` and update the committed outputs whenever the source changes. Existing npm releases remain immutable.
-
-For a manually cloned checkout, run `pnpm install --frozen-lockfile` and `pnpm build` after pulling, then restart the corresponding Harness process. Updating Git alone does not update local build output. See the [maintenance guide](./docs/maintenance-workflow.md).
-
-> For older `0.1.0-*` / `0.1.1-*` or unlisted hosts, keep a working pair and follow the [older-version and diagnostic guide](./docs/maintenance-workflow.md).
-
-See the full [compatibility matrix](./compatibility.json), [source installation and Alpha testing guide](./docs/maintenance-workflow.md), and [verification coverage and platform limits](./docs/maintenance-2026-09-06/release/README.md).
-
-Then ask for a team directly:
-
-> Use AgentTeams to review the commits after v0.5.3 from performance, security, and product perspectives. Return one consolidated report.
-
-## View teams in the workspace
-
-Click **View team** in the current chat header or the team card below a reply to open the native **Team collaboration** tab. The entry belongs to its chat, rather than the general workspace start page.
-
-Team and task content starts immediately: wide panes use columns and narrow panes stack them. Select a task to locate its owner; member icons open their conversations. Closing the tab does not stop the team, and its chat can reopen it. Completed teams retain their archives. Older hosts keep the activity panel.
-
-## How it works
-
-1. For a request to use AgentTeams, the captain follows the core protocol already in its system instructions. It continues an existing team and uses `agent_teams_status` when current state needs checking. When no team exists, the goal becomes a staged plan for review.
-2. The captain adds role-specific members backed by continuable sub-agents.
-3. The goal becomes tasks with owners and explicit dependencies.
-4. The shared scheduler uses real `running / idle / ready` state to atomically claim one ready task per idle member and wake it. An interrupted resident attempt stays parked and can resume through a direct message without losing its capability; after a cold process restart, the scheduler retries stranded open work with a fresh attempt.
-5. Members update with the current `attempt_id`; reassignment or captain takeover revokes the old attempt and waits for the old worker to quiesce before a new attempt starts.
-6. The captain presents the combined result, then archives the complete team record.
-
-Team state is stored under `<workspace>/.agent-teams/`; the Web panel reads that disk truth and combines it with live sub-agent activity.
-
-Member creation is zero-interaction by default: a member on the captain's current LLM route snapshots that provider, model, and reasoning effort, while a member on a requested alternative route snapshots the target model's default effort; later continuations restore the resolved snapshot. Only an explicit heterogeneous-team request (for example, “backend on provider A/model X, frontend on provider B/model Y”) supplies a member-specific `provider` + `model`; there is no per-member model or reasoning prompt.
-
-Captain sessions keep the concise core protocol and the original 14 native team tools from their first request. All business tools are directly available; no loading tool or extra activation call is needed. Configured profiles retain their bounded directory in the fixed system prompt. Creating, approving, continuing or ending a team does not rewrite the system prompt or tool schemas. Core rules remain available after history compaction or discarded code-mode tool results. Members receive four team tools, fixed member instructions, and their ordinary coding/research tools. Web approval wakes the captain with a control message; later member reports wake it again. See the [fixed protocol and benchmark contract](./docs/progressive-loading.md).
-
-## Slash command
-
-No “use AgentTeams” phrasing required. The plugin registers the
-closed-namespace `/agent-teams` host command, so the Web GUI slash menu shows
-an `agent-teams` placeholder with an input hint: pick it (or type the
-command), describe the goal, and press Enter.
-
-```
-/agent-teams research the pricing pages of three competitors
-```
-
-The command pipeline claims the line, then preserves that exact input as an
-ordinary user follow-up so it remains visible in the main chat. The gesture
-boundary adds the deterministic activation directive at pre-step, so the
-first model request follows the staged planning protocol without a mandatory helper call. The invocation is also durably
-logged (`command/run` / `command/done`).
-
-Surfaces without command adjudication (for example the headless CLI) get the
-same deterministic activation through a gesture boundary: any genuine user
-message starting with `/agent-teams` activates the protocol for the rest of
-the text. Mid-sentence mentions stay ordinary prose.
-
-Historical panels require saved team state or archives. Sessions from early versions that deleted teams without retaining archives do not yet support reconstructing the full panel from logs.
-
-## Configuration
-
-Defaults work without extra setup. A trusted profile can override member behavior:
-
-```yaml
-- id: agent-teams
-  config:
-    stateDir: .agent-teams
-    memberProvider: spawn
-    memberModel: deepseek-v4
-    memberMaxDepth: 0
-    maxMembers: 8
-    toolPolicies:
-      researcher:
-        allow: [read, glob, grep]
-      implementer:
-        deny: [web_search]
-```
-
-`memberMaxDepth` defaults to `0`: team members cannot create nested subagents. Set `1` to explicitly permit one descendant level; the limit also covers runtime/code-tool calls. Default members report through team messages only, avoiding duplicate native parent reports. Idle roster members make no model requests. Task assignments start distinct turns; coordination joins the nearest model step. Acceptance and consumption are tracked separately. Removal/archive drains the selected branch and its pending input before reporting success.
-
-`toolPolicies` is owner configuration: reusable per-member tool policies keyed by id. A member *selects* one by id — `tool_policy` on `agent_teams_add_member`, a member row of an inline `plan`, or a profile member row. The Captain model can select a declared policy but can never submit raw allow/deny lists or invent one at runtime.
-
-- `deny` hides the named global tools from that member's schemas and rejects their invocation.
-- `allow` keeps only the named global tools. The four coordination tools (`agent_teams_claim_task`, `agent_teams_update_task`, `agent_teams_send_message`, `agent_teams_status`) are always added to an allow list.
-- The captain-only tool list is always denied and cannot be reopened by a policy; a policy may not deny a required coordination tool.
-- Unknown ids, empty policies, and empty lists fail at mount or before a member is persisted.
-- `agent_teams_status` shows the selected policy id per member; the complete resolved filter is kept in `team.json` for audit, and the child's durable descriptor reapplies it after a restart.
-- Teams and members created without a policy keep their previous tool set and record shape. An empty `tool_policy` on `agent_teams_edit_plan` clears a staged member's policy.
-
-This is model tool visibility and invocation policy for global tools, not an OS sandbox or an authorization boundary.
-
-`memberProvider` is the sub-agent runtime backend (`spawn` / `fork`), not an LLM provider. Cross-LLM-provider routing uses the optional `provider` + `model` fields of `agent_teams_add_member`; `memberModel` is only a model default for all members. A member on the captain's current provider/model inherits the captain's reasoning effort, while a changed provider or model automatically uses the target model's default. To request a particular effort, pass the optional `reasoning_effort` field — one of the target model's supported effort ids, or `"default"` to force the model's own default.
-
-`slashCommand: false` disables the deterministic `/agent-teams` activation surfaces (slash command and gesture boundary), leaving the natural-language trigger as the only entry point.
-
-## Boundaries
-
-- One captain leads one active team at a time.
-- Idle members with no open task are automatically reused for ready work. An idle member that still owns an open attempt is parked until messaged or explicitly reassigned; messages that cannot be delivered live remain durable and are retried at a later status boundary.
-- State is file-backed and serialized within one DSH process; concurrent processes editing the same team are not coordinated.
-- The activity panel reports persisted state as-is. Models may occasionally finish work without performing the expected task-state update.
-
-See [docs/usage.md](./docs/usage.md) for the full tool reference, state model, Web UI behavior, configuration, and known limits.
-
-## Plugin development Skill
-
-Community upgrade, audit, benchmark, testing and release skills are vendored with a pinned source revision. See [skills/README.md](./skills/README.md) for local rules and [CONTRIBUTING.md](./CONTRIBUTING.md) for the contribution workflow.
-
-The repository also ships the open Agent Skills package [`dsh-plugin-development`](./skills/dsh-plugin-development/SKILL.md):
-
-```sh
-npx skills add NanmiCoder/dsh-agent-teams --skill dsh-plugin-development
-```
-
-## Documentation
-
-| Guide | Covers |
-| --- | --- |
-| [Usage](./docs/usage.md) | Architecture, UI behavior, tools, configuration, limits, and validation |
-| [Verification](./docs/verification-guide.md) | Offline, composition, real e2e, and GUI verification |
-| [Plugin development](./docs/developing-dsh-plugins.md) | Human-readable guide built from this plugin |
-| [README writing](./docs/readme-writing-guide.md) | Repository documentation conventions |
-
-## Development
-
-```sh
-pnpm install
+```powershell
+git clone https://github.com/Ihab-Zhaika/dsh-delivery-captain.git
+cd dsh-delivery-captain
+git switch feat/delivery-captain
+pnpm install --frozen-lockfile
 pnpm build
 pnpm verify
+
+# Use the dsh executable belonging to the Web profile you actually run.
+dsh plugin --profile web add --save-exact @nanmicoder/dsh-agent-teams@0.1.23
+dsh plugin --profile web add C:/absolute/path/to/dsh-delivery-captain
 ```
 
-## Named multi-role profiles
+Restart that DSH profile and refresh the browser. This fork mounts only the distinct `darkingdoom` row and `darkingdoom_*` tools; it never replaces the original `agent-teams` row.
 
-Configure one or more complete team profiles in `cordis.patch.yml`. A profile always supplies the roster (independent provider/model/role/reasoning effort). Set `taskPlanning: captain` when the Captain should derive the DAG from the user's goal; omit it or set `taskPlanning: seed` to keep a fixed template workflow:
+Configure integrations in the same profile:
 
-```yaml
-profiles:
-  demo-delivery:
-    description: Ship a small feature
-    protocol: Discuss requirements, review, test, then prepare release; do not deploy automatically.
-    members:
-      - name: analyst
-        model: gpt-5.6-sol
-        role: Analyze requirements
-      - name: implementer
-        model: gpt-5.6-terra
-        role: Implement the approved solution
-    tasks:
-      - id: requirements
-        subject: Requirements discussion
-        assignee: analyst
-      - id: implementation
-        subject: Implement solution
-        assignee: implementer
-        dependencies: [requirements]
+```powershell
+dsh plugin --profile web add @vectorize-io/hindsight-coding-agents
+dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
 ```
 
-Use an explicit profile flag: `/agent-teams --profile demo-delivery implement the feature`. The first ordinary token is never treated as an implicit profile. Normal command runs call `agent_teams_create({ profile, approval: "required" })`: the roster and seed/Captain-designed DAG remain staged, no child session is created, and no task is claimed. Edit the plan in the activity panel using the host model catalog, return to chat so the Captain asks what to revise and then atomically updates the same draft, discard it, or click **Approve & Run**. Return/discard actions cancel any planning turn still running; discard also parks model-facing context that forbids silently creating a replacement team. Approval resolves the final provider/model/reasoning choices, commits the roster, and creates each member session only when its first task is ready. A running team is stopped from its own panel header through a confirmation dialog rather than from the composer. Direct tool clients may pass `approval: "automatic"` for the legacy immediate path. Failed review/test tasks do not unlock downstream work; automatic repair/review tasks do not depend on the failed review.
+Hindsight uses your configured memory endpoint and shares repository memory across linked worktrees. BrowserSkill also needs its `bsk` CLI and Chrome/Edge extension. Both integrations are optional and can be required in run configuration once connected.
+
+Configure GitHub CLI authentication, or Azure CLI plus its `azure-devops` extension and authentication, outside the run. Install OCR and configure its model credentials. Repository policies must permit the intended automated merges; required reviews and checks are never bypassed.
+
+## Start once
+
+Open an ordinary DSH session in your repository and choose **DarKingDoom Plugin** from the right sidebar's **Start** menu or the chat header. It opens as a native sidebar tab beside the chat, with **Configuration** and **Monitor** views. You can type in chat while the tab stays visible. Draft settings survive switching tabs, collapsing the sidebar and visiting another session; closing the tab discards unsaved settings but does not stop a running controller.
+
+The panel reads the session's repository on the host and automatically fills its matching remote, provider identity, remote default branch, delivery milestones and verification commands. Repository identity fields are read-only; a submitted configuration cannot redirect this session to another repository. GitHub/Azure switching discovers the matching remote and exact provider milestone names or iteration paths.
+
+Runs belong to the session that explicitly starts them. Different repositories can have independent coordinators, intake limits and controls; one repository's long review cannot stall another coordinator. A worker, its native team descendants, or another chat opened in its task worktree shows a read-only **Initiated by coordination session** link, its own ticket history, total elapsed time and phase breakdown. Run controls stay in the coordinating chat. Another ordinary chat in the main repository stays inactive. Repository leases prevent competing coordinators from claiming the same repository concurrently.
+
+**Start also enables DSH's native same-session goal loop in the main coordinator.** It leads the plugin and original diagnostic subagents while delivery proceeds. The panel shows actual activation and admitted rounds against the native goal cap (deployment default 256). Pause pauses that goal; Resume rearms it; Stop and finished bounded trials complete the run-scoped goal. Another unfinished goal in the same chat is never overwritten. An existing run can use **Start coordinator loop** or `/darkingdoom loop` without creating another run or worker.
+
+When only waiting remains, the coordinator calls `darkingdoom_wait`: native continuation is disarmed quietly while queue discovery and workers continue. New delivery notices/questions/dispatch events rearm only this owned waiting goal. Ordinary/native team messages still reach the main chat. No repeated timer prompts to waiting or parked workers are introduced. Native round exhaustion, blocked goals and abnormal provider/cancellation stops remain visible and require explicit resumption; they are never silently reset. Host shutdown disarms the goal; use Resume to rearm a restored run.
+
+Milestone order comes from `.darkingdoom.json` or `docs/delivery/{github,azure-devops}/plan.json` when available. Otherwise the provider catalog supplies numeric name order, shown in the panel for adjustment. Azure iteration names must resolve uniquely to full paths. Verification uses `.darkingdoom.json` settings first, then the complete `scripts/ci-local.ps1` gate, then solution/package scripts. Discovery only reads metadata; it never executes repository scripts. Missing defaults and authentication failures are visible and require valid configuration before Start.
+
+Adjust parallel tickets, team size, execution limits, optional source filters, milestone scope and verification commands as needed. To declare defaults in another repository, commit `.darkingdoom.json` containing `milestones` (ordered exact names) and `verifyCommands` (host commands, one per array entry).
+
+Saved team sizes apply to future assignments. An explicit human task resumption can also raise that existing task's member cap up to the saved run limit; its verification, acceptance and repair limits stay bound to the original assignment. Explicit human task Resume, or run Resume of selected cancelled tasks, starts a fresh bounded execution window with that assignment's original duration. Previous elapsed time, phase history and failures remain visible; automatic model resumption cannot renew the budget.
+
+For a human Resume or Retry, a short reason such as **solved** is sufficient. It authorizes one normal retry of the blocked step, superseding the prior waiting decision for that retry. The worker uses its existing team, checks actual results and reports a concrete blocker if it still fails; it does not ask for proof before attempting the retry. Retry never declares a verification or merge gate passed, weakens security protections or fabricates device evidence. Idle blocked/waiting workers can be retried without waiting for parking.
+
+An existing prepared worker receives its retry directly through native session transport, independently of tracker discovery. Its registered worktree, branch and base are validated locally without another ticket claim or remote fetch. Capacity, Stop/Pause and original budget limits remain enforced. Initial claims, new worktrees, uncertain reviewed-PR reconciliation and final delivery still require their remote checks; a discovery outage prevents new admissions.
+
+For a bounded trial, set **Ticket limit** to **1** under **Execution limits & verification**, and **Parallel tickets** to **1**. The limit counts admitted attempts, including blocked setup; it is retained through recovery and Resume. The run stops after its admitted tickets reach a terminal state (merged tickets must also be closed). **0** keeps consuming eligible tickets continuously. Parallelism alone does not limit the total tickets a run can consume.
+
+**Start DarKingDoom Plugin** grants advance authority for full filesystem/shell/network access, original AgentTeams automatic approval, pushes, PR creation, gated merges, follow-ups and closure. Installing the plugin, opening its panel or reading ticket content never activates an ordinary session. There is no model-callable activation tool.
+
+Human command alternative: `/darkingdoom start` discovers the current repository defaults. Optional JSON changes run preferences: `/darkingdoom start {"parallelism":1,"maxTickets":1}` for a one-ticket trial. Controls: `/darkingdoom status`, `pause`, `resume`, `drain`, `stop`.
+
+```json
+{
+  "provider": "github",
+  "milestones": ["Foundation", "Core", "Release"],
+  "includeUnmilestoned": true,
+  "includeRequiredPredecessors": true,
+  "ocrMaxTokensBudget": 1000000,
+  "parallelism": 2,
+  "maxTeamMembers": 3,
+  "pollSeconds": 30,
+  "maxRepairRounds": 3,
+  "maxTaskMinutes": 120,
+  "verifyCommands": ["pnpm typecheck", "pnpm test"],
+  "workerPreset": "standard",
+  "requireMemory": true,
+  "requireBrowser": false
+}
+```
+
+## Scheduling and autonomy
+
+Continuously fill available slots with dependency-ready tickets across selected milestones, enabled tickets without a milestone, and enabled required predecessor work. New repository runs enable `includeUnmilestoned` and `includeRequiredPredecessors`; existing saved runs retain their previous scope until you apply the coordinator policy controls. A run may select no milestones when unmilestoned intake is enabled. Azure project-root iteration work counts as unassigned unless that iteration was explicitly selected. Milestone order is priority, not a completion barrier: prefer earlier milestones, then ticket priority and age. Independent M1 work can run while M0 work is running, blocked or parked. Code predecessors need confirmed merged delivery and closure. GitHub decision tickets explicitly labelled `kind:decision` may instead satisfy dependencies when closed with reason `completed`; this never claims a code merge. Related links are not dependencies. Explicit `Depends on`, `Blocked by`, `Predecessors`, and introductory `Follow-up to/from/on` issue references are dependencies alongside native tracker links; fenced examples and independent/historical discussion are excluded. The provider freshly verifies the child and transitive predecessors before claim, review, PR creation and merge, outside query/milestone filters. Known dependency-held workers also require this targeted proof before guidance, answers or Resume can wake them; ordinary assigned retries remain independent of global discovery. Cycles, missing references, unsatisfied predecessors, foreign claims and unavailable dependency APIs remain visible blockers. Enabled required unfinished predecessors may run outside root milestone/query filters and inherit the earliest relevant milestone and strongest requesting ticket priority, while retaining their own earlier selected milestone priority. The graph names requesting tickets with “Required by #…”. Root query exclusions are separate from hard provider/ownership exclusions. Explicit trial ticket allowlists and lifetime admission caps remain hard limits. Query filters do not erase unfinished tickets from milestone accounting; avoid permanently excluding required work from the current milestone.
+
+GitHub uses native blocked-by relationships supplemented by explicit `Depends on #123`, `Blocked by`, or `Predecessors` text, including bold delivery-template headings. Azure `AB#123` and foreign repository references are not interpreted as local GitHub IDs. Closed code delivery uses closing PR references, not arbitrary mentions. An explicit prerequisite referencing a pull request is represented as a non-executable dependency: it is satisfied only after the native PR record confirms closure, merge commit and the configured repository/target branch. PRs are never claimed or given worker worktrees. Azure uses predecessor relations and linked completed target-branch PRs. Cross-repository prerequisites are inspected but never executed outside the configured repository. Failed/cancelled work is never silently redispatched as a new ticket.
+
+For a selected-ticket trial, command JSON may supply `ticketIds:["448","371"]` with `maxTickets:2` and `parallelism:2`. Other tickets remain in milestone and dependency accounting but cannot be admitted. `verifyCommandsByTicket` can supply nonempty command arrays for individual ticket IDs, while `verifyCommands` remains the default for every other task. This supports a documentation-only gate alongside a full application CI gate without applying the documentation override to application changes.
+
+`ocrMaxTokensBudget` defaults to **1,000,000 tokens per independent OCR review session/invocation**. Every worker/member review and controller review gets its own ceiling; there is no shared pool across workers or the delivery run. The actual CLI receives `--max-tokens-budget`; this is an aggregate review ceiling, not a single-request context size. Coordinator policy controls can update it while running or paused and audit that field in existing assignments without changing their other gates. Current policy accompanies each legitimate worker message; paused policy notices wait for Resume and cannot arrive after a newer policy. Complete coverage at the exact current commit remains required.
+
+Each ordinary root worker leads an original AgentTeams team with `approval="automatic"`. Full-access policy is written through DSH's permission service and inherited by original descendants. Workers ask durable questions; the captain answers and wakes them. Recovery is bounded. Irresolvable work stays blocked while other eligible work continues across the selected milestones.
+
+A waiting worker whose root and owned members are confirmed idle enters a blocker hold without a timer-only wake. The blocker clock begins at that observation; active members and unknown activity retain capacity. Unrelated tasks continue if a worker activity query fails.
+
+Owned-session maintenance also has an independent timer lane, so an in-flight catalog scan cannot delay those local checks or queued recoveries. Concurrent intake and maintenance share one recovery operation per task. Stop and shutdown cancel both lanes' provider commands before waiting for them to finish.
+
+Activity includes running or stopping native background jobs owned by the worker and its durable descendants, even when their agent turns are idle. Unowned or other sessions' jobs do not reserve this run's capacity. Unreadable ownership/job evidence keeps the slot reserved. A confirmed active job corrects an automatic idle hold without replaying the worker assignment; explicit blockers remain intact.
+
+The coordinator can queue an idle blocked or parked task with `darkingdoom_resume_task` after completed original diagnostics establish a changed prerequisite or concrete solution. This works while all slots are occupied, and queued recovery takes priority over new intake. Repeating the same pending request does not replay it or reset its execution budget. A no-wake wait records a hold rather than scheduling recovery.
+
+Original AgentTeams captains may use atomic `agent_teams_edit_plan` batches containing only `update_task` for their own active team's pending tasks with no prior attempt. This supports correcting dependencies or descriptions before work starts. Staged approval, roster/removal edits, mixed batches, and edits to started or finished attempts remain unavailable through this route. The original plugin performs its own locked validation and scheduling; all delivery gates remain mandatory.
+
+A worker report with `phase: "blocked"` records a blocker even when the optional `blocked` flag is omitted. Repeated blocked reports retain the contiguous one-hour parking clock and do not trigger idle retries. Older inconsistent running/blocked-phase records are normalized only after native activity is confirmed idle; a new idle waiting observation starts a fresh clock.
+
+If an answered question is waiting for original diagnostic evidence, the panel shows that delivery deferral on the question. The answer remains queued without waking the worker, and unrelated eligible tickets can proceed. Diagnostic validation is still required; persistence and worker-transport failures are not silently ignored.
+
+After **more than one hour of contiguous unresolved blocking**, the controller **parks** the task. Repeated blocked reports do not reset that clock. Parking quiesces execution and preserves the worktree, original team graph and immutable review history. It frees capacity only after quiescence succeeds; failures remain visible and reserve the slot. Other eligible tickets across selected milestones can proceed within the existing admission cap. Parked predecessors still block their dependents. Wall time includes parked waiting, shown separately in the timeline; parked intervals do not consume the task execution budget.
+
+Run-level Pause/Resume and cold recovery never automatically unpark tasks. Select a parked task in the coordinator panel, describe the changed prerequisite or explicit human resumption, and choose **Resume this parked task**. A coordinator with genuine completed original diagnostic reports can use `darkingdoom_resume_task` for a concrete new solution. Ordinary guidance and answers cannot wake parked workers. The scheduler reuses the same session/worktree when capacity is available. Eligibility displays prerequisite arrows and selectable ticket nodes with explicit delivered, decision-complete, parked, excluded, dependency and milestone reasons.
+
+The full assignment is delivered once, with formatted JSON metadata and the ticket's actual multiline Markdown. Recovery sends a short checkpoint instead of replaying the ticket. Waiting for members or a pending answer does not restart the parent. Blocked reports retain the current team; unchanged blockers are not retried by a timer. Accepted notices, answers and identical guidance are deduplicated through persisted state and native prompt identities. One unexplained-idle checkpoint is allowed before the main session receives a diagnostic blocker. Owned idle recovery runs ahead of slow full-catalog discovery, with fresh targeted dependency proof and current native activity checks; pending inbox work counts as active. A refused or cancelled startup does not spend that checkpoint.
+
+The activated main session must use original AgentTeams for read-only technical diagnosis. Guiding a blocked worker requires genuine main-session creation receipts and completed delegated reports. `darkingdoom_answer` and `darkingdoom_message` require `action:"resume"` for a concrete actionable change, or `action:"wait"` for an unchanged hold. A wait decision for a parked worker is recorded without waking it; it also consumes any pending resume. `darkingdoom_status` includes the loaded runtime hash/build stamp and read-only live/archived team evidence. Archived history does not prove who initiated an old archive.
+
+The sidebar shows a workspace such as **TrucX · #371** for each task worktree and a ticket-labelled root session within it. New sessions created with that workspace's **+** action stay in the same worktree for scoped continuation. A separately admitted follow-up ticket receives its own worktree/workspace. Recovery adopts the original session and workspace identities; completed task histories remain grouped. Removed historical worktrees produce a task-level grouping warning instead of preventing plugin startup. Registering or opening a workspace never starts a new delivery run.
+
+Independent follow-ups are linked to their source, assigned a configured milestone and enter the same eligibility rules. They cannot legitimately replace current acceptance requirements. AgentTeams and the worker contract enforce scope; full-access agents are not OS-isolated from one another.
+
+## Review and merge
+
+The controller drains the worker team, requires original-team delivery evidence, checks a clean committed worktree, fetches the target, executes verification commands and runs OCR against immutable base/head commits. Creation evidence comes from successful native tool call/result or PTC dispatch receipts in that worker's own session, bound to its task marker, automatic approval and durable team identity; inherited calls and quoted text cannot satisfy it. Completed delegated work remains mandatory. OCR must cover every changed path with no failed/waived coverage. Critical, high and medium findings require repair; low findings remain recorded. Incomplete or unsupported reports never pass.
+
+Passing review is reused while waiting for CI only if worktree, head and target remain unchanged. Remote checks and merge policies must pass. Accepted merge requests are reconciled until exact-head merged delivery is confirmed. Closure follows; closure failures are retried without reimplementation. GitHub currently uses normal merge commits; repositories disabling that method remain blocked.
+
+Review records distinguish unavailable original team evidence, verification infrastructure failures and actual OCR findings. Failed gates carry their concrete error into bounded repair; incomplete coverage, timeouts and missing receipts never pass. Earlier failures remain labelled **Historical failure**, alongside the latest recorded result. A commit unavailable at an early evidence failure stays unavailable; it is not filled in retroactively. Previously merged exact reviewed PRs are reconciled even for parked tasks.
+
+## Controls and recovery
+
+- **Pause:** hold new intake; existing work continues.
+- **Resume:** continue a paused/draining/stopped saved run; cancelled workers requeue automatically within capacity using their existing sessions and worktrees. Merged tasks never restart.
+- **Drain:** finish runnable work, then stop; blocked work is preserved.
+- **Stop:** revoke admission, quiesce workers, archive their original teams, cancel command trees and drain selected continuable children, preserving files/state and the root session's ability to launch a recovery team on Resume.
+
+The DSH host must stay running. Closing the dashboard does not stop automation. Cold restart restores explicitly enabled runs and rechecks prerequisites. A single-host repository lease prevents duplicate captain ownership. State: `$DSH_HOME/darkingdoom` (default `~/.dsh/darkingdoom`). Worktrees: beside the checkout under `.delivery-worktrees/`. Worktrees are retained for inspection, never automatically deleted. AgentTeams state is ignored through Git `info/exclude`.
+
+Normal host shutdown quiesces execution and preserves original team graphs for recovery. Explicit Stop and controller review still use the original archive operation. Waiting or reporting a blocker does not archive a team.
+
+## Statistics
+
+Task details show session, ticket, milestone, PR, status, total delivery elapsed time, review rounds, blockers, questions and phase timeline. Testing and OCR are controller-timed; implementation phases are worker-reported. Phase intervals partition elapsed time, including waits. Summed task time can exceed run time because tasks overlap. Active agent effort and token/cost telemetry are explicitly unmeasured. Historical review reports can be downloaded.
+
+## Development and verification
+
+```powershell
+pnpm typecheck
+pnpm build
+pnpm verify
+pnpm pack --pack-destination artifacts
+```
+
+Tests cover scheduling, durable claims, stop/restart races, provider contracts, exact-head gates, real temporary Git worktrees, OCR parsing, process cancellation, permissions, approvals and UI rendering. See [validation evidence](docs/darkingdoom-validation.md). Live authenticated provider delivery with a model remains a separate integration trial; local tests are not evidence of production delivery.
+
+Built artifacts support local/Git installation. Keep `lib/` and its source stamp synchronized. `verify:upstream` retains original branding/version-specific checks; it is not the fork's release gate.
+
+## Runtime protocol and KV cache
+
+The captain prompt section is empty in ordinary sessions. Activated captains receive stable instructions, with changing queue state delivered through tools and durable messages. Workers get scoped assignments in independent root sessions. Tool names remain stable; phases and queues do not rewrite the global prompt. Original AgentTeams owns its descendant contexts.
 
 ## License
 
-[MIT](./LICENSE)
+MIT; original attribution retained. New orchestration is maintained in this fork.
+
+## Edit a stopped run
+
+After Stop finishes, open **Configuration**, edit operational settings and choose **Save configuration**. Save keeps the run stopped; use **Monitor → Resume** separately when ready. Existing task sessions, worktrees, review history and original assignment gates remain intact. Team size, preset, verification and execution/repair limits are captured at assignment and do not retroactively weaken old tickets. Revised settings apply to future admissions; the global parallel limit applies to the resumed scheduler.
+
+**Ticket IDs** is now visible. A trial may have both an admission cap and a ticket allowlist: set Ticket limit to 0 and clear Ticket IDs for continuous eligible intake. This does not bypass milestones or dependencies, reset past admission counts, or automatically unpark tasks. Cancelled tasks outside an updated explicit ticket/milestone selection remain cancelled. Source/repository/remote/target identity is fixed for the run; use another coordinator chat to switch tracker or repository identity.
+
+Configuration remains locked while running, paused or draining and in worker chats. Save verifies native execution is quiescent and rejects concurrent lifecycle changes. Clean form values update from the saved configuration; dirty drafts survive polling. Save is required before resuming with unsaved form changes. Editing stopped settings does not extend the recorded stopped wall time.
+To finish the current backlog without creating more worktrees, select **Monitor → Finish existing tasks** in the coordinator panel, or run `/darkingdoom finish-existing` in that chat. This persists a per-run intake hold: existing assigned tickets can recover, review, repair and deliver, but no new tickets or follow-up issues are created. Unlike Drain, leadership continues after the current workers become idle. Pause and Stop remain respected; Resume retains the intake hold. **Allow new tickets** or `/darkingdoom allow-new-tickets` explicitly reopens intake within the saved scope and limits.
+
+The activated coordinator can invoke native `darkingdoom_control(action="finish-existing")` without browser authentication. This tool cannot activate ordinary sessions, reopen intake, or resume a paused/stopped run. `darkingdoom_status` includes owned activity evidence for roots, descendants, inboxes and native background jobs plus coordination holds. Unknown activity is not proof of idleness. Interrupted OCR remains incomplete; supported execution settlement can authorize a fresh complete review without demanding that a lost report reappear.

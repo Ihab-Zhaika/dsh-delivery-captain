@@ -298,6 +298,7 @@ export interface ReviewBinding {
     gaps?: readonly ArtifactScopeGap[];
     scope?: readonly string[];
     duringDrift?: readonly string[];
+    excludedPaths?: readonly string[];
 }
 export declare function bindReviewToRevision(team: TeamState, task: TeamTask, binding: ReviewBinding): TeamTask;
 /**
@@ -307,6 +308,18 @@ export declare function bindReviewToRevision(team: TeamState, task: TeamTask, bi
 export declare function verdictScopePatterns(team: TeamState, task: TeamTask): string[];
 /** Scope patterns recorded verdicts bound, for new-file detection. */
 export declare function deliveryScopePatterns(team: TeamState): string[];
+/** Evidence paths use the filesystem's Windows case-insensitive identity. */
+export declare function verdictPathKey(path: string): string;
+/** No directories, roots, globs or forbidden paths can be output exclusions. */
+export declare function isExactReviewOutputPath(path: unknown): path is string;
+/**
+ * A review's concrete writable paths are evidence outputs only when no
+ * upstream source contract claims them. Broad legacy integration directories
+ * can incidentally contain that report; their other contents stay judged.
+ */
+export declare function verdictOutputExclusions(team: TeamState, task: TeamTask): string[];
+/** Filter exact outputs only; enumeration gaps and limits remain untouched. */
+export declare function excludeVerdictOutputs(artifacts: readonly ArtifactDigest[], paths: readonly string[]): ArtifactDigest[];
 /** Paths whose current bytes decide whether recorded verdicts and orders hold. */
 export declare function deliveryArtifactPaths(team: TeamState): string[];
 /**

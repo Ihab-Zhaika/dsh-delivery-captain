@@ -24,7 +24,7 @@
  * values from here and never touch the filesystem.
  * @module dsh-agent-teams/artifacts
  */
-import type { ArtifactDigest, ArtifactScopeGap, ArtifactSnapshot } from './types.ts';
+import type { ArtifactDigest, ArtifactScopeGap, ArtifactSnapshot, TeamState, TeamTask } from './types.ts';
 /**
  * Upper bound on files expanded from one scope. Verdicts are about a revision
  * and an unbounded walk of a large tree would make every gate close slow, so
@@ -64,3 +64,5 @@ export declare function expandScopePaths(workspace: string, patterns: readonly s
  * `gaps`.
  */
 export declare function snapshotWorkspacePaths(workspace: string, patterns: readonly string[]): ArtifactSnapshot;
+/** Freeze one newly admitted verdict attempt on every supported start path. */
+export declare function captureVerdictStart(workspace: string, team: TeamState, task: TeamTask): void;
