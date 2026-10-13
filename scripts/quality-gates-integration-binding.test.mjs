@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {mkdtemp,mkdir,writeFile,readFile,rm,realpath} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join,dirname} from 'node:path'
-import {verdictScopePatterns,bindReviewToRevision,canDeclareDelivery} from '../lib/quality-gates.js'
+import {verdictScopePatterns,bindReviewToRevision,canDeclareDelivery,verdictAuditNotes} from '../lib/quality-gates.js'
 import {snapshotWorkspacePaths,readArtifactScope} from '../lib/artifacts.js'
 import {registerAgentTeamsTools} from '../lib/tools.js'
 import {createTeamDir,readTeam} from '../lib/state.js'
@@ -29,11 +29,41 @@ test('integration review includes new integration paths and required upstream re
  assert.equal((await readFile(join(root,'reports/own-review.md'),'utf8')).startsWith('Actual'),true)
 })
 
-test('public task creation, scheduler start and verdict closure persist all integration bytes',async t=>{
+test('legacy integration directory scope binds its contents while excluding reviewer output',async t=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'integration-scope-')));t.after(async()=>{assert.equal(await realpath(root),root);assert.equal(dirname(root),await realpath(tmpdir()));await rm(root,{recursive:true,force:true})})
+ await mkdir(join(root,'lib'));await mkdir(join(root,'reports'));await writeFile(join(root,'source.txt'),'upstream source\n');await writeFile(join(root,'lib/generated.js'),'integration artifact\n');await writeFile(join(root,'reports/own.md'),'reviewer output\n')
+ const source={id:'source',kind:'implementation',status:'completed',attempt:1,changedPaths:['source.txt'],dependencies:[]},integration={id:'integration',kind:'integration',status:'completed',attempt:1,inScope:['lib/'],dependencies:['source']},review={id:'review',kind:'review',status:'in_progress',createdAt:2,reviewedTaskId:'integration',dependencies:['integration'],inScope:['reports/own.md']},team={tasks:[source,integration,review],members:[]}
+ const scope=verdictScopePatterns(team,review);assert.deepEqual(readArtifactScope(root,scope).artifacts.map(a=>a.path).sort(),['lib/generated.js','source.txt'])
+ const closed=bindReviewToRevision(team,{...review,status:'completed',verdict:'pass'},{...readArtifactScope(root,scope),scope}),done={...team,tasks:[source,integration,closed]}
+ const audit=()=>{const read=readArtifactScope(root,scope);return {...read,expandedScope:read.artifacts.map(a=>({path:a.path,present:a.present}))}}
+ assert.deepEqual(verdictAuditNotes(done,audit()),[])
+ await writeFile(join(root,'lib/new.js'),'new integration artifact\n');assert.equal(readArtifactScope(root,scope).artifacts.length,3,'A broad integration contract must retain enumeration of newly added source')
+ assert.notDeepEqual(verdictAuditNotes(done,audit()),[],'New integration files must invalidate a closed delivery verdict')
+ assert.equal(canDeclareDelivery(done,audit()).ok,false)
+ assert.equal(scope.includes('reports/own.md'),false)
+})
+
+for (const pattern of ['.', './']) test(`legacy integration root pattern ${pattern} retains post-verdict new-file detection`,async t=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'integration-root-')));t.after(async()=>{assert.equal(await realpath(root),root);assert.equal(dirname(root),await realpath(tmpdir()));await rm(root,{recursive:true,force:true})})
+ await writeFile(join(root,'source.txt'),'source\n')
+ const source={id:'source',kind:'implementation',changedPaths:['source.txt'],dependencies:[]},integration={id:'integration',kind:'integration',attempt:1,inScope:[pattern],dependencies:['source']},review={id:'review',kind:'review',createdAt:2,reviewedTaskId:'integration',dependencies:['integration'],inScope:['own-report.md']},team={tasks:[source,integration,review]}
+ const scope=verdictScopePatterns(team,review);assert.ok(scope.includes(pattern));const read=readArtifactScope(root,scope);assert.deepEqual(read.gaps,[])
+ const closed=bindReviewToRevision(team,{...review,status:'completed',verdict:'pass'},{...read,scope}),done={...team,tasks:[source,integration,closed]}
+ const audit=()=>{const r=readArtifactScope(root,scope);return {...r,expandedScope:r.artifacts.map(a=>({path:a.path,present:a.present}))}}
+ assert.deepEqual(verdictAuditNotes(done,audit()),[])
+ await writeFile(join(root,'new.txt'),'new source\n');assert.notDeepEqual(verdictAuditNotes(done,audit()),[])
+})
+
+test('an explicitly empty integration change inventory differs from a missing legacy inventory',()=>{
+ const source={id:'source',kind:'implementation',changedPaths:['source.txt'],dependencies:[]},integration={id:'integration',kind:'integration',changedPaths:[],inScope:['lib/'],dependencies:['source']},review={id:'review',kind:'review',reviewedTaskId:'integration',dependencies:['integration'],inScope:['own-report.md']}
+ assert.deepEqual(verdictScopePatterns({tasks:[source,integration,review]},review),['source.txt'])
+})
+
+for (const inventory of ['changed-paths', 'declared-scope']) test(`public task creation, scheduler start and verdict closure persist all integration bytes (${inventory})`,async t=>{
  const root=await realpath(await mkdtemp(join(tmpdir(),'public-integration-')));t.after(async()=>{assert.equal(await realpath(root),root);assert.equal(dirname(root),await realpath(tmpdir()));await rm(root,{recursive:true,force:true})});await mkdir(join(root,'src'))
  const paths=Array.from({length:20},(_,i)=>`src/item-${i}.txt`);for(const path of paths)await writeFile(join(root,path),'Real source bytes\n')
  const now=Date.now(),base={subject:'Verified artifact',status:'completed',attempt:1,dependencies:[],assignee:'captain',objective:'Source artifact',inScope:['src/'],acceptance:['Artifact exists'],verify:['fixture verification'],createdAt:now,updatedAt:now}
- const team={id:'native-binding',name:'Native binding',captainSessionId:'captain',createdAt:now,taskSeq:2,phase:'running',members:[{id:'reader',name:'reviewer',joinedAt:now,status:'idle'}],tasks:[{...base,id:'t1',kind:'implementation',changedPaths:paths.slice(0,16)},{...base,id:'t2',kind:'integration',dependencies:['t1'],changedPaths:paths.slice(16)}]}
+ const team={id:'native-binding',name:'Native binding',captainSessionId:'captain',createdAt:now,taskSeq:2,phase:'running',members:[{id:'reader',name:'reviewer',joinedAt:now,status:'idle'}],tasks:[{...base,id:'t1',kind:'implementation',changedPaths:paths.slice(0,16)},{...base,id:'t2',kind:'integration',dependencies:['t1'],inScope:paths.slice(16),...(inventory==='changed-paths'?{changedPaths:paths.slice(16)}:{})}]}
  // Only temporary fixture state is seeded. Creation/start/close use the real
  // registered tools and scheduler; the delivery seam has no paid model.
  await createTeamDir(join(root,'.agent-teams'),team)

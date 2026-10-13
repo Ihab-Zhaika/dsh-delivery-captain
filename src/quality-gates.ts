@@ -1213,9 +1213,15 @@ export function verdictScopePatterns(team: TeamState, task: TeamTask): string[] 
   for (const item of lineage) {
     const kind = taskKindOf(item)
     if (kind !== 'implementation' && kind !== 'repair' && kind !== 'integration') continue
-    for (const path of item.changedPaths ?? []) {
+    // Legacy integration completions may record only their contract scope.
+    // Upstream changed paths must not suppress that judged integration scope;
+    // the review's own writable evidence scope is deliberately not included.
+    const contractScope = item.changedPaths === undefined && kind === 'integration'
+    const paths = item.changedPaths ?? (contractScope ? item.inScope ?? [] : [])
+    for (const path of paths) {
       const normalized = normalizeWorkspacePath(path)
-      if (normalized !== undefined) changed.add(normalized)
+      // Keep directory/root contract markers for post-verdict new-file drift.
+      if (normalized !== undefined) changed.add(contractScope ? path : normalized)
     }
   }
   if (changed.size > 0) return [...changed]
