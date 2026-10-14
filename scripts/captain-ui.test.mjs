@@ -214,6 +214,12 @@ test('worker panel shows origin and own phase totals without coordinator control
   assert.doesNotMatch(html,/aria-label="Run controls"|Run configuration|Live parallelism|Delivery queue|Start DarKingDoom/)
 })
 
+test('coordinator headline counts failed tickets instead of hiding them from blocked and parked totals',async()=>withPollingPanel(async p=>{
+  const summary=p.renderer.root.findAllByType('small').find(node=>node.children.join('').includes('blocked ·'))
+  assert.ok(summary)
+  assert.equal(summary.children.join(''),'0 merged · 0 blocked · 1 failed · 0 parked')
+},true,{failFirst:false,taskPatch:{status:'failed',phase:'blocked',error:'Task time budget exhausted',finishedAt:new Date().toISOString()}}))
+
 test('only a time-budget-failed task exposes a bounded human continuation in the coordinator panel',async()=>{
   for(const [coordinator,error] of [[true,'Task time budget exhausted'],[true,'CI checks failed'],[false,'Task time budget exhausted']])await withPollingPanel(async p=>{
     if(coordinator)await act(async()=>p.renderer.root.findAllByType('button').find(button=>button.findAllByType('strong').some(s=>s.children.includes('Own ticket'))).props.onClick())

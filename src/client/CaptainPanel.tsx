@@ -382,7 +382,7 @@ export function CaptainPanel({ sessionId, workspace, onClose, openSession, initi
           {!worker && <>
           <div className={css.metrics}>
             <div><span>Wall time</span><strong>{run ? duration(elapsedMs(run.createdAt, run.status === 'stopped' ? run.stoppedAt??run.updatedAt : undefined, now)) : '—'}</strong><small>Includes waiting & pauses</small></div>
-            <div><span>Reserved task slots / parallel limit</span><strong>{reservedSlots}<em> / {run?.config.parallelism ?? config.parallelism}</em></strong><small>{merged} merged · {run?.tasks.filter(item=>item.status==='blocked').length??0} blocked · {run?.tasks.filter(item=>item.status==='parked').length??0} parked</small></div>
+            <div><span>Reserved task slots / parallel limit</span><strong>{reservedSlots}<em> / {run?.config.parallelism ?? config.parallelism}</em></strong><small>{merged} merged · {run?.tasks.filter(item=>item.status==='blocked').length??0} blocked · {run?.tasks.filter(item=>item.status==='failed').length??0} failed · {run?.tasks.filter(item=>item.status==='parked').length??0} parked</small></div>
             <div><span>Task elapsed, summed</span><strong>{run ? duration(totalTaskTime) : '—'}</strong><small>Overlaps; includes waiting</small></div>
             <div><span>Active agent effort</span><strong className={css.unmeasured}>Not measured</strong><small>No runtime effort telemetry</small></div>
           </div>
